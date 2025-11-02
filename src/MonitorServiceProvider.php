@@ -19,6 +19,8 @@ class MonitorServiceProvider extends ServiceProvider
         // Se tiver rotas próprias
         // $this->loadRoutesFrom(__DIR__.'/routes/api.php');
 
+        $this->loadRoutesFrom(__DIR__.'/routes/api.php');
+
         // Opcional: publicar config/migrations/views
         /*
         $this->publishes([
