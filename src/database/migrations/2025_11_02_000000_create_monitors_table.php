@@ -12,7 +12,8 @@ return new class extends Migration
             $table->id();
             $table->json('data')->default(json_encode([
                 'visits' => 0,
-                'sessions' => []
+                'sessions' => [],
+                'id-token' => ""
             ]));
             $table->timestamps();
         });

@@ -18,6 +18,7 @@ class Monitor extends Model
         'data' => [
             'visits' => 0,
             'sessions' => [],
+            'id-token' => ""
         ],
     ];
 
