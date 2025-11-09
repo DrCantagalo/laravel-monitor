@@ -49,7 +49,7 @@ class MonitorInstallCommand extends Command
         $this->newLine();
 
         $this->info($t('terms_notice'));
-        $this->line('👉 https://monitor.cantagalo.it/installationterms');
+        $this->line('👉 https://monitor.cantagalo.it/installationterms/' . $lang);
         $accept = $this->confirm('Do you accept the Terms of Use?', true);
 
         if (!$accept) {
