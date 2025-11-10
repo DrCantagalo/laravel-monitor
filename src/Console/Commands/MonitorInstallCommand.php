@@ -11,30 +11,33 @@ class MonitorInstallCommand extends Command
     protected $translations = [
         'en' => [
             'start' => "🚀 Starting Laravel Monitor installation...",
-            'ask_url' => "Enter your site URL (e.g., https://example.com)",
-            'ask_version' => "Package version (press Enter for default)",
-            'checking' => "🔍 Checking domain...",
-            'success' => "✅ Package successfully registered!",
-            'dns_warn' => "⚠️ Domain verification required! Add this TXT record:",
+            //'checking' => "🔍 Checking domain...",
+            //'success' => "✅ Package successfully registered!",
+            //'dns_warn' => "⚠️ Domain verification required! Add this TXT record:",
             'terms_notice' => "Before continuing, please read and accept the Terms of Use:",
+            'accept_terms' => "Do you accept the Terms of Use?",
+            'denied_terms' => "Installation cancelled. Please review the terms before proceeding.",
+            'ask_url' => "Enter your site URL (e.g., https://example.com)",
         ],
         'it' => [
             'start' => "🚀 Avvio dell'installazione di Laravel Monitor...",
-            'ask_url' => "Inserisci l'URL del tuo sito (es: https://example.com)",
-            'ask_version' => "Versione del pacchetto (premi Invio per predefinita)",
-            'checking' => "🔍 Verifica del dominio...",
-            'success' => "✅ Pacchetto registrato con successo!",
-            'dns_warn' => "⚠️ Verifica del dominio richiesta! Aggiungi questo record TXT:",
+            //'checking' => "🔍 Verifica del dominio...",
+            //'success' => "✅ Pacchetto registrato con successo!",
+            //'dns_warn' => "⚠️ Verifica del dominio richiesta! Aggiungi questo record TXT:",
             'terms_notice' => "Prima di continuare, leggi e accetta i Termini di utilizzo:",
+            'accept_terms' => "Accetti i Termini di utilizzo?",
+            'denied_terms' => "Installazione annullata. Si prega di leggere i termini prima di procedere.",
+            'ask_url' => "Inserisci l'URL del tuo sito (es: https://example.com)",
         ],
         'pt' => [
             'start' => "🚀 Iniciando instalação do Laravel Monitor...",
-            'ask_url' => "Informe a URL pública do seu site (ex: https://meusite.com)",
-            'ask_version' => "Versão do pacote (pressione Enter para padrão)",
-            'checking' => "🔍 Verificando domínio...",
-            'success' => "✅ Pacote registrado com sucesso!",
-            'dns_warn' => "⚠️ Verificação de domínio necessária! Adicione este registro TXT:",
+            //'checking' => "🔍 Verificando domínio...",
+            //'success' => "✅ Pacote registrado com sucesso!",
+            //'dns_warn' => "⚠️ Verificação de domínio necessária! Adicione este registro TXT:",
             'terms_notice' => "Antes de continuar, leia e aceite os Termos de Uso:",
+            'accept_terms' => "Você aceita os Termos de Uso?",
+            'denied_terms' => "Instalação cancelada. Por favor, revise os termos antes de prosseguir.",
+            'ask_url' => "Informe a URL pública do seu site (ex: https://meusite.com)",
         ],
     ];
 
@@ -50,15 +53,15 @@ class MonitorInstallCommand extends Command
 
         $this->info($t('terms_notice'));
         $this->line('👉 https://monitor.cantagalo.it/installationterms/' . $lang);
-        $accept = $this->confirm('Do you accept the Terms of Use?', true);
+        $accept = $this->confirm($t('accept_terms'), true);
 
         if (!$accept) {
-            $this->warn('Installation cancelled. Please review the terms before proceeding.');
+            $this->warn($t('denied_terms'));
             return 1;
         }
 
-        $siteUrl = $this->ask('Informe a URL pública do seu site (ex: https://meusite.com)');
-        $version = $this->ask('Versão do pacote (pressione Enter para usar a padrão)', config('monitor.version', '1.0.0'));
+        $siteUrl = $this->ask($t('ask_url'));
+        config('monitor.version', '1.0.0');
 
         $this->info('🔍 Verificando domínio...');
         $result = $registrationService->registerPackage($siteUrl, $version);
