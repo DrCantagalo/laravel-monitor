@@ -21,6 +21,10 @@ class MonitorServiceProvider extends ServiceProvider
 
         $this->loadRoutesFrom(__DIR__.'/routes/api.php');
 
+        if ($this->app->runningInConsole()) {
+            $this->commands([\Monitor\Console\Commands\MonitorInstallCommand::class]);
+        }
+
         // Opcional: publicar config/migrations/views
         /*
         $this->publishes([
