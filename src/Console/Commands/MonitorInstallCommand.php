@@ -22,7 +22,7 @@ class MonitorInstallCommand extends Command
             'hash_created' => "New installation configuration created.",
             'checking' => "🔍 Checking domain...",
             'error' => "❌ Error: There was a problem registering the package.",
-            'installation_code' => "Here is your installation code; you will need it to create your account at https://monitor.cantagalo.it: "
+            'installation_code' => "Installation completed successfully. Here is your installation code; you will need it to create your account at https://monitor.cantagalo.it: "
         ],
         'it' => [
             'start' => "🚀 Avvio dell'installazione di Laravel Monitor...",
@@ -34,7 +34,7 @@ class MonitorInstallCommand extends Command
             'hash_created' => "Nuova configurazione di installazione creata.",
             'checking' => "🔍 Verifica del dominio...",
             'error' => "❌ Errore: si è verificato un problema durante la registrazione del pacchetto.",
-            'installation_code' => "Ecco il tuo codice di installazione; ti servirà per creare il tuo account su https://monitor.cantagalo.it: "
+            'installation_code' => "Installazione completata con successo. Ecco il tuo codice di installazione; ti servirà per creare il tuo account su https://monitor.cantagalo.it: "
         ],
         'pt' => [
             'start' => "🚀 Iniciando instalação do Laravel Monitor...",
@@ -46,7 +46,7 @@ class MonitorInstallCommand extends Command
             'hash_created' => "Nova configuração de instalação criada.",
             'checking' => "🔍 Verificando domínio...",
             'error' => "❌ Erro: Ocorreu um problema ao registrar o pacote.",
-            'installation_code' => "Aqui está o seu código de instalação; você precisará dele para criar sua conta em https://monitor.cantagalo.it: "
+            'installation_code' => "Instalação concluída com sucesso. Aqui está o seu código de instalação; você precisará dele para criar sua conta em https://monitor.cantagalo.it: "
         ],
     ];
 
@@ -104,14 +104,18 @@ class MonitorInstallCommand extends Command
             'sanctum_token' => $localToken,
         ]);
 
-        if ($response) {
-            $this->info($response['message']);
-            if ($response['status'] == 'success') {
+        $data = $response->json();
+
+        if (isset($data['message'])) {
+            $this->info($data['message']);
+            if ($data['status'] == 'success') {
                 $config = json_decode(File::get($configFile), true);
-                $config['external_token'] = $response['api_token'];
-                $config['installation_code'] = $response['installation_code'];
+                $config['external_token'] = $data['api_token'];
+                $config['installation_code'] = $data['installation_code'];
+                $config['installed_at'] = now()->toDateTimeString();
+                $config['package_version'] = config('monitor.version', '1.0.0');
                 File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
-                $this->line($t('installation_code') . $response['installation_code']);
+                $this->line($t('installation_code') . $data['installation_code']);
             }
         }
         else {
