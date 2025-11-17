@@ -21,7 +21,7 @@ class MonitorMethod
                     if(session('monitor_id', false) && session('monitor_id') != $user->id){ 
                         Monitor::find(session('monitor_id'))?->delete();
                     }
-                    $user->newVisit(session()->getId());
+                    $user->newVisit(session()->getId(), $request->ip());
                     Session::put('monitor_id', $user->id);
                 }
                 session()->forget('remember_me');
@@ -38,7 +38,8 @@ class MonitorMethod
             } else {
                 $data = [
                     'page' => [$path => 1],
-                    'sessions' => [session()->getId()]
+                    'sessions' => [0 => session()->getId()],
+                    'ips'  => [0 => $request->ip()]
                 ];
                 $user = Monitor::create(['data' => $data]);
                 Session::put('monitor_id', $user->id);
