@@ -100,7 +100,7 @@ class MonitorInstallCommand extends Command
             'lang' => $this->lang,
             'installation_hash' => $installationHash,
             'site_url' => $siteUrl,
-            'package_version' => config('monitor.version', '1.0.0'),
+            'package_version' => config('monitor.version'),
             'sanctum_token' => $localToken,
         ]);
 
@@ -113,7 +113,6 @@ class MonitorInstallCommand extends Command
                 $config['external_token'] = $data['api_token'];
                 $config['installation_code'] = $data['installation_code'];
                 $config['installed_at'] = now()->toDateTimeString();
-                $config['package_version'] = config('monitor.version', '1.0.0');
                 File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
                 $this->line($t('installation_code') . $data['installation_code']);
             }
