@@ -11,6 +11,6 @@ return [
     'external_token'       => $data['external_token'] ?? null,
     'installation_code'       => $data['installation_code'] ?? null,
     'installed_at'       => $data['installed_at'] ?? null,
-    'version' => '0.1.0',
+    'version' => '0.1.2',
 
 ];

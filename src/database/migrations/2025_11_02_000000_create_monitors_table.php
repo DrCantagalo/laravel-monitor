@@ -10,11 +10,7 @@ return new class extends Migration
     {
         Schema::create('monitors', function (Blueprint $table) {
             $table->id();
-            $table->json('data')->default(json_encode([
-                'visits' => 0,
-                'sessions' => [],
-                'id-token' => ""
-            ]));
+            $table->json('data')->nullable();
             $table->timestamps();
         });
     }
