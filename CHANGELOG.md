@@ -35,11 +35,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [0.1.5] - 2025-12-21
-- Bug fix.
+## [0.1.5] - 2025-11-24
 - Bug fix.
 
+---
 
+## [0.1.6] - 2025-12-21
+- Bug fix.
+
+---
 
 ## Future versions
 Planned:
