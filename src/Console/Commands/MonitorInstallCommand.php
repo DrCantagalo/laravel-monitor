@@ -132,7 +132,7 @@ class MonitorInstallCommand extends Command
 
         $this->info($t('checking'));
         
-        $response = Http::post('https://cantagalo.it/api/registerinstallation', [
+        $response = Http::post('https://monitor.cantagalo.it/api/registerinstallation', [
             'lang' => $this->lang,
             'installation_hash' => $installationHash,
             'site_url' => $siteUrl,
