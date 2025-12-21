@@ -28,6 +28,13 @@ All notable changes to this project will be documented in this file.
 ## [0.1.3] - 2025-11-24
 - Bug fix.
 
+---
+
+## [0.1.4] - 2025-12-21
+- Bug fix.
+
+
+
 ## Future versions
 Planned:
 - Monitoring API hooks
