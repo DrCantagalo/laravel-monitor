@@ -24,7 +24,5 @@
                 "Monitor\\MonitorServiceProvider"
             ]
         }
-    },
-    "minimum-stability": "stable",
-    "prefer-stable": true
+    }
 }
