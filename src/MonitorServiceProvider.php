@@ -3,12 +3,12 @@
 namespace Drcantagalo\LaravelMonitor;
 
 use Illuminate\Support\ServiceProvider;
-use Illuminate\Routing\Router;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
+use Illuminate\Contracts\Http\Kernel;
 
 class MonitorServiceProvider extends ServiceProvider
 {
-    public function boot(Router $router)
+    public function boot(Kernel $kernel)
     {
         $jsonPath = storage_path('monitor/installation.json');
 
@@ -24,8 +24,7 @@ class MonitorServiceProvider extends ServiceProvider
             ]);
         }
 
-        $router->prependMiddlewareToGroup('web', MonitorMethod::class);
-        //$router->prependMiddlewareToGroup('api', MonitorMethod::class);
+        $kernel->prependMiddleware(\Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod::class);
 
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
 
