@@ -1,6 +1,6 @@
 <?php
 
-namespace Monitor\Console;
+namespace Drcantagalo\LaravelMonitor\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
@@ -27,7 +27,6 @@ class RegisterMonitor extends Command
             $token = $response->json('token');
             // 3. Salvar token localmente no config
             $this->info("Site registered successfully! Token: {$token}");
-            // opcional: gravar no .env ou config/monitor.php
         } else {
             $this->error("Failed to register site. {$response->body()}");
         }

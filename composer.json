@@ -15,13 +15,13 @@
     },
     "autoload": {
         "psr-4": {
-            "Monitor\\": "src/"
+            "Drcantagalo\\LaravelMonitor\\": "src/"
         }
     },
     "extra": {
         "laravel": {
             "providers": [
-                "Monitor\\MonitorServiceProvider"
+                "Drcantagalo\\LaravelMonitor\\MonitorServiceProvider"
             ]
         }
     }

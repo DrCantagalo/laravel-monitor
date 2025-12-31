@@ -1,10 +1,10 @@
 <?php
 
-namespace Monitor;
+namespace Drcantagalo\LaravelMonitor;
 
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Routing\Router;
-use Monitor\Http\Middleware\MonitorMethod;
+use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
 
 class MonitorServiceProvider extends ServiceProvider
 {
@@ -24,15 +24,15 @@ class MonitorServiceProvider extends ServiceProvider
             ]);
         }
 
-        $router->pushMiddlewareToGroup('web', MonitorMethod::class);
-        $router->pushMiddlewareToGroup('api', MonitorMethod::class);
+        $router->prependMiddlewareToGroup('web', MonitorMethod::class);
+        //$router->prependMiddlewareToGroup('api', MonitorMethod::class);
 
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
 
         $this->loadRoutesFrom(__DIR__.'/routes/api.php');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([\Monitor\Console\Commands\MonitorInstallCommand::class]);
+            $this->commands([\Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand::class]);
         }
 
         $this->publishes([

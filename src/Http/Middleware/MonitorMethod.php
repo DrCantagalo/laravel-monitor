@@ -1,12 +1,12 @@
 <?php
 
-namespace Monitor\Http\Middleware;
+namespace Drcantagalo\LaravelMonitor\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Illuminate\Support\Facades\Log;
-use Monitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Exception;
 
 class MonitorMethod

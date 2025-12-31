@@ -1,6 +1,6 @@
 <?php
 
-namespace Monitor\Console\Commands;
+namespace Drcantagalo\LaravelMonitor\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;

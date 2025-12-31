@@ -1,10 +1,10 @@
 <?php
 
-namespace Monitor\Http\Controllers;
+namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Monitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\Monitor;
 
 class MonitorController extends Controller
 {

@@ -1,6 +1,6 @@
 <?php
 
-namespace Monitor\Models;
+namespace Drcantagalo\LaravelMonitor\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Casts\AsArrayObject;
