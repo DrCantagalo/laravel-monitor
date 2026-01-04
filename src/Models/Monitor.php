@@ -13,15 +13,6 @@ class Monitor extends Model
 
     protected $fillable = ['data'];
 
-    // valores iniciais ao criar novo registro
-    protected $attributes = [
-        'data' => [
-            'visits' => 0,
-            'sessions' => [],
-            'id-token' => ""
-        ],
-    ];
-
     public function newVisit($session_id, $ip)
     {
         $sessions_array = $this->data['sessions'] ?? [];
