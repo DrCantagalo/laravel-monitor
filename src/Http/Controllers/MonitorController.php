@@ -33,6 +33,71 @@ class MonitorController extends Controller
     }
 
     /**
+     * Chaves internas do Monitor que a action pública updateData nunca pode
+     * sobrescrever, mesmo que o front-end envie um par com esse nome.
+     */
+    protected const PROTECTED_DATA_KEYS = [
+        'sessions', 'ips', 'visits', 'page', 'id-token', 'ua',
+    ];
+
+    /**
+     * Ação pública chamada pelo front-end do site monitorado (mesmo padrão
+     * de rememberMe: visitante, não painel admin, sem gate de bearer
+     * token). Grava pares chave/valor arbitrários em `data` do Monitor da
+     * sessão atual — base de segmentação/tags (idioma, preferências etc.),
+     * não é CRM/lead ainda. Chaves internas usadas pelo MonitorMethod
+     * (PROTECTED_DATA_KEYS) são ignoradas silenciosamente para não
+     * corromper o tracking.
+     */
+    public function updateData(Request $request)
+    {
+        $monitorId = session('monitor_id');
+
+        if (! $monitorId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active monitor session',
+            ], 400);
+        }
+
+        $user = Monitor::find($monitorId);
+
+        if (! $user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active monitor session',
+            ], 400);
+        }
+
+        $payload = $request->input('data', []);
+
+        if (! is_array($payload) || empty($payload)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No data provided',
+            ], 422);
+        }
+
+        $data = $user->data;
+
+        foreach ($payload as $key => $value) {
+            if (in_array($key, self::PROTECTED_DATA_KEYS, true)) {
+                continue;
+            }
+
+            $data[$key] = $value;
+        }
+
+        $user->data = $data;
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'monitor_id' => $user->id,
+        ]);
+    }
+
+    /**
      * Handler principal para ações do monitor
      */
     public function handle(Request $request)

@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.1.12)
+# Laravel Monitor (v0.1.13)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -33,6 +33,32 @@ Contract for the front-end of the host application:
   `MonitorMethod` middleware picks that up on the very same request (it
   runs after the controller, on the way back out) and merges the returning
   visitor into the current PHP session.
+
+## Arbitrary visitor data (segmentation/tags)
+
+Lets the host application's front-end attach arbitrary key/value pairs
+(language, tags, preferences, etc.) to the `Monitor` record of the current
+visitor session — a segmentation/tagging base, not a CRM/lead system yet.
+
+- **Endpoint**: `GET /monitor/update-data?data[key]=value`. Requires an
+  active monitor session (i.e. `MonitorMethod` must have already run at
+  least once for this visitor — same precondition as `remember-me`). No
+  request body needed, query string only, same GET-to-avoid-CSRF rationale
+  as `remember-me`.
+- Nested query params are read as-is: `?data[lang]=pt&data[tags][]=newsletter`
+  merges `lang` and `tags` into the Monitor's `data`.
+- **Protected keys**: `sessions`, `ips`, `visits`, `page`, `id-token`, `ua`
+  are silently ignored if present in the payload — these are written
+  exclusively by `MonitorMethod`/`Monitor::newVisit`, and letting the
+  front-end overwrite them would corrupt tracking. Every other key is
+  accepted freely (schema intentionally left open — see below).
+- Response: `{"success": true, "monitor_id": <id>}` on success;
+  `{"success": false, "message": "..."}` (400) when there's no active
+  monitor session yet, or (422) when no `data` payload was sent.
+- Design note: the schema is deliberately unconstrained so it can later
+  support linking a visitor to a real lead/contact, an opt-in shared
+  blacklist across sites, or an external IP-reputation feed — none of
+  which this action builds today.
 
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 

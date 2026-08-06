@@ -8,8 +8,9 @@ Route::middleware(['api', MonitorCors::class])->prefix('monitor')->group(functio
     Route::any('/handler', [MonitorController::class, 'handle']);
 });
 
-// Ação pública do visitante (precisa de sessão de cookies, por isso 'web'
-// em vez de 'api'). GET pra não exigir CSRF token do app hospedeiro.
+// Ações públicas do visitante (precisam de sessão de cookies, por isso
+// 'web' em vez de 'api'). GET pra não exigir CSRF token do app hospedeiro.
 Route::middleware('web')->prefix('monitor')->group(function () {
     Route::get('/remember-me', [MonitorController::class, 'rememberMe']);
+    Route::get('/update-data', [MonitorController::class, 'updateData']);
 });
