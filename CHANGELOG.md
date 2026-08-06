@@ -55,6 +55,12 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.9] - 2026-08-06
+### Added
+- Support for Laravel 13 (`laravel/framework: ^13.0`).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
