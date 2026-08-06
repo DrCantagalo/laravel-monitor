@@ -6,6 +6,7 @@ use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Exception;
 
@@ -63,15 +64,24 @@ class MonitorMethod
                             $user->save();
                         }
                     } else {
+                        $rememberToken = Str::random(40);
+
                         $data = [
                             'page' => [$path => 1],
                             'sessions' => [session()->getId()],
                             'ips'  => [$ip],
-                            'ua'   => $userAgent
+                            'ua'   => $userAgent,
+                            'id-token' => $rememberToken,
                         ];
-                        
+
                         $user = Monitor::create(['data' => $data]);
                         session(['monitor_id' => $user->id]);
+
+                        $response->headers->setCookie(cookie(
+                            config('monitor.remember_cookie', 'monitor_id_token'),
+                            $rememberToken,
+                            config('monitor.remember_cookie_days', 1825) * 1440
+                        ));
                     }
                 }
                 else {

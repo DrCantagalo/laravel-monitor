@@ -9,6 +9,28 @@ use Drcantagalo\LaravelMonitor\Models\Monitor;
 class MonitorController extends Controller
 {
     /**
+     * Ação pública chamada pelo front-end do site monitorado (não passa
+     * pelo gate de bearer token de handle() — é o visitante, não o painel
+     * admin). Lê o cookie de remember-me e sinaliza pro MonitorMethod
+     * middleware reconhecer esse visitante nesta mesma requisição.
+     */
+    public function rememberMe(Request $request)
+    {
+        $token = $request->cookie(config('monitor.remember_cookie', 'monitor_id_token'));
+
+        if (! $token) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No remember-me cookie present',
+            ], 400);
+        }
+
+        session(['remember_me' => $token]);
+
+        return response()->json(['success' => true]);
+    }
+
+    /**
      * Handler principal para ações do monitor
      */
     public function handle(Request $request)

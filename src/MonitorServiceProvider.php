@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor;
 use Illuminate\Support\ServiceProvider;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Cookie\Middleware\EncryptCookies;
 
 class MonitorServiceProvider extends ServiceProvider
 {
@@ -25,6 +26,13 @@ class MonitorServiceProvider extends ServiceProvider
         }
 
         $kernel->prependMiddleware(\Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod::class);
+
+        // O cookie de remember-me é lido diretamente via $request->cookie()
+        // no endpoint público (fora do grupo `web` na hora de ser setado,
+        // já que é anexado à response depois do MonitorMethod global rodar
+        // o $next()), então nunca deve passar pelo encrypt/decrypt padrão
+        // do Laravel.
+        EncryptCookies::except(config('monitor.remember_cookie', 'monitor_id_token'));
 
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
 
