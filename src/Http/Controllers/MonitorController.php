@@ -4,6 +4,8 @@ namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 
 class MonitorController extends Controller
@@ -37,15 +39,23 @@ class MonitorController extends Controller
     {
         $token = $request->bearerToken();
         $expected = config('monitor.local_token');
+        $action = $request->query('action', 'getData');
 
-        if (! $expected || ! $token || ! hash_equals($expected, $token)) {
+        $isLocalToken = $expected && $token && hash_equals($expected, $token);
+
+        // Token de leitura efêmero (issueReadToken) só é aceito pra
+        // action getData — nunca pra clearData/updateBlockedIps/
+        // updateRules/issueReadToken, que exigem o local_token permanente.
+        $isValidReadToken = $action === 'getData'
+            && $token
+            && Cache::has("monitor:read-token:{$token}");
+
+        if (! $isLocalToken && ! $isValidReadToken) {
             return response()->json([
                 'success' => false,
                 'message' => 'Unauthorized',
             ], 401);
         }
-
-        $action = $request->query('action', 'getData');
 
         switch ($action) {
             case 'getData':
@@ -60,12 +70,35 @@ class MonitorController extends Controller
             case 'updateRules':
                 return $this->updateRules($request);
 
+            case 'issueReadToken':
+                return $this->issueReadToken($request);
+
             default:
                 return response()->json([
                     'success' => false,
                     'message' => 'Invalid action'
                 ], 400);
         }
+    }
+
+    /**
+     * Emite um token de leitura efêmero (só-leitura, só pra action
+     * getData) pra permitir que o dashboard chame o handler direto do
+     * navegador do usuário final sem expor o local_token permanente.
+     */
+    protected function issueReadToken(Request $request)
+    {
+        $token = Str::random(64);
+        $ttlMinutes = config('monitor.read_token_ttl_minutes', 15);
+        $expiresAt = now()->addMinutes($ttlMinutes);
+
+        Cache::put("monitor:read-token:{$token}", true, $expiresAt);
+
+        return response()->json([
+            'success' => true,
+            'token' => $token,
+            'expires_at' => $expiresAt->toIso8601String(),
+        ]);
     }
 
     protected function getData(Request $request)

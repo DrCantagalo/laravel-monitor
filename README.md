@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.1.11)
+# Laravel Monitor (v0.1.12)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -33,3 +33,26 @@ Contract for the front-end of the host application:
   `MonitorMethod` middleware picks that up on the very same request (it
   runs after the controller, on the way back out) and merges the returning
   visitor into the current PHP session.
+
+## Ephemeral read token + dedicated CORS (dashboard direct fetch)
+
+The dashboard (`monitor.cantagalo.it`) can call `/monitor/handler?action=getData`
+directly from the end user's browser instead of always proxying through the
+host application's server. The permanent `local_token` never leaves the host
+application's backend — only a short-lived, read-only token does.
+
+- **`issueReadToken`** (`Authorization: Bearer <local_token>`, same auth as
+  the other admin actions): generates a random token, stores it in cache for
+  `config('monitor.read_token_ttl_minutes')` minutes (default 15), and
+  returns `{"success": true, "token": "...", "expires_at": "..."}`.
+- The token returned by `issueReadToken` is accepted as a bearer **only for
+  the `getData` action**. `clearData`, `updateBlockedIps`, `updateRules`, and
+  `issueReadToken` itself always require the permanent `local_token` — a
+  read token cannot mint another token or do anything beyond reading.
+- **CORS**: routes under `monitor/*` carry their own dedicated CORS
+  middleware (`MonitorCors`) — it does not read or depend on the host
+  application's `config/cors.php`, since every client site has a different
+  Laravel install. The allowed origin is `config('monitor.dashboard_origin')`,
+  defaulting to `https://monitor.cantagalo.it` (no manual configuration
+  required). Preflight `OPTIONS` requests get a `204` with the CORS headers
+  attached.
