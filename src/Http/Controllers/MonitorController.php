@@ -13,6 +13,16 @@ class MonitorController extends Controller
      */
     public function handle(Request $request)
     {
+        $token = $request->bearerToken();
+        $expected = config('monitor.local_token');
+
+        if (! $expected || ! $token || ! hash_equals($expected, $token)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized',
+            ], 401);
+        }
+
         $action = $request->query('action', 'getData');
 
         switch ($action) {
