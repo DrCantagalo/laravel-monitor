@@ -7,6 +7,7 @@ use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 
 class MonitorController extends Controller
 {
@@ -186,12 +187,45 @@ class MonitorController extends Controller
         ]);
     }
 
+    /**
+     * Bloqueia uma lista de IPs (persistidos em `monitor_blocked_ips`,
+     * checados em `MonitorMethod` antes do resto do tracking). Fonte fixa
+     * em 'manual' por enquanto — schema já preparado pra outras origens
+     * (blacklist coletiva, feed externo de reputação) no futuro.
+     */
     protected function updateBlockedIps(Request $request)
     {
-        // implementar depois
+        $ips = $request->input('ips', []);
+
+        if (! is_array($ips) || empty($ips)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No IPs provided',
+            ], 422);
+        }
+
+        $blocked = [];
+
+        foreach ($ips as $ip) {
+            if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+                continue;
+            }
+
+            BlockedIp::firstOrCreate(['ip' => $ip], ['source' => 'manual']);
+            Cache::forget("monitor:blocked-ip:{$ip}");
+            $blocked[] = $ip;
+        }
+
+        if (empty($blocked)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IPs provided',
+            ], 422);
+        }
+
         return response()->json([
             'success' => true,
-            'message' => 'Blocked IPs updated (stub)'
+            'blocked' => $blocked,
         ]);
     }
 

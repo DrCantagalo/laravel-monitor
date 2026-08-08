@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.1.15',
+    'version' => '0.1.16',
 
     // Nome do cookie de longa duração usado para reconhecer visitantes
     // recorrentes (fluxo "remember me"). Ver README para o contrato do
@@ -41,5 +41,10 @@ return [
 
     // Quantos sinais disparados são necessários pra marcar data.flags.scraper.
     'scraper_signal_threshold' => 2,
+
+    // TTL (segundos) do cache de lookup de IP bloqueado
+    // (MonitorMethod::isBlocked), pra evitar uma query em monitor_blocked_ips
+    // a cada request. Invalidado por IP ao bloquear via updateBlockedIps.
+    'blocked_ip_cache_ttl' => 60,
 
 ];

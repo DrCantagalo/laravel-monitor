@@ -85,10 +85,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.16] - 2026-08-08
+### Added
+- `updateBlockedIps` implemented for real: persists a list of IPs to the
+  new `monitor_blocked_ips` table (`ip`, `source`, defaulting to
+  `manual`).
+- `MonitorMethod` now checks the incoming IP against that table (cached
+  per `monitor.blocked_ip_cache_ttl`) before any tracking, and aborts
+  with `403` if blocked.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
 - Dashboard integration
 - Event sampling
-- IP blocking based on scraper detection
 - Network activity analysis
