@@ -73,10 +73,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.15] - 2026-08-08
+### Added
+- Scraper/bot detection heuristic in `MonitorMethod`, applied to
+  session-less requests: high request frequency from the same IP in a
+  short window, empty/known-bot user-agent, and missing common browser
+  headers. Each signal that fires is recorded in
+  `data.flags.scraper_signals`; `data.flags.scraper` is set once enough
+  signals fire (`monitor.scraper_signal_threshold`). Detection only —
+  does not block anything yet.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
 - Dashboard integration
 - Event sampling
-- Anti-scraper detection
+- IP blocking based on scraper detection
 - Network activity analysis
