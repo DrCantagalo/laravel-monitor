@@ -61,6 +61,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.14] - 2026-08-08
+### Fixed
+- `MonitorMethod` was registered as a global middleware (`prependMiddleware`),
+  running outside/before `StartSession` in the pipeline. Its session writes
+  (`session(['monitor_id' => ...])`) happened after `StartSession` had
+  already persisted the session, so they were silently lost — every request
+  created a new `Monitor` instead of reusing the one from the visitor's
+  session. Now registered inside the `web` group, after `StartSession`
+  (`appendMiddlewareToGroup`), so session writes persist correctly.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

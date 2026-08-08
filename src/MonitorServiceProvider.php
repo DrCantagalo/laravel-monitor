@@ -25,13 +25,25 @@ class MonitorServiceProvider extends ServiceProvider
             ]);
         }
 
-        $kernel->prependMiddleware(\Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod::class);
+        // Registrado dentro do grupo `web`, depois do StartSession (append
+        // via appendMiddlewareToGroup entra por último no grupo) - precisa
+        // rodar aninhado DENTRO do StartSession para que sua fase de
+        // "volta" (leitura/escrita de session('monitor_id') apos o
+        // $next($request)) execute antes da fase de "volta" do
+        // StartSession, que é quem persiste a sessao no driver e anexa o
+        // cookie de sessao na response. Antes era prependMiddleware()
+        // (middleware global, fora de qualquer grupo) e por isso rodava
+        // por fora do StartSession: a sessao ja tinha sido salva antes do
+        // MonitorMethod gravar monitor_id nela, entao a gravacao nunca
+        // persistia entre requests (bug: cada request criava um Monitor
+        // novo em vez de reaproveitar o da sessao).
+        $kernel->appendMiddlewareToGroup('web', \Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod::class);
 
         // O cookie de remember-me é lido diretamente via $request->cookie()
-        // no endpoint público (fora do grupo `web` na hora de ser setado,
-        // já que é anexado à response depois do MonitorMethod global rodar
-        // o $next()), então nunca deve passar pelo encrypt/decrypt padrão
-        // do Laravel.
+        // no endpoint público, sem passar pelo decrypt padrao do Laravel
+        // (o valor gravado é o id-token cru, comparado direto contra
+        // Monitor::data->id-token) - precisa continuar excetuado mesmo
+        // com o MonitorMethod agora dentro do grupo `web`.
         EncryptCookies::except(config('monitor.remember_cookie', 'monitor_id_token'));
 
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
