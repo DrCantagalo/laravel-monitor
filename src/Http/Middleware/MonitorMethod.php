@@ -7,6 +7,7 @@ use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Support\AnonymousVisitorTracker;
 use Drcantagalo\LaravelMonitor\Support\SessionVisitorTracker;
 use Exception;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -35,7 +36,19 @@ class MonitorMethod
         // IP bloqueado (via updateBlockedIps): corta o request aqui, antes
         // de qualquer tracking/detecção. Checado antes de tudo (inclusive
         // requests com sessão) — bloqueio vale pra qualquer origem.
-        if ($this->isBlocked($ip)) {
+        //
+        // Fail-open: se a tabela monitor_blocked_ips ainda não existir
+        // (composer require feito mas migrations ainda não rodaram), essa
+        // query não pode derrubar o site inteiro do cliente. abort(403)
+        // fica FORA do try pra não ser engolido pelo catch.
+        try {
+            $blocked = $this->isBlocked($ip);
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_blocked_ips não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
+            $blocked = false;
+        }
+
+        if ($blocked) {
             abort(403);
         }
 
