@@ -29,7 +29,12 @@ class MonitorMethod
         }
 
         // Capturamos dados básicos antes do processamento
-        $path = $request->path();
+        //
+        // Prefixamos o path com o host: sites multidominio/multisubdominio
+        // que compartilham a mesma instalação do pacote perdiam essa
+        // informação (ex: "/dashboard/3/blacklist" não dizia se veio de
+        // "app.exemplo.com" ou "admin.exemplo.com").
+        $path = $request->getHost() . '/' . ltrim($request->path(), '/');
         $ip = $request->ip();
         $userAgent = $request->header('User-Agent');
 

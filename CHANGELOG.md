@@ -96,6 +96,17 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.19] - 2026-08-11
+### Fixed
+- `MonitorMethod` recorded the visited path (`data.page`) without the
+  host, so multi-domain/multi-subdomain sites sharing a single
+  installation lost track of which subdomain a page belonged to (e.g.
+  `/dashboard/3/blacklist` didn't say if it came from `app.example.com`
+  or `admin.example.com`). Tracked paths are now prefixed with the
+  request host (e.g. `app.example.com/dashboard/3/blacklist`).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
