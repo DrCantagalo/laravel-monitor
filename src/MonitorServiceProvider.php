@@ -66,5 +66,7 @@ class MonitorServiceProvider extends ServiceProvider
     public function register()
     {
         $this->mergeConfigFrom(__DIR__.'/config/monitor.php', 'monitor');
+
+        $this->app->singleton('monitor', fn () => new \Drcantagalo\LaravelMonitor\Support\Monitor());
     }
 }

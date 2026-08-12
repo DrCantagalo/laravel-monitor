@@ -2,7 +2,13 @@
 
 return [
 
-    'version' => '0.1.19',
+    'version' => '0.1.20',
+
+    // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
+    // em src/Facades/Monitor.php) pra marcar a request atual como "não
+    // rastrear" - lida por SessionVisitorTracker::track() e apagada assim
+    // que consumida. Ver README, seção "Uso avançado".
+    'skip_session_key' => 'avoid_monitor',
 
     // Nome do cookie de longa duração usado para reconhecer visitantes
     // recorrentes (fluxo "remember me"). Ver README para o contrato do

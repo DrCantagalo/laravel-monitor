@@ -107,6 +107,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.20] - 2026-08-12
+### Added
+- Public `Monitor::skipTracking()` facade (backed by
+  `Drcantagalo\LaravelMonitor\Support\Monitor`) so host applications can
+  mark the current request as "don't track" — previously this required
+  reaching directly into an undocumented internal session key
+  (`session('avoid_monitor')`) copied out of the package source.
+- `config('monitor.skip_session_key')`, configurable name for the session
+  flag read by `SessionVisitorTracker` (was hardcoded to `avoid_monitor`).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

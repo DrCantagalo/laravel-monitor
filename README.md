@@ -82,3 +82,32 @@ application's backend — only a short-lived, read-only token does.
   defaulting to `https://monitor.cantagalo.it` (no manual configuration
   required). Preflight `OPTIONS` requests get a `204` with the CORS headers
   attached.
+
+## Advanced usage
+
+### Skipping tracking for a request
+
+`MonitorMethod` runs on every request in the `web` middleware group, so
+any AJAX/API-style endpoint inside that group (a language switcher, a form
+submit, etc.) gets counted as a page view and can overwrite the current
+`Monitor` record's `data` with values that don't belong to a real page
+visit. Call `Monitor::skipTracking()` before returning the response for
+any request that shouldn't be tracked:
+
+```php
+use Drcantagalo\LaravelMonitor\Facades\Monitor;
+
+Route::post('/lang/{locale}', function (string $locale) {
+    Monitor::skipTracking();
+
+    // ... switch locale ...
+
+    return back();
+});
+```
+
+Under the hood this just sets a session flag; `SessionVisitorTracker`
+reads and clears it the next time `MonitorMethod` processes this session,
+skipping its tracking logic for that one request. The session key used is
+`config('monitor.skip_session_key')` (default `avoid_monitor`) — publish
+the package config (`monitor-config` tag) to change it.

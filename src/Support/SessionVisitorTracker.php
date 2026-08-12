@@ -16,8 +16,10 @@ class SessionVisitorTracker
      */
     public function track(Request $request, Response $response, string $path, ?string $userAgent, string $ip): void
     {
-        if (session('avoid_monitor', false)) {
-            session()->forget('avoid_monitor');
+        $skipKey = config('monitor.skip_session_key', 'avoid_monitor');
+
+        if (session($skipKey, false)) {
+            session()->forget($skipKey);
 
             return;
         }

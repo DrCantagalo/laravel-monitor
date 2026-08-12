@@ -22,7 +22,10 @@
         "laravel": {
             "providers": [
                 "Drcantagalo\\LaravelMonitor\\MonitorServiceProvider"
-            ]
+            ],
+            "aliases": {
+                "Monitor": "Drcantagalo\\LaravelMonitor\\Facades\\Monitor"
+            }
         }
     }
 }
