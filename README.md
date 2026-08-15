@@ -83,6 +83,31 @@ application's backend — only a short-lived, read-only token does.
   required). Preflight `OPTIONS` requests get a `204` with the CORS headers
   attached.
 
+## 404 tracking + scrapper path blocking
+
+`MonitorMethod` records, per visited path, whether the response was a
+`404` (`data.not_found[path] = true`) — lets a dashboard built on top of
+`getData` flag paths that don't actually exist on the monitored site (a
+common scraper tell: `/wp-admin/install.php` on a site that isn't
+WordPress).
+
+- **`flagScraperPath`** (`Authorization: Bearer <local_token>`, same auth
+  as `updateBlockedIps`/`clearData` — never accepted with the ephemeral
+  read token): `POST /monitor/handler?action=flagScraperPath` with
+  `{"path": "wp-admin/install.php"}` (host-less; a leading `/` is
+  stripped if present). Two things happen:
+  1. The path is inserted into `monitor_blocked_paths`. From then on,
+     `MonitorMethod` rejects (`403`) any request whose path matches,
+     **regardless of host** — an installation shared by multiple
+     subdomains is protected on all of them at once, since the block
+     check ignores the host prefix that `data.page` uses.
+  2. Every IP already recorded (`data.ips`) against a `Monitor` that
+     visited that path is blocked in `monitor_blocked_ips` (`source:
+     'scraper-path'`), same mechanism as `updateBlockedIps`.
+  - Response: `{"success": true, "path": "...", "blocked_ips": [...]}`,
+    or `{"success": false, "message": "No path provided"}` (422) if
+    `path` is missing/empty.
+
 ## Advanced usage
 
 ### Skipping tracking for a request

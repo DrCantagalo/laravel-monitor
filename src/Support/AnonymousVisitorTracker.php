@@ -13,7 +13,7 @@ class AnonymousVisitorTracker
      * sinais de scraper e cria/atualiza o registro Monitor associado ao
      * IP.
      */
-    public function track(Request $request, string $path, ?string $userAgent, string $ip): void
+    public function track(Request $request, string $path, ?string $userAgent, string $ip, bool $notFound = false): void
     {
         $signals = $this->detectScraperSignals($request, $ip, $userAgent);
         $isScraper = count($signals) >= config('monitor.scraper_signal_threshold', 2);
@@ -34,6 +34,11 @@ class AnonymousVisitorTracker
             $data['flags']['scraper'] = $isScraper;
             $data['flags']['scraper_signals'] = $signals;
 
+            if ($notFound) {
+                $data['not_found'] = $data['not_found'] ?? [];
+                $data['not_found'][$path] = true;
+            }
+
             $user->data = $data;
             $user->save();
 
@@ -50,6 +55,10 @@ class AnonymousVisitorTracker
                 'scraper_signals' => $signals,
             ],
         ];
+
+        if ($notFound) {
+            $data['not_found'] = [$path => true];
+        }
 
         Monitor::create(['data' => $data]);
     }

@@ -119,6 +119,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.21] - 2026-08-15
+### Added
+- 404 tracking: `MonitorMethod` now captures the response status code and
+  passes it down to `SessionVisitorTracker`/`AnonymousVisitorTracker`,
+  which record `data.not_found[path] = true` whenever a visited path
+  returned a 404 — lets the dashboard flag paths that don't exist on the
+  monitored site.
+- `flagScraperPath` handler action (`local_token` auth, same gate as
+  `updateBlockedIps`): flags a path (host-less, e.g.
+  `wp-admin/install.php`) as a scrapper pattern. Inserts it into the new
+  `monitor_blocked_paths` table (`BlockedPath` model) and blocks every
+  IP already recorded as having visited that path (`monitor_blocked_ips`,
+  `source = 'scraper-path'`).
+- `MonitorMethod` now also rejects (`403`) any request whose path (sans
+  host) matches an entry in `monitor_blocked_paths`, cached the same way
+  as blocked IPs (`monitor.blocked_ip_cache_ttl`) — since the match
+  ignores the host, this protects every subdomain sharing the same
+  installation.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

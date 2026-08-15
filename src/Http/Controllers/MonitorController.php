@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
+use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 
 class MonitorController extends Controller
 {
@@ -133,6 +134,9 @@ class MonitorController extends Controller
             case 'updateBlockedIps':
                 return $this->updateBlockedIps($request);
 
+            case 'flagScraperPath':
+                return $this->flagScraperPath($request);
+
             case 'updateRules':
                 return $this->updateRules($request);
 
@@ -226,6 +230,64 @@ class MonitorController extends Controller
         return response()->json([
             'success' => true,
             'blocked' => $blocked,
+        ]);
+    }
+
+    /**
+     * Flaga um path (sem host - a parte "variável" da URL, ex:
+     * "wp-admin/install.php") como scrapper. Duas coisas acontecem: (1) o
+     * path entra em `monitor_blocked_paths`, checado por `MonitorMethod`
+     * pra bloquear (403) qualquer request futura àquele path, em qualquer
+     * host que esta installation atenda; (2) os IPs que já visitaram esse
+     * path (via `data.page` dos registros de Monitor) são bloqueados em
+     * `monitor_blocked_ips`, mesmo mecanismo de `updateBlockedIps`.
+     */
+    protected function flagScraperPath(Request $request)
+    {
+        $path = ltrim((string) $request->input('path', ''), '/');
+
+        if ($path === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No path provided',
+            ], 422);
+        }
+
+        BlockedPath::firstOrCreate(['path' => $path]);
+        Cache::forget("monitor:blocked-path:{$path}");
+
+        $blockedIps = [];
+
+        // `data.page` guarda chaves "host/path" - o mesmo path pode
+        // aparecer sob hosts diferentes (multi-subdomínio na mesma
+        // installation), por isso o match é feito pelo sufixo "/{$path}",
+        // não por igualdade exata da chave.
+        Monitor::all()->each(function (Monitor $monitor) use ($path, &$blockedIps) {
+            $pages = (array) data_get($monitor, 'data.page', []);
+
+            $matches = collect(array_keys($pages))->contains(
+                fn ($key) => $key === $path || str_ends_with($key, '/' . $path)
+            );
+
+            if (! $matches) {
+                return;
+            }
+
+            foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
+                if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+                    continue;
+                }
+
+                BlockedIp::firstOrCreate(['ip' => $ip], ['source' => 'scraper-path']);
+                Cache::forget("monitor:blocked-ip:{$ip}");
+                $blockedIps[$ip] = true;
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'path' => $path,
+            'blocked_ips' => array_keys($blockedIps),
         ]);
     }
 

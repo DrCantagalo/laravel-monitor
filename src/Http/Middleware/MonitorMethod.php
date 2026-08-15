@@ -4,6 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Http\Middleware;
 
 use Closure;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
+use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 use Drcantagalo\LaravelMonitor\Support\AnonymousVisitorTracker;
 use Drcantagalo\LaravelMonitor\Support\SessionVisitorTracker;
 use Exception;
@@ -34,22 +35,27 @@ class MonitorMethod
         // que compartilham a mesma instalação do pacote perdiam essa
         // informação (ex: "/dashboard/3/blacklist" não dizia se veio de
         // "app.exemplo.com" ou "admin.exemplo.com").
-        $path = $request->getHost() . '/' . ltrim($request->path(), '/');
+        $pathOnly = ltrim($request->path(), '/');
+        $path = $request->getHost() . '/' . $pathOnly;
         $ip = $request->ip();
         $userAgent = $request->header('User-Agent');
 
-        // IP bloqueado (via updateBlockedIps): corta o request aqui, antes
-        // de qualquer tracking/detecção. Checado antes de tudo (inclusive
-        // requests com sessão) — bloqueio vale pra qualquer origem.
+        // IP bloqueado (via updateBlockedIps) ou path flagado como scrapper
+        // (via flagScraperPath): corta o request aqui, antes de qualquer
+        // tracking/detecção. Checado antes de tudo (inclusive requests com
+        // sessão) — bloqueio vale pra qualquer origem. Path é checado sem o
+        // host: uma installation pode atender vários subdomínios (ver
+        // comentário acima sobre o prefixo de host em `data.page`), e o
+        // flag deve proteger todos eles.
         //
-        // Fail-open: se a tabela monitor_blocked_ips ainda não existir
-        // (composer require feito mas migrations ainda não rodaram), essa
-        // query não pode derrubar o site inteiro do cliente. abort(403)
-        // fica FORA do try pra não ser engolido pelo catch.
+        // Fail-open: se as tabelas ainda não existirem (composer require
+        // feito mas migrations ainda não rodaram), essa query não pode
+        // derrubar o site inteiro do cliente. abort(403) fica FORA do try
+        // pra não ser engolido pelo catch.
         try {
-            $blocked = $this->isBlocked($ip);
+            $blocked = $this->isBlocked($ip) || $this->isPathBlocked($pathOnly);
         } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_blocked_ips não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
+            Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_blocked_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
             $blocked = false;
         }
 
@@ -62,16 +68,31 @@ class MonitorMethod
 
         // 3. LÓGICA DE "VOLTA" (Agora a Session já está disponível!)
         try {
+            $notFound = $response->getStatusCode() === 404;
+
             if ($request->hasSession()) {
-                $this->sessionTracker->track($request, $response, $path, $userAgent, $ip);
+                $this->sessionTracker->track($request, $response, $path, $userAgent, $ip, $notFound);
             } else {
-                $this->anonymousTracker->track($request, $path, $userAgent, $ip);
+                $this->anonymousTracker->track($request, $path, $userAgent, $ip, $notFound);
             }
         } catch (Exception $e) {
             Log::error("Monitor Package Error: " . $e->getMessage());
         }
 
         return $response;
+    }
+
+    /**
+     * Confere se o path (sem host) foi flagado como scrapper (via
+     * flagScraperPath), cacheado como `isBlocked()` acima.
+     */
+    protected function isPathBlocked(string $path): bool
+    {
+        return Cache::remember(
+            "monitor:blocked-path:{$path}",
+            (int) config('monitor.blocked_ip_cache_ttl', 60),
+            fn () => BlockedPath::where('path', $path)->exists()
+        );
     }
 
     /**

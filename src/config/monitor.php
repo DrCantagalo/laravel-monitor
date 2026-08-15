@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.1.20',
+    'version' => '0.1.21',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -48,9 +48,10 @@ return [
     // Quantos sinais disparados são necessários pra marcar data.flags.scraper.
     'scraper_signal_threshold' => 2,
 
-    // TTL (segundos) do cache de lookup de IP bloqueado
-    // (MonitorMethod::isBlocked), pra evitar uma query em monitor_blocked_ips
-    // a cada request. Invalidado por IP ao bloquear via updateBlockedIps.
+    // TTL (segundos) do cache de lookup de IP/path bloqueado
+    // (MonitorMethod::isBlocked/isPathBlocked), pra evitar uma query em
+    // monitor_blocked_ips/monitor_blocked_paths a cada request. Invalidado
+    // por IP/path ao bloquear via updateBlockedIps/flagScraperPath.
     'blocked_ip_cache_ttl' => 60,
 
 ];

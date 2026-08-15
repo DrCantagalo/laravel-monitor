@@ -14,7 +14,7 @@ class SessionVisitorTracker
      * atualização do registro Monitor e cookie de remember quando um
      * Monitor novo é criado.
      */
-    public function track(Request $request, Response $response, string $path, ?string $userAgent, string $ip): void
+    public function track(Request $request, Response $response, string $path, ?string $userAgent, string $ip, bool $notFound = false): void
     {
         $skipKey = config('monitor.skip_session_key', 'avoid_monitor');
 
@@ -51,6 +51,11 @@ class SessionVisitorTracker
                 $data['page'][$path] = ($data['page'][$path] ?? 0) + 1;
                 $data['ua'] = $userAgent;
 
+                if ($notFound) {
+                    $data['not_found'] = $data['not_found'] ?? [];
+                    $data['not_found'][$path] = true;
+                }
+
                 $user->data = $data;
                 $user->save();
             }
@@ -67,6 +72,10 @@ class SessionVisitorTracker
             'ua'   => $userAgent,
             'id-token' => $rememberToken,
         ];
+
+        if ($notFound) {
+            $data['not_found'] = [$path => true];
+        }
 
         $user = Monitor::create(['data' => $data]);
         session(['monitor_id' => $user->id]);
