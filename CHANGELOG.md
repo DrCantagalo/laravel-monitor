@@ -138,6 +138,22 @@ All notable changes to this project will be documented in this file.
   ignores the host, this protects every subdomain sharing the same
   installation.
 
+### Fixed
+- `MonitorController::handle` read the `action` param via
+  `$request->query()`, which only looks at the URL query string. Every
+  write action called via `Http::post()` (`updateBlockedIps`, `clearData`,
+  and the new `flagScraperPath`) sends `action` in the JSON body instead
+  — `query()` never saw it, silently fell back to the `getData` default,
+  and returned `{"success": true, "data": [...]}` without blocking/
+  clearing/flagging anything. Callers had no way to tell, since the
+  response still reported `success: true`. Switched to `$request->input()`
+  (checks query string, form body, and JSON body), which is also how the
+  existing `getData`/`issueReadToken` GET-based calls already worked by
+  accident. Found and fixed while validating `flagScraperPath` end-to-end
+  against a real Laravel app (harness) instead of only against `Http::fake`
+  mocks, which can't catch a bug like this since they never execute the
+  package's own controller code.
+
 ---
 
 ## Future versions

@@ -106,7 +106,14 @@ class MonitorController extends Controller
     {
         $token = $request->bearerToken();
         $expected = config('monitor.local_token');
-        $action = $request->query('action', 'getData');
+        // input() (não query()): as actions de escrita (updateBlockedIps,
+        // clearData, flagScraperPath) chegam via POST com o body em JSON
+        // (Http::post do home-page manda 'action' no body, não na query
+        // string) - query() só olha a query string e sempre caía no
+        // default 'getData', fazendo essas actions silenciosamente
+        // virarem getData (successo:true sem bloquear/limpar nada). Ver
+        // bugs/laravel-monitor.md.
+        $action = $request->input('action', 'getData');
 
         $isLocalToken = $expected && $token && hash_equals($expected, $token);
 

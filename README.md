@@ -91,6 +91,18 @@ application's backend — only a short-lived, read-only token does.
 common scraper tell: `/wp-admin/install.php` on a site that isn't
 WordPress).
 
+> **Requires a `Route::fallback()` in the `web` middleware group to catch
+> genuinely nonexistent paths.** `MonitorMethod` only runs for requests
+> that actually reach a matched route (it's route-group middleware, not
+> global) — a path with **no matching route at all** never enters the
+> `web` group and never sees the middleware, so it can't be tracked as
+> 404, on a vanilla Laravel install with no fallback route. This still
+> covers 404s returned by a matched route/controller (e.g. `abort(404)`
+> for a missing resource) either way. Adding `Route::fallback(fn () =>
+> abort(404))` to `routes/web.php` — standard Laravel practice, and
+> already how `home-page` itself is set up — closes the gap for
+> completely unknown paths too.
+
 - **`flagScraperPath`** (`Authorization: Bearer <local_token>`, same auth
   as `updateBlockedIps`/`clearData` — never accepted with the ephemeral
   read token): `POST /monitor/handler?action=flagScraperPath` with
