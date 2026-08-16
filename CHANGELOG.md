@@ -156,6 +156,33 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.22] - 2026-08-16
+### Fixed
+- Remember-me never actually reconnected a visitor returning after their
+  PHP session expired — the exact case it exists to solve.
+  `SessionVisitorTracker::track()` only recognized a returning visitor
+  via `session('remember_me')`, set exclusively by the dedicated
+  `GET /monitor/remember-me` endpoint, which the host app's front-end
+  can only call after the page has already loaded. But `MonitorMethod`
+  already runs its tracking logic on that very first page load, before
+  any front-end JS gets a chance to run — at that point neither
+  `session('remember_me')` nor `session('monitor_id')` is set yet, so
+  `track()` always fell straight into the "create new Monitor" branch,
+  which immediately overwrites the `monitor_id_token` cookie with a
+  fresh token. The browser applies that `Set-Cookie` before the page's
+  own JS runs, so by the time the dedicated endpoint is finally called,
+  the cookie it reads is already the brand-new one — the original
+  visitor's identity is lost for good. `track()` now also checks the
+  `monitor_id_token` cookie directly (it always reaches the server via
+  the request header regardless of `httpOnly` — that flag only blocks
+  `document.cookie` access, never blocks the backend) before falling
+  through to creating a new row, closing the race. The dedicated
+  endpoint is unchanged and still works for host apps that already rely
+  on it. Found and fixed while migrating `home-page`'s remember-me
+  integration to the package's intended contract (task home-page 48).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

@@ -41,6 +41,30 @@ class SessionVisitorTracker
             session()->forget('remember_me');
         }
 
+        // Antes de criar uma linha nova, tenta reconectar direto pelo
+        // cookie de remember-me (chega no servidor via header a cada
+        // request, independente de ser httpOnly - isso só impede leitura
+        // via JS/document.cookie, nunca impediu o backend de ler). Sem
+        // isso, a PRIMEIRA request de toda sessão nova (session('monitor_id')
+        // ainda não setado, e o app hospedeiro ainda não teve chance de
+        // chamar o endpoint dedicado GET /monitor/remember-me) sempre
+        // caía direto no ramo de criar Monitor novo abaixo, sobrescrevendo
+        // o cookie do visitante antigo antes de qualquer front-end
+        // conseguir usá-lo - o remember-me nunca reconectava de fato um
+        // visitante que voltava com a sessão PHP expirada.
+        if (!$user && !session('monitor_id')) {
+            $cookieToken = $request->cookie(config('monitor.remember_cookie', 'monitor_id_token'));
+
+            if ($cookieToken) {
+                $user = Monitor::where('data->id-token', $cookieToken)->first();
+
+                if ($user) {
+                    $user->newVisit(session()->getId(), $ip);
+                    session(['monitor_id' => $user->id]);
+                }
+            }
+        }
+
         if (session('monitor_id')) {
             if (!$user) {
                 $user = Monitor::find(session('monitor_id'));
