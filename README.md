@@ -1,9 +1,9 @@
-# Laravel Monitor (v0.1.13)
+# Laravel Monitor (v0.1.22)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
 > ⚠️ **This is an early testing release.**  
-> The only purpose of v0.1.8 is validating installation, configuration storage, and server registration workflow.
+> API and config shape may still change between minor versions. See `CHANGELOG.md` for what each release actually added/fixed.
 
 ## Remember-me (returning visitor recognition)
 
@@ -21,14 +21,27 @@ Contract for the front-end of the host application:
   front-end never needs to create or read it directly (it isn't meant to
   be parsed from `document.cookie`; the browser just carries it back
   automatically on every request).
+- **Automatic reconnection (since v0.1.22)**: `MonitorMethod` now also
+  checks the `monitor_id_token` cookie directly, on the very first request
+  of a new PHP session — before any front-end JS has had a chance to run.
+  This closes a race present in earlier versions, where the first page
+  load of a new session always created a brand-new `Monitor` (overwriting
+  the cookie with a fresh token) before the dedicated endpoint below could
+  ever run, permanently losing the original visitor's identity. Host apps
+  don't need to do anything for this — it's transparent — but it means the
+  cookie alone is now sufficient; the dedicated endpoint is a
+  belt-and-suspenders option, not a requirement, for host apps that want
+  to force reconnection at a specific point (e.g. right after consuming a
+  cookie-consent flow that may have delayed the first tracked request).
 - **Endpoint**: `GET /monitor/remember-me`. No request body needed — the
-  cookie above travels with the request automatically. Call this once per
-  page load, as early as possible (e.g. on page ready), for visitors that
-  don't yet have an active recognized session. Response:
-  `{"success": true}` when a matching visitor was found and merged into
-  the current session, or `{"success": false, "message": "..."}` when
-  there's no cookie yet (first-ever visit) or no matching record (cookie
-  is stale/invalid).
+  cookie above travels with the request automatically. Calling it is
+  optional since v0.1.22 (see above), but still supported for host apps
+  that already integrate with it, or that want to trigger reconnection
+  explicitly instead of relying on the automatic first-request check.
+  Response: `{"success": true}` when a matching visitor was found and
+  merged into the current session, or `{"success": false, "message": "..."}`
+  when there's no cookie yet (first-ever visit) or no matching record
+  (cookie is stale/invalid).
 - Calling the endpoint sets `session(['remember_me' => $token])`; the
   `MonitorMethod` middleware picks that up on the very same request (it
   runs after the controller, on the way back out) and merges the returning
@@ -98,10 +111,26 @@ WordPress).
 > `web` group and never sees the middleware, so it can't be tracked as
 > 404, on a vanilla Laravel install with no fallback route. This still
 > covers 404s returned by a matched route/controller (e.g. `abort(404)`
-> for a missing resource) either way. Adding `Route::fallback(fn () =>
-> abort(404))` to `routes/web.php` — standard Laravel practice, and
-> already how `home-page` itself is set up — closes the gap for
-> completely unknown paths too.
+> for a missing resource) either way. Adding a fallback route to
+> `routes/web.php` closes the gap for completely unknown paths too — but
+> **the closure must return a real `404` HTTP status**, not just a view
+> that looks like one:
+>
+> ```php
+> // Wrong — view() alone responds 200 OK, so MonitorMethod (and every
+> // crawler/monitoring tool) sees a successful page, not a 404.
+> Route::fallback(fn () => view('errors.404'));
+>
+> // Right — the status code is what actually matters here.
+> Route::fallback(fn () => response()->view('errors.404', [], 404));
+> // or simply:
+> Route::fallback(fn () => abort(404));
+> ```
+>
+> This is an easy mistake to make and easy to miss in manual testing (the
+> page *looks* identical either way) — it was found live in more than one
+> host app integrating this package, always with the same root cause: a
+> `view(...)` call with no explicit status.
 
 - **`flagScraperPath`** (`Authorization: Bearer <local_token>`, same auth
   as `updateBlockedIps`/`clearData` — never accepted with the ephemeral
@@ -119,6 +148,72 @@ WordPress).
   - Response: `{"success": true, "path": "...", "blocked_ips": [...]}`,
     or `{"success": false, "message": "No path provided"}` (422) if
     `path` is missing/empty.
+
+## Manual IP blocking (`updateBlockedIps`)
+
+Blocks a list of IPs outright — `MonitorMethod` rejects (`403`) any
+request from a blocked IP before any tracking/detection logic runs,
+regardless of host or session state. This is the same underlying
+mechanism `flagScraperPath` uses automatically for IPs seen on a flagged
+path; `updateBlockedIps` is the manual/direct version, for blocking IPs
+that weren't (or don't need to be) tied to a specific path.
+
+- **Endpoint**: `POST /monitor/handler?action=updateBlockedIps`,
+  `Authorization: Bearer <local_token>` (the permanent admin token — same
+  auth as `clearData`/`flagScraperPath`/`updateRules`/`issueReadToken`;
+  the ephemeral read token from `issueReadToken` is never accepted here).
+- **Request body**: `{"ips": ["203.0.113.7", "198.51.100.42"]}`. Each
+  entry is validated with `filter_var(..., FILTER_VALIDATE_IP)` (accepts
+  both IPv4 and IPv6); invalid entries are silently skipped rather than
+  failing the whole request.
+- **Response**: `{"success": true, "blocked": ["203.0.113.7", "198.51.100.42"]}`
+  listing only the IPs that actually validated and got (or already were)
+  blocked. `{"success": false, "message": "No IPs provided"}` (422) when
+  `ips` is missing/empty/not an array; `{"success": false, "message": "No valid IPs provided"}`
+  (422) when every entry failed validation.
+- Persisted in `monitor_blocked_ips` with `source: 'manual'` (vs.
+  `source: 'scraper-path'` for IPs blocked automatically by
+  `flagScraperPath`) — same table, so both paths compose: an IP blocked
+  manually stays blocked even if later also matched by a path flag, and
+  vice versa. The per-IP block-check cache
+  (`config('monitor.blocked_ip_cache_ttl')`, default 60s) is invalidated
+  immediately for every IP in the request, so the block takes effect on
+  the very next request instead of waiting out the cache TTL.
+
+## Scraper signal detection
+
+For requests **without an active session** (API calls, bots, most real
+scrapers — `MonitorMethod` delegates these to `AnonymousVisitorTracker`
+instead of the session-based tracker), each request is scored against a
+small set of heuristics before being recorded. This is detection only —
+it marks the `Monitor` record, it never blocks anything by itself
+(blocking is `flagScraperPath`/`updateBlockedIps`, both actions your own
+dashboard/automation can trigger after inspecting these flags).
+
+Signals checked by `AnonymousVisitorTracker::detectScraperSignals`:
+
+- **`high_frequency`**: more than `config('monitor.scraper_frequency_threshold')`
+  requests (default `5`) from the same IP within
+  `config('monitor.scraper_frequency_window_seconds')` seconds (default
+  `10`).
+- **`empty_user_agent`**: the request has no `User-Agent` header at all.
+- **`known_bot_user_agent`**: the `User-Agent` contains (case-insensitive)
+  any substring from `config('monitor.scraper_known_bot_user_agents')` —
+  ships with a default list covering common crawlers/bots/HTTP clients
+  (`bot`, `spider`, `curl`, `python-requests`, `headlesschrome`,
+  `ahrefsbot`, etc.); override via config publish to extend or replace it.
+- **`missing_browser_headers`**: at least 2 of `Accept`,
+  `Accept-Language`, `Accept-Encoding` are absent — real browsers always
+  send all three, most scripted HTTP clients don't set any of them by
+  default.
+
+Every signal that fires is appended to `data.flags.scraper_signals`
+(array of strings, e.g. `["empty_user_agent", "missing_browser_headers"]`)
+on that visitor's `Monitor` record. `data.flags.scraper` is `true` once
+the number of signals that fired reaches
+`config('monitor.scraper_signal_threshold')` (default `2`) — a single
+weak signal (e.g. just a missing `Accept-Language`) isn't enough on its
+own, avoiding false positives from unusual-but-legitimate clients.
 
 ## Advanced usage
 
@@ -148,3 +243,11 @@ reads and clears it the next time `MonitorMethod` processes this session,
 skipping its tracking logic for that one request. The session key used is
 `config('monitor.skip_session_key')` (default `avoid_monitor`) — publish
 the package config (`monitor-config` tag) to change it.
+
+### `updateRules` (reserved, not implemented yet)
+
+The handler action `updateRules` exists and is routed (same auth as
+`updateBlockedIps`), but it's currently a stub — it always responds
+`{"success": true, "message": "Monitoring rules updated (stub)"}` without
+reading its input or changing any behavior. Don't build against it as a
+real feature yet.
