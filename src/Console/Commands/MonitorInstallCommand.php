@@ -127,7 +127,13 @@ class MonitorInstallCommand extends Command
         $gitignore = $this->confirm($t('gitignore'), true);
 
         if ($gitignore) {
-            File::append(base_path('.gitignore'), "\n# Laravel Monitor\nstorage/monitor/installation.json\n");
+            $gitignorePath = base_path('.gitignore');
+            $alreadyIgnored = File::exists($gitignorePath)
+                && Str::contains(File::get($gitignorePath), 'storage/monitor/installation.json');
+
+            if (!$alreadyIgnored) {
+                File::append($gitignorePath, "\n# Laravel Monitor\nstorage/monitor/installation.json\n");
+            }
         }
 
         $this->info($t('checking'));

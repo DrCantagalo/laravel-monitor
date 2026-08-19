@@ -183,6 +183,17 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.23] - 2026-08-19
+### Fixed
+- `monitor:install` duplicava o bloco `# Laravel Monitor` no `.gitignore`
+  do app hospedeiro a cada execução (reinstalação, upgrade que roda o
+  comando de novo). `MonitorInstallCommand::handle()` fazia
+  `File::append()` sem checar se a entrada já existia. Agora só faz o
+  append se `storage/monitor/installation.json` ainda não estiver
+  presente no `.gitignore` (ou se o arquivo ainda nem existir).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
