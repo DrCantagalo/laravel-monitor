@@ -8,6 +8,17 @@ return new class extends Migration
 {
     public function up(): void
     {
+        // Coluna gerada é sintaxe MySQL (`json_unquote(json_extract(...))`)
+        // — em qualquer outro driver (sqlite, pgsql) essa migration é no-op:
+        // `data['user_id']` continua gravado normalmente independente do
+        // driver, só a indexação dessa chave fica MySQL-only. Ver README,
+        // seção "Querying by user_id", e `Monitor::scopeForUserId()` (tem
+        // fallback pro `where('data->user_id', ...)` quando a coluna gerada
+        // não existe).
+        if (Schema::getConnection()->getDriverName() !== 'mysql') {
+            return;
+        }
+
         Schema::table('monitors', function (Blueprint $table) {
             // Coluna gerada (virtual) extraindo data['user_id'] (JSON) pra
             // permitir indexar essa chave — sem duplicar o dado, sem
@@ -31,6 +42,10 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (Schema::getConnection()->getDriverName() !== 'mysql') {
+            return;
+        }
+
         Schema::table('monitors', function (Blueprint $table) {
             $table->dropIndex('monitors_user_id_idx');
             $table->dropColumn('monitors_user_id');

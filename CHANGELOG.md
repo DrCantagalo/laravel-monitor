@@ -225,6 +225,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.26] - 2026-08-20
+### Fixed
+- Migration `2026_08_20_000000_add_user_id_index_to_monitors_table`
+  (v0.1.25) was MySQL-only and **broke on any other driver** — the
+  generated column expression (`json_unquote(json_extract(...))`) is
+  MySQL syntax, and the migration ran unconditionally, so any host on
+  sqlite/pgsql got `SQLSTATE[HY000]: unknown function: json_unquote()`
+  on every `migrate`/`RefreshDatabase` run. Both `up()` and `down()` are
+  now driver-aware: no-op on any driver other than `mysql` —
+  `data['user_id']` keeps being written regardless of driver, this only
+  affects whether lookups by it are indexed. `Monitor::forUserId()` now
+  falls back to `where('data->user_id', ...)` when the generated column
+  doesn't exist (i.e. outside MySQL) — no index, but correct, instead of
+  a "column not found" error. See README, "Querying by user_id".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

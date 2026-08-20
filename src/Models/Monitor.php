@@ -24,9 +24,27 @@ class Monitor extends Model
      * contra um int nativo via PDO faz o MySQL descartar o índice
      * (`possible_keys` lista, `key` fica NULL) por causa da conversão de
      * tipo implícita — também confirmado via EXPLAIN.
+     *
+     * A coluna gerada só existe em MySQL (migration é no-op nos demais
+     * drivers — ver `2026_08_20_000000_add_user_id_index_to_monitors_table`).
+     * Fora do MySQL, cai pro `where('data->user_id', ...)` original: sem
+     * índice (full scan), mas correto — a alternativa seria o scope quebrar
+     * com "column not found" em sqlite/pgsql. **Sem** cast pra string nesse
+     * fallback (diferente do caminho MySQL acima): o SQLite compara o valor
+     * extraído do JSON pelo tipo de storage nativo (`json_extract` devolve
+     * um INTEGER pra `{"user_id": 42}`), e `'42'` (TEXT) nunca é igual a
+     * `42` (INTEGER) em SQLite — confirmado testando contra SQLite real: com
+     * cast pra string o scope silenciosamente não retornava nada.
+     * `user_id` sempre vem de `Auth::id()` (int), então passar o valor como
+     * veio funciona nos dois drivers (confirmado também contra PostgreSQL
+     * real, que aceita tanto int quanto string na comparação `->>'user_id'`).
      */
     public function scopeForUserId($query, $userId)
     {
+        if ($query->getConnection()->getDriverName() !== 'mysql') {
+            return $query->where('data->user_id', $userId);
+        }
+
         return $query->where('monitors_user_id', (string) $userId);
     }
 

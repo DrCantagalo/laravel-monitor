@@ -132,13 +132,21 @@ table.
   and the index is used (`type: ref`) regardless of what type you pass
   in.
 - **MySQL-only.** The generated column's expression
-  (`json_unquote(json_extract(...))`) is MySQL syntax; this migration has
-  only been validated against MySQL (production target — see stack
-  convention at the top of this project's task queue). If you install
-  this package on a host using a different database driver (sqlite,
-  pgsql), this specific migration will need an equivalent (or you can
-  skip it — `data['user_id']` itself is written regardless of driver,
-  this only affects whether lookups by it are indexed).
+  (`json_unquote(json_extract(...))`) is MySQL syntax. The migration is
+  driver-aware: it only creates the generated column + index when
+  `Schema::getConnection()->getDriverName() === 'mysql'`, and is a no-op
+  on any other driver (sqlite, pgsql) — `down()` is guarded the same way.
+  `data['user_id']` itself is always written regardless of driver, this
+  only affects whether lookups by it are indexed. On a non-MySQL host,
+  `Monitor::forUserId($id)` automatically falls back to
+  `where('data->user_id', $id)` (no index, full scan, but correct)
+  instead of erroring on the missing generated column — note this
+  fallback does **not** cast `$id` to string like the MySQL path does:
+  SQLite's `json_extract` returns the JSON value in its native storage
+  type (e.g. an integer for `{"user_id": 42}`), and `'42'` (text) never
+  equals `42` (integer) there, so the fallback must compare against the
+  same type `$id` was passed in as (in practice always an int, from
+  `Auth::id()`).
 
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 
