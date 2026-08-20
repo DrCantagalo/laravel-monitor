@@ -194,6 +194,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.24] - 2026-08-20
+### Added
+- Authenticated user tagging: `SessionVisitorTracker::track()` now
+  writes `data['user_id']` (`Auth::id()`) onto the current
+  device/browser's Monitor row whenever `Auth::check()` is true — a tag
+  alongside `ua`/`ips`/`page`, never a merge across rows (a user logged
+  in on 2 devices still gets 2 rows, each tagged with the same
+  `user_id`). New config `track_authenticated_user` (default `true`,
+  opt-out) for host apps without `Auth` configured or that don't want
+  this data. Session-tracked visitors only (`SessionVisitorTracker`) —
+  anonymous tracking (`AnonymousVisitorTracker`) is unaffected.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

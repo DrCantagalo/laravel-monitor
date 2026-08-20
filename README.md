@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.1.22)
+# Laravel Monitor (v0.1.24)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -72,6 +72,38 @@ visitor session — a segmentation/tagging base, not a CRM/lead system yet.
   support linking a visitor to a real lead/contact, an opt-in shared
   blacklist across sites, or an external IP-reputation feed — none of
   which this action builds today.
+
+## Authenticated user tagging
+
+Ties a `Monitor` row (device/browser) to the host app's authenticated
+user, for CRM linkage later ("if this visitor has logged in before, tag
+their row with that").
+
+- **Contract: tag, not merge.** The Monitor data model is 1 row per
+  device/browser, recognized via the `remember_cookie` (see
+  Remember-me above) — a user logged in on 2 devices already produces
+  2 rows today, and that's expected. This feature does **not** change
+  that: it only writes `data['user_id']` (`Auth::id()`) onto the
+  current device's row, alongside `ua`/`ips`/`page`. It never merges
+  or reassigns rows by `user_id`. If you need "one record per
+  customer" for a CRM view, do that aggregation at read time
+  (`Monitor::where('data->user_id', $id)->get()`, joining the rows
+  yourself) — never a physical merge of the raw rows, which would race
+  under concurrent writes from multiple devices.
+- **When it runs**: every request tracked by `SessionVisitorTracker`
+  (session-based visitors) where `Auth::check()` is true, right after
+  the Monitor row for the current request has already been
+  found/created. Anonymous tracking (`AnonymousVisitorTracker`, no
+  session — used for the 404/scraper-detection flow above) is
+  unaffected; this is a session-visitor-only feature.
+- **Config**: `track_authenticated_user` (default `true`). Set to
+  `false` to opt out — e.g. host apps without `Auth` configured, or
+  that don't want this data for privacy-policy reasons.
+- **Protected key**: like `sessions`/`ips`/`visits`/`page`/`id-token`/`ua`,
+  `user_id` is in `MonitorController::PROTECTED_DATA_KEYS` — the
+  public `update-data` endpoint (see "Arbitrary visitor data" above)
+  can never overwrite it, so a visitor's own front-end JS can't spoof
+  a different `user_id` onto their row.
 
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 

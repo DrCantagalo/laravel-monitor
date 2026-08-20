@@ -39,7 +39,7 @@ class MonitorController extends Controller
      * sobrescrever, mesmo que o front-end envie um par com esse nome.
      */
     protected const PROTECTED_DATA_KEYS = [
-        'sessions', 'ips', 'visits', 'page', 'id-token', 'ua',
+        'sessions', 'ips', 'visits', 'page', 'id-token', 'ua', 'user_id',
     ];
 
     /**

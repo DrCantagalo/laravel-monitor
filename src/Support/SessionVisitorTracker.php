@@ -4,6 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -80,6 +81,10 @@ class SessionVisitorTracker
                     $data['not_found'][$path] = true;
                 }
 
+                if (config('monitor.track_authenticated_user', true) && Auth::check()) {
+                    $data['user_id'] = Auth::id();
+                }
+
                 $user->data = $data;
                 $user->save();
             }
@@ -99,6 +104,10 @@ class SessionVisitorTracker
 
         if ($notFound) {
             $data['not_found'] = [$path => true];
+        }
+
+        if (config('monitor.track_authenticated_user', true) && Auth::check()) {
+            $data['user_id'] = Auth::id();
         }
 
         $user = Monitor::create(['data' => $data]);

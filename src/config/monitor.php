@@ -2,13 +2,23 @@
 
 return [
 
-    'version' => '0.1.23',
+    'version' => '0.1.24',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
     // rastrear" - lida por SessionVisitorTracker::track() e apagada assim
     // que consumida. Ver README, seção "Uso avançado".
     'skip_session_key' => 'avoid_monitor',
+
+    // Grava data['user_id'] (Auth::id()) na linha do Monitor do
+    // dispositivo/sessão atual sempre que Auth::check() for true - só uma
+    // tag a mais no JSON, nunca funde/reatribui a linha em si (1 linha
+    // continua = 1 dispositivo/navegador reconhecido via remember_cookie,
+    // ver SessionVisitorTracker::track()). Opt-out: apps sem Auth
+    // configurado, ou que não querem esse dado por política de
+    // privacidade, podem desligar com false. Ver README, seção
+    // "Authenticated user tagging".
+    'track_authenticated_user' => true,
 
     // Nome do cookie de longa duração usado para reconhecer visitantes
     // recorrentes (fluxo "remember me"). Ver README para o contrato do
