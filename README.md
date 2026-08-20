@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.1.24)
+# Laravel Monitor (v0.1.25)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -87,9 +87,10 @@ their row with that").
   current device's row, alongside `ua`/`ips`/`page`. It never merges
   or reassigns rows by `user_id`. If you need "one record per
   customer" for a CRM view, do that aggregation at read time
-  (`Monitor::where('data->user_id', $id)->get()`, joining the rows
-  yourself) — never a physical merge of the raw rows, which would race
-  under concurrent writes from multiple devices.
+  (`Monitor::forUserId($id)->get()`, joining the rows yourself — see
+  "Querying by user_id" below) — never a physical merge of the raw
+  rows, which would race under concurrent writes from multiple
+  devices.
 - **When it runs**: every request tracked by `SessionVisitorTracker`
   (session-based visitors) where `Auth::check()` is true, right after
   the Monitor row for the current request has already been
@@ -104,6 +105,40 @@ their row with that").
   public `update-data` endpoint (see "Arbitrary visitor data" above)
   can never overwrite it, so a visitor's own front-end JS can't spoof
   a different `user_id` onto their row.
+
+## Querying by user_id (CRM index)
+
+To support CRM lookups ("show me every device row for this customer")
+without a full table scan, the migrations add a generated column
+`monitors_user_id` (extracted from `data['user_id']`, VIRTUAL, MySQL-only —
+see caveat below) with an index (`monitors_user_id_idx`) on the `monitors`
+table.
+
+- **Use `Monitor::forUserId($id)`, not `Monitor::where('data->user_id',
+  $id)`.** This is not just a style preference: `where('data->user_id',
+  $id)` compiles to `json_unquote(json_extract(\`data\`, '$."user_id"'))`,
+  and even though that's the *exact* expression the generated column is
+  defined with, MySQL's optimizer does not match it to the column/index
+  automatically — confirmed via `EXPLAIN` on real MySQL 8 (`type: ALL`,
+  full table scan, `possible_keys: NULL`). Only querying the generated
+  column by name uses the index. `Monitor::forUserId($id)` (a scope on the
+  `Monitor` model) does this for you: `where('monitors_user_id', $id)`.
+- **Why the scope casts `$id` to a string**: `monitors_user_id` is
+  `VARCHAR`. Comparing it against a native PHP int through PDO (e.g.
+  `Auth::id()`, which is an int) makes MySQL list the index under
+  `possible_keys` but not actually use it (`key: NULL`) — an implicit
+  type-conversion cost, also confirmed via `EXPLAIN`. `forUserId()` casts
+  to `(string)` internally so the comparison is always string-vs-string
+  and the index is used (`type: ref`) regardless of what type you pass
+  in.
+- **MySQL-only.** The generated column's expression
+  (`json_unquote(json_extract(...))`) is MySQL syntax; this migration has
+  only been validated against MySQL (production target — see stack
+  convention at the top of this project's task queue). If you install
+  this package on a host using a different database driver (sqlite,
+  pgsql), this specific migration will need an equivalent (or you can
+  skip it — `data['user_id']` itself is written regardless of driver,
+  this only affects whether lookups by it are indexed).
 
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 

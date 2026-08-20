@@ -208,6 +208,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.25] - 2026-08-20
+### Added
+- Index for CRM lookups by `user_id`: new migration adds a generated
+  column `monitors_user_id` (extracted from `data['user_id']`, MySQL
+  `VIRTUAL`, explicit short name to stay under MySQL's 64-char
+  identifier limit) with an index (`monitors_user_id_idx`) on
+  `monitors`. New `Monitor::forUserId($id)` query scope — use it
+  instead of `where('data->user_id', $id)`, which does **not** use the
+  index (confirmed via `EXPLAIN` on real MySQL 8: the optimizer does
+  not match the raw JSON expression to the generated column
+  automatically). The scope also casts `$id` to `string` internally,
+  since comparing the `VARCHAR` generated column against a native PHP
+  int silently defeats the index too. MySQL-only migration — see
+  README "Querying by user_id".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
