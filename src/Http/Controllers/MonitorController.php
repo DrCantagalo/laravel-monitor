@@ -155,6 +155,9 @@ class MonitorController extends Controller
             case 'clearData':
                 return $this->clearData($request);
 
+            case 'pruneData':
+                return $this->pruneData($request);
+
             case 'updateBlockedIps':
                 return $this->updateBlockedIps($request);
 
@@ -549,6 +552,82 @@ class MonitorController extends Controller
             'success' => true,
             'message' => 'All monitor data cleared'
         ]);
+    }
+
+    /**
+     * Cleanup parcial, complementar ao truncate total de clearData:
+     * apaga só linhas de `Monitor`/`monitor_ip_stats` mais antigas que
+     * `older_than_days`, opcionalmente restrito às flagadas como
+     * scraper (`only_scraper_flagged`).
+     */
+    protected function pruneData(Request $request)
+    {
+        $olderThanDays = $request->input('older_than_days');
+        $onlyScraperFlagged = filter_var($request->input('only_scraper_flagged', false), FILTER_VALIDATE_BOOLEAN);
+
+        if (! is_numeric($olderThanDays) || (int) $olderThanDays < 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'older_than_days is required and must be a non-negative integer',
+            ], 422);
+        }
+
+        $cutoff = now()->subDays((int) $olderThanDays);
+
+        $monitorsDeleted = $this->pruneMonitors($cutoff, $onlyScraperFlagged);
+
+        $ipStatQuery = IpStat::where('last_seen', '<', $cutoff);
+        if ($onlyScraperFlagged) {
+            $ipStatQuery->where('flagged', true);
+        }
+        $ipStatsDeleted = $ipStatQuery->delete();
+
+        if ($monitorsDeleted > 0) {
+            $this->invalidatePagesCache();
+        }
+
+        if ($ipStatsDeleted > 0) {
+            $this->invalidateListingsCache();
+        }
+
+        return response()->json([
+            'success' => true,
+            'monitors_deleted' => $monitorsDeleted,
+            'ip_stats_deleted' => $ipStatsDeleted,
+        ]);
+    }
+
+    /**
+     * Sem `only_scraper_flagged`, o delete é direto em SQL (bulk, sem
+     * carregar nada em PHP). Com `only_scraper_flagged=true`, precisa do
+     * mesmo contorno de `buildPagesResult`: `data.flags.scraper` mora
+     * dentro do blob JSON de `Monitor.data`, sem coluna própria pra
+     * filtrar de forma portável entre sqlite/mysql/pgsql — então junta os
+     * ids em PHP via chunk e só deleta ao final (nunca durante o chunk).
+     */
+    protected function pruneMonitors($cutoff, bool $onlyScraperFlagged): int
+    {
+        if (! $onlyScraperFlagged) {
+            return Monitor::where('updated_at', '<', $cutoff)->delete();
+        }
+
+        $ids = [];
+
+        Monitor::where('updated_at', '<', $cutoff)
+            ->select('id', 'data')
+            ->chunkById(200, function ($monitors) use (&$ids) {
+                foreach ($monitors as $monitor) {
+                    if ((bool) data_get($monitor, 'data.flags.scraper', false)) {
+                        $ids[] = $monitor->id;
+                    }
+                }
+            });
+
+        if (empty($ids)) {
+            return 0;
+        }
+
+        return Monitor::whereIn('id', $ids)->delete();
     }
 
     /**

@@ -161,7 +161,7 @@ application's backend — only a short-lived, read-only token does.
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
-  `getBlockedIps`, `getBlockedPaths`)**. `clearData`,
+  `getBlockedIps`, `getBlockedPaths`)**. `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
   permanent `local_token` — a read token cannot mint another token or
@@ -396,6 +396,31 @@ separate from `getPages`' so this change doesn't touch its already
 released cache. `updateBlockedIps`, `unblockIp`, `flagScraperPath`, and
 `unflagPath` all bump it, since every one of them changes blocked-state
 data these three actions read.
+
+## Partial cleanup (`pruneData`)
+
+`GET /monitor/handler?action=pruneData` — same auth as `clearData`/
+`updateBlockedIps`: requires the permanent `local_token`, **never**
+accepted with the ephemeral read token from `issueReadToken`.
+
+Complements `clearData` (full truncate of `Monitor`, unchanged) with a
+partial, filtered delete:
+
+- `older_than_days` (required, non-negative integer — `422` if
+  missing or invalid): deletes `Monitor` rows whose `updated_at` is
+  older than `now() - older_than_days` days, and `monitor_ip_stats`
+  rows whose `last_seen` is older than the same cutoff.
+- `only_scraper_flagged` (optional boolean, default `false`): when
+  `true`, restricts the delete to rows flagged as scraper —
+  `data.flags.scraper` on `Monitor`, the `flagged` column on
+  `IpStat` — instead of every row past the cutoff.
+
+Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4}`.
+
+Bumps the `getPages`/`getVisitorsByIp` listing cache version counters
+(`invalidatePagesCache`/`invalidateListingsCache`) whenever something
+was actually deleted from the corresponding table, same mechanism as
+`flagScraperPath`/`updateBlockedIps` etc.
 
 ## Advanced usage
 

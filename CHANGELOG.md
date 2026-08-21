@@ -319,6 +319,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.31] - 2026-08-21
+### Added
+- New `pruneData` action on `MonitorController` (requires the
+  permanent `local_token`, same as `clearData`/`updateBlockedIps` — not
+  accepted with the ephemeral read token): partial cleanup, unlike
+  `clearData`'s full truncate. Params: `older_than_days` (required,
+  non-negative integer, `422` if missing/invalid), `only_scraper_flagged`
+  (optional boolean, default `false`). Deletes `Monitor` rows with
+  `updated_at` older than the cutoff and `monitor_ip_stats` rows with
+  `last_seen` older than the cutoff; when `only_scraper_flagged=true`,
+  restricts to rows flagged as scraper (`data.flags.scraper` on
+  `Monitor`, `flagged` on `IpStat`). Response: `{success,
+  monitors_deleted, ip_stats_deleted}`. Invalidates the `getPages`/
+  `getVisitorsByIp` listing caches when anything was actually deleted.
+  See README, "Partial cleanup (pruneData)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
