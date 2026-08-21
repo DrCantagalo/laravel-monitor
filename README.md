@@ -160,9 +160,10 @@ application's backend — only a short-lived, read-only token does.
   `config('monitor.read_token_ttl_minutes')` minutes (default 15), and
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only for
-  the `getData` action**. `clearData`, `updateBlockedIps`, `updateRules`, and
-  `issueReadToken` itself always require the permanent `local_token` — a
-  read token cannot mint another token or do anything beyond reading.
+  the `getData` action**. `clearData`, `updateBlockedIps`, `unblockIp`,
+  `flagScraperPath`, `unflagPath`, `updateRules`, and `issueReadToken`
+  itself always require the permanent `local_token` — a read token
+  cannot mint another token or do anything beyond reading.
 - **CORS**: routes under `monitor/*` carry their own dedicated CORS
   middleware (`MonitorCors`) — it does not read or depend on the host
   application's `config/cors.php`, since every client site has a different
@@ -224,6 +225,16 @@ WordPress).
     or `{"success": false, "message": "No path provided"}` (422) if
     `path` is missing/empty.
 
+- **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
+  `POST /monitor/handler?action=unflagPath` with
+  `{"path": "wp-admin/install.php"}` removes the path from
+  `monitor_blocked_paths` and clears the corresponding
+  `MonitorMethod::isPathBlocked()` cache entry immediately. Response:
+  `{"success": true, "path": "...", "was_flagged": true|false}` (`false`
+  when the path wasn't flagged to begin with — not an error). Does
+  **not** unblock the IPs `flagScraperPath` may have blocked because of
+  that path — use `unblockIp` for those individually.
+
 ## Manual IP blocking (`updateBlockedIps`)
 
 Blocks a list of IPs outright — `MonitorMethod` rejects (`403`) any
@@ -255,17 +266,25 @@ that weren't (or don't need to be) tied to a specific path.
   immediately for every IP in the request, so the block takes effect on
   the very next request instead of waiting out the cache TTL.
 
+- **`unblockIp`** (same auth as `updateBlockedIps`): reverts it (and any
+  `flagScraperPath` block on that IP) — `POST /monitor/handler?action=unblockIp`
+  with `{"ip": "203.0.113.7"}` removes the IP from `monitor_blocked_ips`
+  (whatever its `source`) and clears the block-check cache immediately.
+  Response: `{"success": true, "ip": "...", "was_blocked": true|false}`
+  (`false` when the IP wasn't blocked to begin with — not an error), or
+  `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
+  is missing/invalid.
+
 ## Scraper signal detection
 
-For requests **without an active session** (API calls, bots, most real
-scrapers — `MonitorMethod` delegates these to `AnonymousVisitorTracker`
-instead of the session-based tracker), each request is scored against a
-small set of heuristics before being recorded. This is detection only —
-it marks the `Monitor` record, it never blocks anything by itself
-(blocking is `flagScraperPath`/`updateBlockedIps`, both actions your own
+Every tracked request — with or without an active session — is scored
+against a small set of heuristics before being recorded, via the shared
+`ScraperSignalDetector`. This is detection only — it marks the `Monitor`
+record, it never blocks anything by itself (blocking is
+`flagScraperPath`/`updateBlockedIps`, both actions your own
 dashboard/automation can trigger after inspecting these flags).
 
-Signals checked by `AnonymousVisitorTracker::detectScraperSignals`:
+Signals checked by `ScraperSignalDetector::detect`:
 
 - **`high_frequency`**: more than `config('monitor.scraper_frequency_threshold')`
   requests (default `5`) from the same IP within

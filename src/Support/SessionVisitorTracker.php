@@ -10,6 +10,13 @@ use Symfony\Component\HttpFoundation\Response;
 
 class SessionVisitorTracker
 {
+    protected ScraperSignalDetector $scraperSignalDetector;
+
+    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null)
+    {
+        $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
+    }
+
     /**
      * Rastreia o visitante com sessão (web): remember-me, criação/
      * atualização do registro Monitor e cookie de remember quando um
@@ -85,6 +92,11 @@ class SessionVisitorTracker
                     $data['user_id'] = Auth::id();
                 }
 
+                $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
+                $data['flags'] = $data['flags'] ?? [];
+                $data['flags']['scraper'] = $this->scraperSignalDetector->isScraper($signals);
+                $data['flags']['scraper_signals'] = $signals;
+
                 $user->data = $data;
                 $user->save();
             }
@@ -93,6 +105,7 @@ class SessionVisitorTracker
         }
 
         $rememberToken = Str::random(40);
+        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
 
         $data = [
             'page' => [$path => 1],
@@ -100,6 +113,10 @@ class SessionVisitorTracker
             'ips'  => [$ip],
             'ua'   => $userAgent,
             'id-token' => $rememberToken,
+            'flags' => [
+                'scraper'         => $this->scraperSignalDetector->isScraper($signals),
+                'scraper_signals' => $signals,
+            ],
         ];
 
         if ($notFound) {

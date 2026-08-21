@@ -242,6 +242,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.27] - 2026-08-21
+### Added
+- Scraper-signal detection (frequency, user-agent, missing browser
+  headers) is now extracted into a shared `ScraperSignalDetector` and
+  runs on **both** trackers. Previously only `AnonymousVisitorTracker`
+  (requests without a session) evaluated it — `SessionVisitorTracker`
+  (the common case for a real browser visit) never set
+  `data.flags.scraper`/`data.flags.scraper_signals`, so scraper
+  suggestions were almost always empty in practice.
+- `unblockIp` action on `MonitorController`: reverts
+  `updateBlockedIps`/`flagScraperPath` for a single IP — removes it from
+  `monitor_blocked_ips` and clears the cache read by
+  `MonitorMethod::isBlocked()`.
+- `unflagPath` action on `MonitorController`: reverts `flagScraperPath`
+  for a path — removes it from `monitor_blocked_paths` and clears the
+  cache read by `MonitorMethod::isPathBlocked()`. Does not unblock the
+  IPs `flagScraperPath` may have blocked because of that path (use
+  `unblockIp` for those individually).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

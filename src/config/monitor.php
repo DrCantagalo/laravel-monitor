@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.1.26',
+    'version' => '0.1.27',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -36,10 +36,11 @@ return [
     // issueReadToken.
     'read_token_ttl_minutes' => 15,
 
-    // Heurística de detecção de scraper (MonitorMethod::detectScraperSignals),
-    // aplicada só a requests sem sessão. Cada sinal abaixo, se disparado,
-    // conta pra scraper_signal_threshold; não bloqueia nada sozinho, só
-    // marca data.flags.scraper (bloqueio de IP é feature separada).
+    // Heurística de detecção de scraper (ScraperSignalDetector::detect,
+    // compartilhada por AnonymousVisitorTracker e SessionVisitorTracker —
+    // requests com ou sem sessão). Cada sinal abaixo, se disparado, conta
+    // pra scraper_signal_threshold; não bloqueia nada sozinho, só marca
+    // data.flags.scraper (bloqueio de IP é feature separada).
 
     // Janela (segundos) e limite de requests do mesmo IP dentro dela pra
     // disparar o sinal de alta frequência.

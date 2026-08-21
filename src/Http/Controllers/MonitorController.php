@@ -141,8 +141,14 @@ class MonitorController extends Controller
             case 'updateBlockedIps':
                 return $this->updateBlockedIps($request);
 
+            case 'unblockIp':
+                return $this->unblockIp($request);
+
             case 'flagScraperPath':
                 return $this->flagScraperPath($request);
+
+            case 'unflagPath':
+                return $this->unflagPath($request);
 
             case 'updateRules':
                 return $this->updateRules($request);
@@ -241,6 +247,32 @@ class MonitorController extends Controller
     }
 
     /**
+     * Reverte `updateBlockedIps`/`flagScraperPath` para um IP: remove de
+     * `monitor_blocked_ips` e limpa o cache lido por
+     * `MonitorMethod::isBlocked()`.
+     */
+    protected function unblockIp(Request $request)
+    {
+        $ip = (string) $request->input('ip', '');
+
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $removed = BlockedIp::where('ip', $ip)->delete() > 0;
+        Cache::forget("monitor:blocked-ip:{$ip}");
+
+        return response()->json([
+            'success' => true,
+            'ip' => $ip,
+            'was_blocked' => $removed,
+        ]);
+    }
+
+    /**
      * Flaga um path (sem host - a parte "variável" da URL, ex:
      * "wp-admin/install.php") como scrapper. Duas coisas acontecem: (1) o
      * path entra em `monitor_blocked_paths`, checado por `MonitorMethod`
@@ -295,6 +327,34 @@ class MonitorController extends Controller
             'success' => true,
             'path' => $path,
             'blocked_ips' => array_keys($blockedIps),
+        ]);
+    }
+
+    /**
+     * Reverte `flagScraperPath` para um path: remove de
+     * `monitor_blocked_paths` e limpa o cache lido por
+     * `MonitorMethod::isPathBlocked()`. Não desbloqueia os IPs que
+     * `flagScraperPath` bloqueou por causa desse path — isso é feito
+     * separadamente via `unblockIp`.
+     */
+    protected function unflagPath(Request $request)
+    {
+        $path = ltrim((string) $request->input('path', ''), '/');
+
+        if ($path === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No path provided',
+            ], 422);
+        }
+
+        $removed = BlockedPath::where('path', $path)->delete() > 0;
+        Cache::forget("monitor:blocked-path:{$path}");
+
+        return response()->json([
+            'success' => true,
+            'path' => $path,
+            'was_flagged' => $removed,
         ]);
     }
 
