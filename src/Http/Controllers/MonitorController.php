@@ -9,6 +9,7 @@ use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockedPath;
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 
 class MonitorController extends Controller
 {
@@ -118,10 +119,13 @@ class MonitorController extends Controller
         $isLocalToken = $expected && $token && hash_equals($expected, $token);
 
         // Token de leitura efêmero (issueReadToken) só é aceito pras
-        // actions só-leitura (getData, getPages) — nunca pra
+        // actions só-leitura (getData, getPages, getVisitorsByIp,
+        // getBlockedIps, getBlockedPaths) — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken, que
         // exigem o local_token permanente.
-        $isValidReadToken = in_array($action, ['getData', 'getPages'], true)
+        $isValidReadToken = in_array($action, [
+            'getData', 'getPages', 'getVisitorsByIp', 'getBlockedIps', 'getBlockedPaths',
+        ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
 
@@ -138,6 +142,15 @@ class MonitorController extends Controller
 
             case 'getPages':
                 return $this->getPages($request);
+
+            case 'getVisitorsByIp':
+                return $this->getVisitorsByIp($request);
+
+            case 'getBlockedIps':
+                return $this->getBlockedIps($request);
+
+            case 'getBlockedPaths':
+                return $this->getBlockedPaths($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -339,6 +352,194 @@ class MonitorController extends Controller
         Cache::increment('monitor:pages:version');
     }
 
+    /**
+     * Enum de valores aceitos pelo parâmetro `filter` de getVisitorsByIp.
+     */
+    protected const VISITORS_FILTERS = ['all', 'flagged', 'clean', 'blocked'];
+
+    /**
+     * Lista paginada/filtrável de visitantes por IP, a partir de
+     * `monitor_ip_stats` (mantida via `IpStat::recordVisit` a cada
+     * request) — não escaneia `Monitor.data.ips` cru.
+     *
+     * `date_from`/`date_to` filtram pelo `last_seen` da linha `IpStat`
+     * (mesma aproximação documentada em getPages: "esse IP esteve ativo
+     * nesse período", não um timestamp por visita).
+     */
+    protected function getVisitorsByIp(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+        $filter = (string) $request->input('filter', 'all');
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+
+        if (! in_array($filter, self::VISITORS_FILTERS, true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid filter',
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('visitors', [
+            $page, $perPage, $filter, $dateFrom, $dateTo,
+        ]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo) {
+            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Ao contrário de getPages (que agrega um blob JSON por linha
+     * `Monitor` e por isso precisa carregar tudo em PHP),
+     * `monitor_ip_stats` já é uma linha por IP — filtro/ordenação/
+     * paginação são feitos direto em SQL. `blocked` (join lógico contra
+     * `monitor_blocked_ips`) usa `whereIn`/`whereNotIn` com a lista de
+     * IPs bloqueados em vez de um JOIN de verdade, pra manter o dataset
+     * de IPs bloqueados (normalmente pequeno) resolvido numa query só.
+     */
+    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
+    {
+        $query = IpStat::query();
+
+        if ($dateFrom) {
+            $query->where('last_seen', '>=', $dateFrom);
+        }
+
+        if ($dateTo) {
+            $query->where('last_seen', '<=', $dateTo);
+        }
+
+        $blockedIps = BlockedIp::pluck('ip');
+
+        match ($filter) {
+            'flagged' => $query->where('flagged', true),
+            'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
+            'blocked' => $query->whereIn('ip', $blockedIps),
+            default => null,
+        };
+
+        $paginator = $query->orderByDesc('visit_count')
+            ->paginate($perPage, ['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'], 'page', $page);
+
+        $items = collect($paginator->items())->map(function (IpStat $stat) use ($blockedIps) {
+            return [
+                'ip' => $stat->ip,
+                'visit_count' => $stat->visit_count,
+                'first_seen' => optional($stat->first_seen)->toIso8601String(),
+                'last_seen' => optional($stat->last_seen)->toIso8601String(),
+                'flagged' => $stat->flagged,
+                'flagged_signals' => $stat->flagged_signals,
+                'blocked' => $blockedIps->contains($stat->ip),
+            ];
+        })->values();
+
+        return [
+            'data' => $items,
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    /**
+     * Listagem paginada de `monitor_blocked_ips` (sem filtro além de
+     * paginação — dataset pequeno, mas pagina em SQL real já que não há
+     * blob JSON pra agregar aqui, ao contrário de getPages/getVisitorsByIp).
+     */
+    protected function getBlockedIps(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        $cacheKey = $this->listingsCacheKey('blocked-ips', [$page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
+            $paginator = BlockedIp::query()
+                ->orderByDesc('created_at')
+                ->paginate($perPage, ['ip', 'source', 'created_at'], 'page', $page);
+
+            return [
+                'data' => $paginator->items(),
+                'meta' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ];
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Listagem paginada de `monitor_blocked_paths` — mesmo padrão de
+     * getBlockedIps.
+     */
+    protected function getBlockedPaths(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        $cacheKey = $this->listingsCacheKey('blocked-paths', [$page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
+            $paginator = BlockedPath::query()
+                ->orderByDesc('created_at')
+                ->paginate($perPage, ['path', 'created_at'], 'page', $page);
+
+            return [
+                'data' => $paginator->items(),
+                'meta' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ];
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Chave de cache versionada compartilhada por getVisitorsByIp/
+     * getBlockedIps/getBlockedPaths — mesmo esquema de getPages, mas com
+     * contador de versão próprio (monitor:listings:version) pra não
+     * mexer no cache já lançado de getPages.
+     */
+    protected function listingsCacheKey(string $prefix, array $params): string
+    {
+        $version = Cache::get('monitor:listings:version', 1);
+
+        return "monitor:listings:{$prefix}:v{$version}:" . md5(json_encode($params));
+    }
+
+    /**
+     * Incrementa o contador de versão lido por getVisitorsByIp/
+     * getBlockedIps/getBlockedPaths — chamado por updateBlockedIps/
+     * unblockIp/flagScraperPath/unflagPath, já que todas mudam o estado
+     * de bloqueio refletido nessas listagens.
+     */
+    protected function invalidateListingsCache(): void
+    {
+        if (! Cache::has('monitor:listings:version')) {
+            Cache::forever('monitor:listings:version', 1);
+        }
+
+        Cache::increment('monitor:listings:version');
+    }
+
     protected function clearData(Request $request)
     {
         // futuramente: validação/admin check
@@ -386,6 +587,8 @@ class MonitorController extends Controller
             ], 422);
         }
 
+        $this->invalidateListingsCache();
+
         return response()->json([
             'success' => true,
             'blocked' => $blocked,
@@ -410,6 +613,7 @@ class MonitorController extends Controller
 
         $removed = BlockedIp::where('ip', $ip)->delete() > 0;
         Cache::forget("monitor:blocked-ip:{$ip}");
+        $this->invalidateListingsCache();
 
         return response()->json([
             'success' => true,
@@ -441,6 +645,7 @@ class MonitorController extends Controller
         BlockedPath::firstOrCreate(['path' => $path]);
         Cache::forget("monitor:blocked-path:{$path}");
         $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
 
         $blockedIps = [];
 
@@ -498,6 +703,7 @@ class MonitorController extends Controller
         $removed = BlockedPath::where('path', $path)->delete() > 0;
         Cache::forget("monitor:blocked-path:{$path}");
         $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
 
         return response()->json([
             'success' => true,

@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.1.29',
+    'version' => '0.1.30',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -72,5 +72,11 @@ return [
     // combinações de parâmetros de uma vez, mesmo as que ainda não
     // expiraram pelo TTL.
     'pages_cache_ttl_minutes' => 5,
+
+    // TTL (minutos) do cache de getVisitorsByIp/getBlockedIps/
+    // getBlockedPaths. Mesmo esquema de versão que pages_cache_ttl_minutes
+    // (contador próprio, monitor:listings:version), incrementado em
+    // updateBlockedIps/unblockIp/flagScraperPath/unflagPath.
+    'listings_cache_ttl_minutes' => 5,
 
 ];

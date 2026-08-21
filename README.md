@@ -160,7 +160,8 @@ application's backend — only a short-lived, read-only token does.
   `config('monitor.read_token_ttl_minutes')` minutes (default 15), and
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only
-  for read-only actions (`getData`, `getPages`)**. `clearData`,
+  for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
+  `getBlockedIps`, `getBlockedPaths`)**. `clearData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
   permanent `local_token` — a read token cannot mint another token or
@@ -323,8 +324,8 @@ recent `ScraperSignalDetector` result for that IP, same semantics as
 `data.flags.scraper` on `Monitor` (reflects the latest request, not an
 accumulated OR of every request ever seen from that IP).
 
-There's no dedicated read/pagination action for this table yet — it's
-maintained starting now so future querying doesn't need a backfill.
+See "Paginated visitor/blocklist listing" below for the read/pagination
+action on top of this table (`getVisitorsByIp`).
 
 ## Paginated page listing (`getPages`)
 
@@ -359,6 +360,42 @@ support `Cache::tags()`, invalidation works via a version counter
 instead: `flagScraperPath`/`unflagPath` bump it, which changes every
 `getPages` cache key at once — old entries are simply never read again
 and expire on their own TTL, rather than being individually deleted.
+
+## Paginated visitor/blocklist listing (`getVisitorsByIp`, `getBlockedIps`, `getBlockedPaths`)
+
+Same auth as `getData`/`getPages` (permanent `local_token` **or** the
+ephemeral read token from `issueReadToken`).
+
+- **`getVisitorsByIp`**: paginated/filterable listing of
+  `monitor_ip_stats` (one row per unique IP, maintained by
+  `IpStat::recordVisit()` on every tracked request — see "Per-IP stats"
+  above). Params: `page` (default `1`), `per_page` (default `20`, max
+  `100`), `filter` (`all` default, `flagged`, `clean`, `blocked` — an
+  IP counts as `blocked` if it's in `monitor_blocked_ips`; unknown
+  value returns `422`), `date_from`/`date_to` (optional, filters by the
+  row's `last_seen` — "this IP was active in this window", same
+  approximation as `getPages`). Response: `{"success": true, "data":
+  [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
+  "last_seen": "...", "flagged": false, "flagged_signals": null,
+  "blocked": false}, ...], "meta": {"page", "per_page", "total",
+  "last_page"}}`.
+- **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
+  of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
+  `monitor_blocked_paths` (`{"path", "created_at"}`) — no `filter`
+  param, just `page`/`per_page`. Ordered newest-first.
+
+Unlike `getPages` (which has to aggregate a JSON blob per `Monitor`
+row in PHP), these three query normalized tables directly, so
+filtering/ordering/pagination happen in SQL via a real
+`Model::paginate()`.
+
+Cached the same way as `getPages` (`Cache::remember` + a version
+counter, TTL `config('monitor.listings_cache_ttl_minutes')`, default 5
+minutes) but with its own counter (`monitor:listings:version`), kept
+separate from `getPages`' so this change doesn't touch its already
+released cache. `updateBlockedIps`, `unblockIp`, `flagScraperPath`, and
+`unflagPath` all bump it, since every one of them changes blocked-state
+data these three actions read.
 
 ## Advanced usage
 

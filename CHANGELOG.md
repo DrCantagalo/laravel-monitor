@@ -296,6 +296,29 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.30] - 2026-08-21
+### Added
+- New `getVisitorsByIp` action on `MonitorController` (also accepted
+  with the ephemeral read token): paginated/filterable listing of
+  `monitor_ip_stats`. Params: `page`, `per_page` (max 100), `filter`
+  (`all|flagged|clean|blocked`), `date_from`/`date_to` (filters by
+  `last_seen`). Response: `{success, data: [{ip, visit_count,
+  first_seen, last_seen, flagged, flagged_signals, blocked}], meta:
+  {page, per_page, total, last_page}}`.
+- New `getBlockedIps`/`getBlockedPaths` actions (same auth): plain
+  paginated listing of `monitor_blocked_ips`/`monitor_blocked_paths`
+  (`page`/`per_page` only). Response shape mirrors the other listing
+  actions.
+- All three query their tables directly via `Model::paginate()` (no
+  JSON blob to aggregate, unlike `getPages`). Cached the same way as
+  `getPages` (`Cache::remember`, TTL
+  `config('monitor.listings_cache_ttl_minutes')`, default 5) but with
+  its own version counter (`monitor:listings:version`), bumped by
+  `updateBlockedIps`/`unblockIp`/`flagScraperPath`/`unflagPath`. See
+  README, "Paginated visitor/blocklist listing".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
