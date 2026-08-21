@@ -309,6 +309,22 @@ the number of signals that fired reaches
 weak signal (e.g. just a missing `Accept-Language`) isn't enough on its
 own, avoiding false positives from unusual-but-legitimate clients.
 
+## Per-IP stats (`monitor_ip_stats`)
+
+Every tracked request also upserts a row in `monitor_ip_stats` — one row
+per unique IP, keyed on `ip`, via `IpStat::recordVisit()` — as a
+lightweight index for listing/paginating/filtering visitors by IP without
+scanning every `Monitor.data.ips` JSON array (that scan doesn't paginate
+or filter well at any real volume). Columns: `visit_count` (incremented
+on every tracked request from that IP), `first_seen`/`last_seen`
+(timestamps), and `flagged`/`flagged_signals` — mirroring the most
+recent `ScraperSignalDetector` result for that IP, same semantics as
+`data.flags.scraper` on `Monitor` (reflects the latest request, not an
+accumulated OR of every request ever seen from that IP).
+
+There's no dedicated read/pagination action for this table yet — it's
+maintained starting now so future querying doesn't need a backfill.
+
 ## Advanced usage
 
 ### Skipping tracking for a request

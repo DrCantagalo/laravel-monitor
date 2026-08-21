@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Support;
 
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Http\Request;
 
@@ -23,6 +24,7 @@ class AnonymousVisitorTracker
     {
         $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
+        IpStat::recordVisit($ip, $isScraper, $signals);
 
         $user = Monitor::where('data->ips', 'like', "%{$ip}%")->first();
 

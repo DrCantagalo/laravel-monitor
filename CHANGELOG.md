@@ -263,6 +263,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.28] - 2026-08-21
+### Added
+- New `monitor_ip_stats` table (`ip` unique, `visit_count`, `first_seen`,
+  `last_seen`, `flagged`, `flagged_signals`, timestamps) and `IpStat`
+  model, maintained via `IpStat::recordVisit()` from both
+  `AnonymousVisitorTracker` and `SessionVisitorTracker` on every tracked
+  request. `flagged`/`flagged_signals` mirror the most recent
+  `ScraperSignalDetector` result for that IP (same semantics as
+  `data.flags.scraper` on `Monitor` — not an accumulated OR). This is
+  the base for listing/paginating/filtering visitors by IP without
+  scanning every `Monitor.data.ips` JSON array — no new query action
+  reads it yet (that's a later task); this only creates and maintains
+  the table.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

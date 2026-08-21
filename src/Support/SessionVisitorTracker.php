@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Support;
 
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -93,9 +94,11 @@ class SessionVisitorTracker
                 }
 
                 $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
+                $isScraper = $this->scraperSignalDetector->isScraper($signals);
                 $data['flags'] = $data['flags'] ?? [];
-                $data['flags']['scraper'] = $this->scraperSignalDetector->isScraper($signals);
+                $data['flags']['scraper'] = $isScraper;
                 $data['flags']['scraper_signals'] = $signals;
+                IpStat::recordVisit($ip, $isScraper, $signals);
 
                 $user->data = $data;
                 $user->save();
@@ -106,6 +109,8 @@ class SessionVisitorTracker
 
         $rememberToken = Str::random(40);
         $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
+        $isScraper = $this->scraperSignalDetector->isScraper($signals);
+        IpStat::recordVisit($ip, $isScraper, $signals);
 
         $data = [
             'page' => [$path => 1],
@@ -114,7 +119,7 @@ class SessionVisitorTracker
             'ua'   => $userAgent,
             'id-token' => $rememberToken,
             'flags' => [
-                'scraper'         => $this->scraperSignalDetector->isScraper($signals),
+                'scraper'         => $isScraper,
                 'scraper_signals' => $signals,
             ],
         ];
