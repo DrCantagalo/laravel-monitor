@@ -159,11 +159,12 @@ application's backend — only a short-lived, read-only token does.
   the other admin actions): generates a random token, stores it in cache for
   `config('monitor.read_token_ttl_minutes')` minutes (default 15), and
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
-- The token returned by `issueReadToken` is accepted as a bearer **only for
-  the `getData` action**. `clearData`, `updateBlockedIps`, `unblockIp`,
-  `flagScraperPath`, `unflagPath`, `updateRules`, and `issueReadToken`
-  itself always require the permanent `local_token` — a read token
-  cannot mint another token or do anything beyond reading.
+- The token returned by `issueReadToken` is accepted as a bearer **only
+  for read-only actions (`getData`, `getPages`)**. `clearData`,
+  `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
+  `updateRules`, and `issueReadToken` itself always require the
+  permanent `local_token` — a read token cannot mint another token or
+  do anything beyond reading.
 - **CORS**: routes under `monitor/*` carry their own dedicated CORS
   middleware (`MonitorCors`) — it does not read or depend on the host
   application's `config/cors.php`, since every client site has a different
@@ -324,6 +325,40 @@ accumulated OR of every request ever seen from that IP).
 
 There's no dedicated read/pagination action for this table yet — it's
 maintained starting now so future querying doesn't need a backfill.
+
+## Paginated page listing (`getPages`)
+
+`GET /monitor/handler?action=getPages` — same auth as `getData` (the
+permanent `local_token` **or** the ephemeral read token from
+`issueReadToken`). Aggregates every `Monitor.data.page`/`data.not_found`/
+`data.flags.scraper` into one entry per path (`host/path`, same key
+format as `data.page`) instead of shipping raw `Monitor` rows:
+
+- `page` (default `1`), `per_page` (default `20`, max `100`).
+- `filter`: `all` (default), `404` (path was ever hit while the response
+  was a 404), `clean` (not 404, not scraper, not blocked), `scraper`
+  (at least one visit to that path came from a `Monitor` flagged
+  `data.flags.scraper`), `blocked` (path is in `monitor_blocked_paths`,
+  matched by suffix the same way `flagScraperPath` does). An unknown
+  `filter` value returns `422`.
+- `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
+  accepts for a `where` comparison): filters by the **`Monitor` row's**
+  `updated_at`, not a per-page-hit timestamp — the schema has no
+  per-visit timestamp (one row aggregates every page a visitor hit), so
+  this is "that visitor was active in this window", not "this path was
+  hit on this exact date". Good enough to narrow down recent activity;
+  don't rely on it for exact per-hit auditing.
+- Response: `{"success": true, "data": [{"path": "example.com/a",
+  "hits": 12, "not_found": false, "scraper": false, "blocked": false},
+  ...], "meta": {"page": 1, "per_page": 20, "total": 47, "last_page": 3}}`.
+
+Result is cached (`Cache::remember`, TTL
+`config('monitor.pages_cache_ttl_minutes')`, default 5 minutes) keyed by
+a hash of the request params. Since the array/file cache drivers don't
+support `Cache::tags()`, invalidation works via a version counter
+instead: `flagScraperPath`/`unflagPath` bump it, which changes every
+`getPages` cache key at once — old entries are simply never read again
+and expire on their own TTL, rather than being individually deleted.
 
 ## Advanced usage
 

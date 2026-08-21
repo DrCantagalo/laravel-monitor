@@ -117,10 +117,11 @@ class MonitorController extends Controller
 
         $isLocalToken = $expected && $token && hash_equals($expected, $token);
 
-        // Token de leitura efêmero (issueReadToken) só é aceito pra
-        // action getData — nunca pra clearData/updateBlockedIps/
-        // updateRules/issueReadToken, que exigem o local_token permanente.
-        $isValidReadToken = $action === 'getData'
+        // Token de leitura efêmero (issueReadToken) só é aceito pras
+        // actions só-leitura (getData, getPages) — nunca pra
+        // clearData/updateBlockedIps/updateRules/issueReadToken, que
+        // exigem o local_token permanente.
+        $isValidReadToken = in_array($action, ['getData', 'getPages'], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
 
@@ -134,6 +135,9 @@ class MonitorController extends Controller
         switch ($action) {
             case 'getData':
                 return $this->getData($request);
+
+            case 'getPages':
+                return $this->getPages($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -191,6 +195,148 @@ class MonitorController extends Controller
             'success' => true,
             'data' => $data
         ]);
+    }
+
+    /**
+     * Enum de valores aceitos pelo parâmetro `filter` de getPages.
+     */
+    protected const PAGES_FILTERS = ['all', '404', 'clean', 'scraper', 'blocked'];
+
+    /**
+     * Lista paginada/filtrável de paths visitados, agregando hits/estado
+     * 404/scraper/blocked por path (chave `host/path`, mesmo formato de
+     * `data.page`) — nunca manda as linhas `Monitor` cruas pro cliente.
+     *
+     * `date_from`/`date_to` filtram pela `updated_at` da linha `Monitor`
+     * (não existe timestamp por página/hit no schema atual — cada linha
+     * agrega várias páginas de um mesmo visitante — então isso é uma
+     * aproximação: "atividade daquele visitante no período", não
+     * "hit exato nesse path na data X").
+     */
+    protected function getPages(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+        $filter = (string) $request->input('filter', 'all');
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+
+        if (! in_array($filter, self::PAGES_FILTERS, true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid filter',
+            ], 422);
+        }
+
+        $version = Cache::get('monitor:pages:version', 1);
+        $cacheKey = 'monitor:pages:v' . $version . ':' . md5(json_encode([
+            $page, $perPage, $filter, $dateFrom, $dateTo,
+        ]));
+        $ttl = now()->addMinutes((int) config('monitor.pages_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo) {
+            return $this->buildPagesResult($page, $perPage, $filter, $dateFrom, $dateTo);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Agrega `data.page`/`data.not_found`/`data.flags.scraper` de todas
+     * as linhas `Monitor` (opcionalmente restritas por `updated_at`) num
+     * mapa por path, aplica `filter`, ordena por hits desc e pagina em
+     * memória — a agregação não dá pra fazer em SQL porque os dados
+     * ficam dentro de um blob JSON por linha (mesmo motivo de
+     * `flagScraperPath` iterar em PHP em vez de query direta).
+     */
+    protected function buildPagesResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
+    {
+        $query = Monitor::query();
+
+        if ($dateFrom) {
+            $query->where('updated_at', '>=', $dateFrom);
+        }
+
+        if ($dateTo) {
+            $query->where('updated_at', '<=', $dateTo);
+        }
+
+        $aggregated = [];
+
+        $query->select('data')->chunk(200, function ($monitors) use (&$aggregated) {
+            foreach ($monitors as $monitor) {
+                $isScraper = (bool) data_get($monitor, 'data.flags.scraper', false);
+                $notFound = (array) data_get($monitor, 'data.not_found', []);
+
+                foreach ((array) data_get($monitor, 'data.page', []) as $path => $hits) {
+                    $aggregated[$path] ??= [
+                        'path' => $path,
+                        'hits' => 0,
+                        'not_found' => false,
+                        'scraper' => false,
+                    ];
+
+                    $aggregated[$path]['hits'] += (int) $hits;
+
+                    if (! empty($notFound[$path])) {
+                        $aggregated[$path]['not_found'] = true;
+                    }
+
+                    if ($isScraper) {
+                        $aggregated[$path]['scraper'] = true;
+                    }
+                }
+            }
+        });
+
+        $blockedPaths = BlockedPath::pluck('path');
+
+        foreach ($aggregated as $path => &$row) {
+            $row['blocked'] = $blockedPaths->contains(
+                fn ($blockedPath) => $path === $blockedPath || str_ends_with($path, '/' . $blockedPath)
+            );
+        }
+        unset($row);
+
+        $filtered = array_values(array_filter($aggregated, function ($row) use ($filter) {
+            return match ($filter) {
+                '404' => $row['not_found'],
+                'clean' => ! $row['not_found'] && ! $row['scraper'] && ! $row['blocked'],
+                'scraper' => $row['scraper'],
+                'blocked' => $row['blocked'],
+                default => true,
+            };
+        }));
+
+        usort($filtered, fn ($a, $b) => $b['hits'] <=> $a['hits']);
+
+        $total = count($filtered);
+        $items = array_slice($filtered, ($page - 1) * $perPage, $perPage);
+
+        return [
+            'data' => $items,
+            'meta' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total' => $total,
+                'last_page' => max(1, (int) ceil($total / $perPage)),
+            ],
+        ];
+    }
+
+    /**
+     * Incrementa o contador de versão lido por getPages — mutações
+     * (flagScraperPath/unflagPath) invalidam todas as combinações de
+     * parâmetros cacheadas de uma vez, já que os drivers array/file não
+     * suportam Cache::tags().
+     */
+    protected function invalidatePagesCache(): void
+    {
+        if (! Cache::has('monitor:pages:version')) {
+            Cache::forever('monitor:pages:version', 1);
+        }
+
+        Cache::increment('monitor:pages:version');
     }
 
     protected function clearData(Request $request)
@@ -294,6 +440,7 @@ class MonitorController extends Controller
 
         BlockedPath::firstOrCreate(['path' => $path]);
         Cache::forget("monitor:blocked-path:{$path}");
+        $this->invalidatePagesCache();
 
         $blockedIps = [];
 
@@ -350,6 +497,7 @@ class MonitorController extends Controller
 
         $removed = BlockedPath::where('path', $path)->delete() > 0;
         Cache::forget("monitor:blocked-path:{$path}");
+        $this->invalidatePagesCache();
 
         return response()->json([
             'success' => true,

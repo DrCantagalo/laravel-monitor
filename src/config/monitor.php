@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.1.28',
+    'version' => '0.1.29',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -64,5 +64,13 @@ return [
     // monitor_blocked_ips/monitor_blocked_paths a cada request. Invalidado
     // por IP/path ao bloquear via updateBlockedIps/flagScraperPath.
     'blocked_ip_cache_ttl' => 60,
+
+    // TTL (minutos) do cache da action getPages (resultado já agregado e
+    // paginado). Chave inclui um contador de versão incrementado em
+    // flagScraperPath/unflagPath (não há suporte a Cache::tags() nos
+    // drivers array/file), então uma mutação invalida todas as
+    // combinações de parâmetros de uma vez, mesmo as que ainda não
+    // expiraram pelo TTL.
+    'pages_cache_ttl_minutes' => 5,
 
 ];

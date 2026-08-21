@@ -279,6 +279,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.29] - 2026-08-21
+### Added
+- New `getPages` action on `MonitorController` (also accepted with the
+  ephemeral read token, same as `getData`): server-side aggregated,
+  paginated, filterable path listing — never ships raw `Monitor` rows.
+  Params: `page`, `per_page` (max 100), `filter`
+  (`all|404|clean|scraper|blocked`), `date_from`/`date_to`. Response:
+  `{success, data: [{path, hits, not_found, scraper, blocked}], meta:
+  {page, per_page, total, last_page}}`. Cached (`Cache::remember`, TTL
+  `config('monitor.pages_cache_ttl_minutes')`, default 5) by a hash of
+  the request params plus a version counter that `flagScraperPath`/
+  `unflagPath` bump on every call — invalidates every cached
+  combination at once (array/file cache drivers don't support
+  `Cache::tags()`). See README, "Paginated page listing (`getPages`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
