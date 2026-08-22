@@ -12,8 +12,8 @@ return new class extends Migration
             $table->id();
             $table->string('ip')->unique();
             $table->unsignedInteger('visit_count')->default(1);
-            $table->timestamp('first_seen');
-            $table->timestamp('last_seen');
+            $table->timestamp('first_seen')->useCurrent();
+            $table->timestamp('last_seen')->useCurrent();
             $table->boolean('flagged')->default(false);
             // Sinais do ScraperSignalDetector no request mais recente
             // desse IP (mesmo array que data.flags.scraper_signals no

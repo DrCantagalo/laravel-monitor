@@ -337,6 +337,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.32] - 2026-08-22
+### Fixed
+- `2026_08_21_000000_create_monitor_ip_stats_table` migration failed on
+  real MySQL (`SQLSTATE[42000]: ... Invalid default value for
+  'last_seen'`) — `first_seen`/`last_seen` were non-nullable `timestamp`
+  columns with no default, which MySQL 8 rejects under
+  `explicit_defaults_for_timestamp` (only the sandbox's SQLite test
+  environment let this slide, so it went unnoticed until a real deploy).
+  Added `->useCurrent()` to both columns.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
