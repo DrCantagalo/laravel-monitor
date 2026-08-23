@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\Facade;
 
 /**
  * @method static void skipTracking()
+ * @method static bool tag(array $data)
+ * @method static bool recognize()
  *
  * @see \Drcantagalo\LaravelMonitor\Support\Monitor
  */

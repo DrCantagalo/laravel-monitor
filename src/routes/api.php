@@ -8,9 +8,8 @@ Route::middleware(['api', MonitorCors::class])->prefix('monitor')->group(functio
     Route::any('/handler', [MonitorController::class, 'handle']);
 });
 
-// Ações públicas do visitante (precisam de sessão de cookies, por isso
-// 'web' em vez de 'api'). GET pra não exigir CSRF token do app hospedeiro.
-Route::middleware('web')->prefix('monitor')->group(function () {
-    Route::get('/remember-me', [MonitorController::class, 'rememberMe']);
-    Route::get('/update-data', [MonitorController::class, 'updateData']);
-});
+// As antigas rotas públicas de visitante (`GET /monitor/remember-me` e
+// `GET /monitor/update-data`) foram removidas em v0.2.0 — nenhuma rota
+// HTTP pública era aberta sem o app hospedeiro estar ciente disso. Use
+// `Monitor::recognize()`/`Monitor::tag()` (facade, server-side) no lugar.
+// Ver CHANGELOG v0.2.0 e README.

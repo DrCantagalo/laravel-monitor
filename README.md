@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.1.25)
+# Laravel Monitor (v0.2.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -13,61 +13,80 @@ stores it in `data['id-token']`, and attaches it to the response as a
 long-duration cookie so the same browser can be recognized again after its
 PHP session expires.
 
-Contract for the front-end of the host application:
+> ⚠️ **Breaking change in v0.2.0**: the public `GET /monitor/remember-me`
+> route was removed — the package no longer opens an HTTP route for this
+> without the host app's explicit awareness. Use `Monitor::recognize()`
+> below instead (server-side, no HTTP round-trip). See CHANGELOG for the
+> migration note.
+
+Contract for the host application:
 
 - **Cookie name**: `config('monitor.remember_cookie')`, default
   `monitor_id_token`. Duration: `config('monitor.remember_cookie_days')`
   days, default 1825 (5 years). The package sets this cookie itself — the
-  front-end never needs to create or read it directly (it isn't meant to
+  host app never needs to create or read it directly (it isn't meant to
   be parsed from `document.cookie`; the browser just carries it back
   automatically on every request).
-- **Automatic reconnection (since v0.1.22)**: `MonitorMethod` now also
+- **Automatic reconnection (since v0.1.22)**: `MonitorMethod` also
   checks the `monitor_id_token` cookie directly, on the very first request
-  of a new PHP session — before any front-end JS has had a chance to run.
+  of a new PHP session — before anything else has had a chance to run.
   This closes a race present in earlier versions, where the first page
   load of a new session always created a brand-new `Monitor` (overwriting
-  the cookie with a fresh token) before the dedicated endpoint below could
-  ever run, permanently losing the original visitor's identity. Host apps
-  don't need to do anything for this — it's transparent — but it means the
-  cookie alone is now sufficient; the dedicated endpoint is a
+  the cookie with a fresh token) before anything below could ever run,
+  permanently losing the original visitor's identity. Host apps don't
+  need to do anything for this — it's transparent — but it means the
+  cookie alone is now sufficient; `Monitor::recognize()` is a
   belt-and-suspenders option, not a requirement, for host apps that want
   to force reconnection at a specific point (e.g. right after consuming a
   cookie-consent flow that may have delayed the first tracked request).
-- **Endpoint**: `GET /monitor/remember-me`. No request body needed — the
-  cookie above travels with the request automatically. Calling it is
-  optional since v0.1.22 (see above), but still supported for host apps
-  that already integrate with it, or that want to trigger reconnection
-  explicitly instead of relying on the automatic first-request check.
-  Response: `{"success": true}` when a matching visitor was found and
-  merged into the current session, or `{"success": false, "message": "..."}`
-  when there's no cookie yet (first-ever visit) or no matching record
-  (cookie is stale/invalid).
-- Calling the endpoint sets `session(['remember_me' => $token])`; the
-  `MonitorMethod` middleware picks that up on the very same request (it
-  runs after the controller, on the way back out) and merges the returning
-  visitor into the current PHP session.
+- **`Monitor::recognize(): bool`**. Call it server-side, from within the
+  same request that should pick up the returning visitor — it reads the
+  cookie above off the current request (`request()->cookie(...)`, no HTTP
+  call involved) and looks up the matching `Monitor` row. Returns `true`
+  when a matching visitor was found (and merged into the current PHP
+  session), `false` when there's no cookie yet (first-ever visit) or no
+  matching record (cookie is stale/invalid).
+
+  ```php
+  use Drcantagalo\LaravelMonitor\Facades\Monitor;
+
+  if (Monitor::recognize()) {
+      // returning visitor recognized and merged into this session
+  }
+  ```
+- Under the hood, `recognize()` sets `session(['remember_me' => $token])`;
+  the `MonitorMethod` middleware picks that up on the very same request
+  (it runs after your code, on the way back out) and merges the returning
+  visitor into the current PHP session — same mechanism as before, just
+  triggered by a direct method call instead of an HTTP request.
 
 ## Arbitrary visitor data (segmentation/tags)
 
-Lets the host application's front-end attach arbitrary key/value pairs
-(language, tags, preferences, etc.) to the `Monitor` record of the current
-visitor session — a segmentation/tagging base, not a CRM/lead system yet.
+Lets the host application attach arbitrary key/value pairs (language,
+tags, preferences, etc.) to the `Monitor` record of the current visitor
+session — a segmentation/tagging base, not a CRM/lead system yet.
 
-- **Endpoint**: `GET /monitor/update-data?data[key]=value`. Requires an
+> ⚠️ **Breaking change in v0.2.0**: the public `GET /monitor/update-data`
+> route was removed — same rationale as `remember-me` above. Use
+> `Monitor::tag()` below instead.
+
+- **`Monitor::tag(array $data): bool`**. Call it server-side. Requires an
   active monitor session (i.e. `MonitorMethod` must have already run at
-  least once for this visitor — same precondition as `remember-me`). No
-  request body needed, query string only, same GET-to-avoid-CSRF rationale
-  as `remember-me`.
-- Nested query params are read as-is: `?data[lang]=pt&data[tags][]=newsletter`
-  merges `lang` and `tags` into the Monitor's `data`.
-- **Protected keys**: `sessions`, `ips`, `visits`, `page`, `id-token`, `ua`
-  are silently ignored if present in the payload — these are written
-  exclusively by `MonitorMethod`/`Monitor::newVisit`, and letting the
-  front-end overwrite them would corrupt tracking. Every other key is
-  accepted freely (schema intentionally left open — see below).
-- Response: `{"success": true, "monitor_id": <id>}` on success;
-  `{"success": false, "message": "..."}` (400) when there's no active
-  monitor session yet, or (422) when no `data` payload was sent.
+  least once for this visitor — same precondition as `recognize()`).
+  Returns `true` on success; `false` when there's no active monitor
+  session yet, or when `$data` is empty.
+
+  ```php
+  use Drcantagalo\LaravelMonitor\Facades\Monitor;
+
+  Monitor::tag(['lang' => 'pt', 'tags' => ['newsletter']]);
+  ```
+- **Protected keys**: `sessions`, `ips`, `visits`, `page`, `id-token`, `ua`,
+  `user_id` (`Drcantagalo\LaravelMonitor\Support\Monitor::PROTECTED_DATA_KEYS`)
+  are silently ignored if present in `$data` — these are written
+  exclusively by `MonitorMethod`/`Monitor::newVisit`, and letting a caller
+  overwrite them would corrupt tracking. Every other key is accepted
+  freely (schema intentionally left open — see below).
 - Design note: the schema is deliberately unconstrained so it can later
   support linking a visitor to a real lead/contact, an opt-in shared
   blacklist across sites, or an external IP-reputation feed — none of
@@ -101,10 +120,10 @@ their row with that").
   `false` to opt out — e.g. host apps without `Auth` configured, or
   that don't want this data for privacy-policy reasons.
 - **Protected key**: like `sessions`/`ips`/`visits`/`page`/`id-token`/`ua`,
-  `user_id` is in `MonitorController::PROTECTED_DATA_KEYS` — the
-  public `update-data` endpoint (see "Arbitrary visitor data" above)
-  can never overwrite it, so a visitor's own front-end JS can't spoof
-  a different `user_id` onto their row.
+  `user_id` is in
+  `Drcantagalo\LaravelMonitor\Support\Monitor::PROTECTED_DATA_KEYS` — a
+  call to `Monitor::tag()` (see "Arbitrary visitor data" above) can never
+  overwrite it, so it can't be spoofed onto a row by mistake.
 
 ## Querying by user_id (CRM index)
 

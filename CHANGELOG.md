@@ -337,6 +337,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.2.0] - 2026-08-23
+### Changed — BREAKING
+- Removed the two public visitor-facing HTTP routes,
+  `GET /monitor/update-data` and `GET /monitor/remember-me`, along with
+  `MonitorController::updateData()`/`rememberMe()`. The package no
+  longer opens public routes in a host application without its explicit
+  awareness — those two existed purely so the host app's front-end
+  could call them directly, which is exactly the kind of implicit
+  public surface this removes.
+- Added `Monitor::tag(array $data): bool` and `Monitor::recognize(): bool`
+  on the `Monitor` facade
+  (`Drcantagalo\LaravelMonitor\Facades\Monitor`) as the server-side
+  replacement — same underlying logic as the removed controller
+  methods (session lookup, protected-key filtering, remember-me cookie
+  lookup), just called directly instead of over HTTP. Both return a
+  plain bool instead of an HTTP/JSON response; `recognize()` now also
+  verifies the cookie actually matches a `Monitor` row before returning
+  `true` (the old endpoint returned `success: true` whenever the cookie
+  was merely present, deferring the real match to
+  `SessionVisitorTracker::track()` later in the same request).
+- `MonitorController::PROTECTED_DATA_KEYS` moved to
+  `Drcantagalo\LaravelMonitor\Support\Monitor::PROTECTED_DATA_KEYS`
+  (public constant) so it survives the controller methods it backed.
+- **Migration**: if your host app's front-end was calling
+  `GET /monitor/update-data` or `GET /monitor/remember-me` directly
+  (e.g. via `fetch`/AJAX from the browser), those requests will now
+  404. Move the call server-side instead: replace it with
+  `Monitor::tag([...])` / `Monitor::recognize()` in the controller/route
+  handler serving that page, before the response is sent. See README,
+  "Remember-me" and "Arbitrary visitor data".
+- The `local_token`/`issueReadToken` auth scheme for the `/monitor/handler`
+  admin/dashboard endpoint is unaffected by this change.
+
+---
+
 ## [0.1.32] - 2026-08-22
 ### Fixed
 - `2026_08_21_000000_create_monitor_ip_stats_table` migration failed on
