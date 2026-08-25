@@ -13,15 +13,17 @@ class MonitorServiceProvider extends ServiceProvider
     {
         $jsonPath = storage_path('monitor/installation.json');
 
+        // installation.json (escrito por MonitorInstallCommand) guarda 5
+        // campos, mas só local_token é lido de volta em algum lugar do
+        // pacote (MonitorController::handle(), pra autenticar chamadas do
+        // dashboard) — os outros 4 (installation_hash/external_token/
+        // installation_code/installed_at) continuam só no arquivo, sem
+        // custo de reprocessar em todo boot sem consumidor.
         if (file_exists($jsonPath)) {
             $data = json_decode(file_get_contents($jsonPath), true);
-            
+
             config([
-                'monitor.installation_hash' => $data['installation_hash'] ?? null,
-                'monitor.local_token'       => $data['local_token'] ?? null,
-                'monitor.external_token'    => $data['external_token'] ?? null,
-                'monitor.installation_code' => $data['installation_code'] ?? null,
-                'monitor.installed_at'      => $data['installed_at'] ?? null,
+                'monitor.local_token' => $data['local_token'] ?? null,
             ]);
         }
 
