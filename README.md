@@ -222,7 +222,8 @@ application's backend — only a short-lived, read-only token does.
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
-  `getBlockedIps`, `getBlockedPaths`)**. `clearData`, `pruneData`,
+  `getBlockedIps`, `getBlockedPaths`, `getUsers`, `getUserVisits`)**.
+  `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
   permanent `local_token` — a read token cannot mint another token or
