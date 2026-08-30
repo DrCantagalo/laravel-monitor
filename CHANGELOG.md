@@ -384,6 +384,32 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.2.1] - 2026-08-30
+### Added
+- New `getUsers` action: paginated, aggregated listing of visitors by
+  `user_id` (CRM), for a dashboard's "who are my authenticated users"
+  view. Returns `user_id`, `visits_count`, `last_activity` (max
+  `updated_at` across that user's `Monitor` rows), and — only when
+  already present in `data` via `Monitor::tag(['name' => ..., 'email'
+  => ...])` — `name`/`email`. Aggregation and pagination run entirely
+  in SQL, grouped by the indexed generated column
+  (`monitors_user_id`, added in `0.1.25`) on MySQL, never the raw
+  `data->user_id` expression (same reasoning as `Monitor::forUserId()`
+  — see README, "Querying by user_id").
+- New `getUserVisits` action: given a `user_id`, paginated listing of
+  that user's `Monitor` rows (via `Monitor::forUserId()`) — the same
+  data each row already carries (pages, IPs, timestamps), nothing new
+  captured.
+- Both added to the read-only token group (`getData`/`getPages`/etc):
+  accept the permanent `local_token` or the ephemeral read token from
+  `issueReadToken`, cached the same way as `getVisitorsByIp`/
+  `getBlockedIps` (`Cache::remember` + the `monitor:listings:version`
+  counter).
+
+See README, "User listing (`getUsers`, `getUserVisits`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

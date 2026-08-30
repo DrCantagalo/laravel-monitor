@@ -38,6 +38,7 @@ class MonitorController extends Controller
         // exigem o local_token permanente.
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getBlockedIps', 'getBlockedPaths',
+            'getUsers', 'getUserVisits',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -64,6 +65,12 @@ class MonitorController extends Controller
 
             case 'getBlockedPaths':
                 return $this->getBlockedPaths($request);
+
+            case 'getUsers':
+                return $this->getUsers($request);
+
+            case 'getUserVisits':
+                return $this->getUserVisits($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -413,6 +420,134 @@ class MonitorController extends Controller
             $paginator = BlockedPath::query()
                 ->orderByDesc('created_at')
                 ->paginate($perPage, ['path', 'created_at'], 'page', $page);
+
+            return [
+                'data' => $paginator->items(),
+                'meta' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ];
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Nome da coluna usada para agrupar/filtrar `Monitor` por `user_id`:
+     * a coluna gerada indexada (`monitors_user_id`, task 40) em MySQL, ou
+     * a expressão JSON crua (`data->user_id`) nos demais drivers — mesma
+     * escolha que `Monitor::scopeForUserId()` já faz, aqui exposta pra
+     * ser usada num `groupBy`/`select` em vez de um `where` de igualdade.
+     */
+    protected function userIdColumn(): string
+    {
+        return Monitor::query()->getConnection()->getDriverName() === 'mysql'
+            ? 'monitors_user_id'
+            : 'data->user_id';
+    }
+
+    /**
+     * Listagem agregada de visitantes por `user_id` (CRM), paginada —
+     * um dashboard vendo "quem são meus usuários autenticados e quando
+     * foi a última atividade de cada um", sem escanear `data` em PHP:
+     * conta linhas e agrega `MAX(updated_at)` direto em SQL, agrupando
+     * pela coluna gerada indexada (`monitors_user_id`, task 40) em MySQL
+     * — nunca `where('data->user_id', ...)` cru, que não usa o índice
+     * (ver `Monitor::scopeForUserId()`).
+     *
+     * `name`/`email`: como não existe coluna própria pra isso (só
+     * aparecem dentro do blob `data` quando o app hospedeiro chamou
+     * `Monitor::tag(['name' => .., 'email' => ..])`), são resolvidos com
+     * uma consulta extra por usuário da página atual (no máximo
+     * `per_page` linhas), pegando a linha mais recente
+     * (`forUserId($id)->orderByDesc('updated_at')->first()`) — nunca um
+     * lookup contra nenhuma tabela `users`.
+     */
+    protected function getUsers(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 25)));
+
+        $cacheKey = $this->listingsCacheKey('users', [$page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
+            return $this->buildUsersResult($page, $perPage);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    protected function buildUsersResult(int $page, int $perPage): array
+    {
+        $column = $this->userIdColumn();
+
+        $paginator = Monitor::query()
+            ->whereNotNull($column)
+            ->select("{$column} as user_id")
+            ->selectRaw('COUNT(*) as visits_count')
+            ->selectRaw('MAX(updated_at) as last_activity')
+            ->groupBy($column)
+            ->orderByDesc('last_activity')
+            ->paginate($perPage, ['*'], 'page', $page);
+
+        $items = collect($paginator->items())->map(function ($row) {
+            $latest = Monitor::forUserId($row->user_id)
+                ->orderByDesc('updated_at')
+                ->select('data')
+                ->first();
+
+            return [
+                'user_id' => $row->user_id,
+                'visits_count' => (int) $row->visits_count,
+                'last_activity' => $row->last_activity
+                    ? \Illuminate\Support\Carbon::parse($row->last_activity)->toIso8601String()
+                    : null,
+                'name' => $latest ? data_get($latest, 'data.name') : null,
+                'email' => $latest ? data_get($latest, 'data.email') : null,
+            ];
+        })->values();
+
+        return [
+            'data' => $items,
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    /**
+     * Detalhe de um `user_id`: as linhas `Monitor` (dispositivos/
+     * navegadores) já taggeadas com esse usuário, paginado — dados que já
+     * existem em `data` de cada linha (páginas, IPs, timestamps), nada
+     * novo capturado/rastreado por esta action.
+     */
+    protected function getUserVisits(Request $request)
+    {
+        $userId = $request->input('user_id');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 25)));
+
+        if ($userId === null || $userId === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'user_id is required',
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('user-visits', [$userId, $page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($userId, $page, $perPage) {
+            $paginator = Monitor::forUserId($userId)
+                ->orderByDesc('updated_at')
+                ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
 
             return [
                 'data' => $paginator->items(),

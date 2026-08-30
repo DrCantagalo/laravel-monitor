@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.2.0)
+# Laravel Monitor (v0.2.1)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -166,6 +166,48 @@ table.
   equals `42` (integer) there, so the fallback must compare against the
   same type `$id` was passed in as (in practice always an int, from
   `Auth::id()`).
+
+## User listing (`getUsers`, `getUserVisits`)
+
+Same auth as `getData`/`getPages`/`getVisitorsByIp` (permanent
+`local_token` **or** the ephemeral read token from `issueReadToken`) —
+built for a dashboard's CRM view: "who are my authenticated users, and
+what did each of them do".
+
+- **`getUsers`**: paginated, aggregated listing — one row per
+  `user_id` seen in `data['user_id']` (see "Authenticated user
+  tagging" above; rows without a `user_id` are excluded). Params:
+  `page` (default `1`), `per_page` (default `25`, max `100`). Response:
+  `{"success": true, "data": [{"user_id": "42", "visits_count": 7,
+  "last_activity": "2026-08-30T12:00:00+00:00", "name": null, "email":
+  null}, ...], "meta": {"page", "per_page", "total", "last_page"}}`,
+  ordered by `last_activity` descending. Aggregation
+  (`COUNT(*)`/`MAX(updated_at)`) and pagination run in SQL, grouped by
+  the same indexed generated column `Monitor::forUserId()` uses on
+  MySQL (`monitors_user_id`) — never the raw `data->user_id`
+  expression, for the same index-matching reason documented above.
+- **`getUserVisits`**: given `user_id` (required, `422` if missing),
+  paginated listing of that user's raw `Monitor` rows (via
+  `Monitor::forUserId($id)`, newest first) — `id`, `data` (pages, IPs,
+  session ids, everything already tracked per device/browser),
+  `created_at`, `updated_at`. Same `page`/`per_page` params as
+  `getUsers`.
+- **`name`/`email`**: the package never queries a host app's `users`
+  table (arbitrary schema, out of scope for a host-agnostic package).
+  Instead, `getUsers` opportunistically reads `data['name']`/
+  `data['email']` off that user's most recently updated `Monitor` row
+  — they only appear when the host app already called
+  `Monitor::tag(['name' => $user->name, 'email' => $user->email])` (see
+  "Arbitrary visitor data" above; `name`/`email` are not in
+  `PROTECTED_DATA_KEYS`) somewhere in its own request lifecycle, e.g.
+  right after login. Without that call, both come back `null` and the
+  dashboard falls back to displaying the raw `user_id`.
+
+Cached the same way as `getVisitorsByIp`/`getBlockedIps`
+(`Cache::remember`, TTL `config('monitor.listings_cache_ttl_minutes')`,
+the shared `monitor:listings:version` counter) — since this data
+changes on every tracked visit rather than through an explicit admin
+action, staleness here is bounded by the TTL alone, same as `getPages`.
 
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 
