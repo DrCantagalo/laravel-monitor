@@ -495,8 +495,16 @@ class MonitorController extends Controller
             ->paginate($perPage, ['*'], 'page', $page);
 
         $items = collect($paginator->items())->map(function ($row) {
+            // orderByDesc('updated_at') sozinho empata quando 2+ linhas do
+            // mesmo usuário são gravadas dentro do mesmo segundo (comum em
+            // testes, e possível em produção sob concorrência) - sem um
+            // desempate determinístico, o SGBD podia devolver a linha mais
+            // ANTIGA das empatadas, fazendo name/email sumir mesmo com um
+            // Monitor::tag() recente. 'id' cresce com a inserção, então
+            // desempata pela ordem real de criação.
             $latest = Monitor::forUserId($row->user_id)
                 ->orderByDesc('updated_at')
+                ->orderByDesc('id')
                 ->select('data')
                 ->first();
 
@@ -530,16 +538,25 @@ class MonitorController extends Controller
      */
     protected function getUserVisits(Request $request)
     {
-        $userId = $request->input('user_id');
+        $rawUserId = $request->input('user_id');
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 25)));
 
-        if ($userId === null || $userId === '') {
+        if ($rawUserId === null || $rawUserId === '') {
             return response()->json([
                 'success' => false,
                 'message' => 'user_id is required',
             ], 422);
         }
+
+        // Cast pra int: user_id sempre vem de Auth::id() (int) do lado de
+        // quem gravou, mas chega aqui como string (query param HTTP).
+        // Fora do MySQL, Monitor::scopeForUserId() NÃO faz esse cast
+        // internamente (json_extract do SQLite devolve o tipo nativo, e
+        // '3' string nunca bate com 3 inteiro lá) - repassar a string crua
+        // faria getUserVisits sempre devolver 0 linhas em qualquer host
+        // que não seja MySQL.
+        $userId = (int) $rawUserId;
 
         $cacheKey = $this->listingsCacheKey('user-visits', [$userId, $page, $perPage]);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
@@ -547,6 +564,7 @@ class MonitorController extends Controller
         $result = Cache::remember($cacheKey, $ttl, function () use ($userId, $page, $perPage) {
             $paginator = Monitor::forUserId($userId)
                 ->orderByDesc('updated_at')
+                ->orderByDesc('id')
                 ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
 
             return [
