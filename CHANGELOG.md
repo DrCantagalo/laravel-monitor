@@ -525,6 +525,40 @@ See README, "Partial cleanup (`pruneData`)".
 
 ---
 
+## [0.8.0] - 2026-08-31
+### Added
+- `monitor_ip_stats` gains a persisted `safe` boolean column (default
+  `false`) — an IP is a review entity now, mirroring the
+  `monitor_path_reviews`/`markPathSafe` pattern added for paths in
+  `0.4.0`, but as a column on the existing per-IP row instead of a
+  separate table (`monitor_ip_stats` is already one row per IP).
+- New actions on `MonitorController`, same auth as `markPathSafe`/
+  `flagScraperPath` (permanent `local_token` only): `markIpSafe`
+  (`{"ip": "..."}` → sets `safe = true`, `IpStat::updateOrCreate` so it
+  also works for an IP with no tracked visits yet) and `unmarkIpSafe`
+  (reverts — sets `safe = false`; the row itself is never deleted, since
+  it carries real visit history, unlike a `monitor_path_reviews` row).
+- `getVisitorsByIp` now exposes `safe` per IP, and its `filter=flagged`
+  excludes IPs marked `safe`. Regardless of the requested filter,
+  results are also always ordered with `flagged = true AND safe = false`
+  rows first — the actual "needs review" queue — before falling back to
+  the existing `visit_count desc` ordering within each group.
+
+### Fixed
+- `IpStat.flagged`/`flagged_signals` reflect only the most recent
+  request from an IP, not a cumulative signal (see `0.1.28`) — so a
+  human marking an IP safe could be silently undone by the very next
+  request from it re-tripping the heuristic. `safe` is never touched by
+  `IpStat::recordVisit()`, so it now survives that; `flagged` itself
+  keeps updating on every visit for audit/history, but the "needs
+  review" queue exposed by `getVisitorsByIp` reads `safe`, not the raw
+  `flagged` value, to decide what still needs a human look.
+
+See README, "Per-IP stats (`monitor_ip_stats`)" and "Paginated
+visitor/blocklist listing".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

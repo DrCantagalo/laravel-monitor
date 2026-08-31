@@ -9,7 +9,7 @@ class IpStat extends Model
     protected $table = 'monitor_ip_stats';
 
     protected $fillable = [
-        'ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals',
+        'ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals', 'safe',
     ];
 
     protected $casts = [
@@ -17,6 +17,7 @@ class IpStat extends Model
         'last_seen' => 'datetime',
         'flagged' => 'boolean',
         'flagged_signals' => 'array',
+        'safe' => 'boolean',
     ];
 
     /**
@@ -26,7 +27,11 @@ class IpStat extends Model
      * `ScraperSignalDetector` pra gravar em `data.flags.*` no `Monitor`.
      * `flagged`/`flagged_signals` refletem sempre o request mais recente
      * desse IP, não um OR acumulado — mesma semântica de
-     * `data.flags.scraper` no Monitor.
+     * `data.flags.scraper` no Monitor. `safe` nunca é tocado aqui (só por
+     * markIpSafe/unmarkIpSafe no MonitorController) - continua valendo
+     * mesmo que o request mais recente desse IP tenha voltado a marcar
+     * `flagged = true` (ver buildVisitorsResult, que é quem de fato
+     * respeita `safe` ao decidir o que expor como fila de revisão).
      */
     public static function recordVisit(string $ip, bool $flagged, array $signals): void
     {

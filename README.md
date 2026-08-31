@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.7.0)
+# Laravel Monitor (v0.8.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -441,8 +441,37 @@ recent `ScraperSignalDetector` result for that IP, same semantics as
 `data.flags.scraper` on `Monitor` (reflects the latest request, not an
 accumulated OR of every request ever seen from that IP).
 
+Since `0.8.0`, the table also carries a `safe` column (boolean, default
+`false`) — a persisted, human-reviewed verdict on that IP, set/cleared
+via `markIpSafe`/`unmarkIpSafe` (see below) and **never** touched by
+`IpStat::recordVisit()`. This matters because `flagged`/`flagged_signals`
+are not cumulative (see above) — a bot-like burst from an IP a human
+already reviewed and marked safe can still flip `flagged` back to `true`
+on a later request. `safe` is what actually survives that: it's the
+field `getVisitorsByIp`'s review queue (`filter=flagged` and its default
+ordering) respects, not the raw `flagged` column.
+
+- **`markIpSafe`** (`Authorization: Bearer <local_token>`, same auth as
+  `markPathSafe`/`flagScraperPath` — never accepted with the ephemeral
+  read token): `POST /monitor/handler?action=markIpSafe` with
+  `{"ip": "203.0.113.7"}` sets `safe = true` on the matching
+  `monitor_ip_stats` row (`IpStat::updateOrCreate`, so it also works for
+  an IP with no tracked visits yet — e.g. pre-registering a known
+  partner IP). Doesn't block or unblock anything; purely a review-state
+  flag. Response: `{"success": true, "ip": "...", "safe": true}`, or
+  `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
+  is missing/invalid.
+- **`unmarkIpSafe`** (same auth): reverts it — `POST
+  /monitor/handler?action=unmarkIpSafe` with `{"ip": "203.0.113.7"}` sets
+  `safe = false` on the matching row (the row itself is never deleted —
+  unlike `unmarkPathSafe`, `monitor_ip_stats` rows carry real visit
+  history, not just a review flag). Response: `{"success": true, "ip":
+  "...", "was_safe": true|false}` (`false` when the IP wasn't marked
+  safe to begin with — not an error).
+
 See "Paginated visitor/blocklist listing" below for the read/pagination
-action on top of this table (`getVisitorsByIp`).
+action on top of this table (`getVisitorsByIp`), including how `safe`
+affects its `flagged` filter and default ordering.
 
 ## Paginated page listing (`getPages`)
 
@@ -508,8 +537,17 @@ ephemeral read token from `issueReadToken`).
   approximation as `getPages`). Response: `{"success": true, "data":
   [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
   "last_seen": "...", "flagged": false, "flagged_signals": null,
-  "blocked": false}, ...], "meta": {"page", "per_page", "total",
-  "last_page"}}`.
+  "safe": false, "blocked": false}, ...], "meta": {"page", "per_page",
+  "total", "last_page"}}`.
+  - Since `0.8.0`: `filter=flagged` now additionally excludes IPs marked
+    `safe` (`where('flagged', true)->where('safe', false)`) — an IP a
+    human already reviewed and marked safe via `markIpSafe` no longer
+    reappears in this queue, even if a later request from it flips the
+    (non-cumulative) `flagged` column back to `true`. Regardless of which
+    `filter` is requested, results are also always ordered with
+    `flagged = true AND safe = false` rows first (the actual "needs
+    review" work queue), falling back to the existing `visit_count desc`
+    ordering within each group.
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
   missing/invalid), scans every `Monitor` whose `data.ips` contains that
