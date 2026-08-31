@@ -504,6 +504,27 @@ See README, "Paginated visitor/blocklist listing", new
 
 ---
 
+## [0.7.0] - 2026-08-31
+### Changed
+- **Breaking**: `pruneData`'s selective-delete parameter renamed
+  `only_scraper_flagged` -> `only_blocked`, and its matching logic
+  changed from the live heuristic signal (`Monitor.data.flags.scraper`,
+  `IpStat.flagged` — automatic, non-cumulative, reflects only the last
+  request seen from that IP, never reviewed by a human) to
+  `monitor_blocked_ips` (an IP the user actually confirmed/blocked via
+  `updateBlockedIps`/`flagScraperPath`). Fixes a permanent-data-loss risk:
+  `pruneData` could previously delete rows for an IP based purely on an
+  unreviewed false positive from the heuristic.
+- `pruneMonitors` now matches by checking whether any IP in a `Monitor`
+  row's `data.ips` is present in `BlockedIp::pluck('ip')`, same style of
+  matching already used by `flagScraperPath`/`buildVisitorsResult`.
+  `IpStat` selective delete now filters `whereIn('ip', ...)` against the
+  same blocked-IP list instead of `where('flagged', true)`.
+
+See README, "Partial cleanup (`pruneData`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

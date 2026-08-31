@@ -722,13 +722,22 @@ class MonitorController extends Controller
     /**
      * Cleanup parcial, complementar ao truncate total de clearData:
      * apaga só linhas de `Monitor`/`monitor_ip_stats` mais antigas que
-     * `older_than_days`, opcionalmente restrito às flagadas como
-     * scraper (`only_scraper_flagged`).
+     * `older_than_days`, opcionalmente restrito aos IPs confirmado-
+     * bloqueados (`only_blocked`, ver `monitor_blocked_ips`).
+     *
+     * Antes da task 81, este filtro usava o sinal *automático* da
+     * heurística (`IpStat.flagged`/`Monitor.data.flags.scraper`) — não
+     * cumulativo, reflete só a última requisição daquele IP, sem nenhuma
+     * revisão humana — pra decidir o que apagar permanentemente. Trocado
+     * pra `monitor_blocked_ips` (IP de fato confirmado/bloqueado pelo
+     * usuário), evitando deleção de dado em cima de um falso positivo não
+     * revisado. Parâmetro renomeado de `only_scraper_flagged` pra
+     * `only_blocked` (reflete a nova semântica).
      */
     protected function pruneData(Request $request)
     {
         $olderThanDays = $request->input('older_than_days');
-        $onlyScraperFlagged = filter_var($request->input('only_scraper_flagged', false), FILTER_VALIDATE_BOOLEAN);
+        $onlyBlocked = filter_var($request->input('only_blocked', false), FILTER_VALIDATE_BOOLEAN);
 
         if (! is_numeric($olderThanDays) || (int) $olderThanDays < 0) {
             return response()->json([
@@ -739,11 +748,11 @@ class MonitorController extends Controller
 
         $cutoff = now()->subDays((int) $olderThanDays);
 
-        $monitorsDeleted = $this->pruneMonitors($cutoff, $onlyScraperFlagged);
+        $monitorsDeleted = $this->pruneMonitors($cutoff, $onlyBlocked);
 
         $ipStatQuery = IpStat::where('last_seen', '<', $cutoff);
-        if ($onlyScraperFlagged) {
-            $ipStatQuery->where('flagged', true);
+        if ($onlyBlocked) {
+            $ipStatQuery->whereIn('ip', BlockedIp::pluck('ip'));
         }
         $ipStatsDeleted = $ipStatQuery->delete();
 
@@ -763,26 +772,37 @@ class MonitorController extends Controller
     }
 
     /**
-     * Sem `only_scraper_flagged`, o delete é direto em SQL (bulk, sem
-     * carregar nada em PHP). Com `only_scraper_flagged=true`, precisa do
-     * mesmo contorno de `buildPagesResult`: `data.flags.scraper` mora
-     * dentro do blob JSON de `Monitor.data`, sem coluna própria pra
-     * filtrar de forma portável entre sqlite/mysql/pgsql — então junta os
-     * ids em PHP via chunk e só deleta ao final (nunca durante o chunk).
+     * Sem `only_blocked`, o delete é direto em SQL (bulk, sem carregar
+     * nada em PHP). Com `only_blocked=true`, precisa do mesmo contorno de
+     * `buildPagesResult`: `data.ips` mora dentro do blob JSON de
+     * `Monitor.data`, sem coluna própria pra filtrar de forma portável
+     * entre sqlite/mysql/pgsql — então junta os ids em PHP via chunk e só
+     * deleta ao final (nunca durante o chunk). Match por IP confirmado-
+     * bloqueado (mesmo estilo de `flagScraperPath`/`buildVisitorsResult`,
+     * que já resolvem `monitor_blocked_ips` numa query só e testam contra
+     * ela em vez de um JOIN de verdade).
      */
-    protected function pruneMonitors($cutoff, bool $onlyScraperFlagged): int
+    protected function pruneMonitors($cutoff, bool $onlyBlocked): int
     {
-        if (! $onlyScraperFlagged) {
+        if (! $onlyBlocked) {
             return Monitor::where('updated_at', '<', $cutoff)->delete();
+        }
+
+        $blockedIps = BlockedIp::pluck('ip')->all();
+
+        if (empty($blockedIps)) {
+            return 0;
         }
 
         $ids = [];
 
         Monitor::where('updated_at', '<', $cutoff)
             ->select('id', 'data')
-            ->chunkById(200, function ($monitors) use (&$ids) {
+            ->chunkById(200, function ($monitors) use ($blockedIps, &$ids) {
                 foreach ($monitors as $monitor) {
-                    if ((bool) data_get($monitor, 'data.flags.scraper', false)) {
+                    $ips = (array) data_get($monitor, 'data.ips', []);
+
+                    if (array_intersect($ips, $blockedIps)) {
                         $ids[] = $monitor->id;
                     }
                 }

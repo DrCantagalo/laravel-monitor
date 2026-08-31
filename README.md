@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.6.0)
+# Laravel Monitor (v0.7.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -551,10 +551,19 @@ partial, filtered delete:
   missing or invalid): deletes `Monitor` rows whose `updated_at` is
   older than `now() - older_than_days` days, and `monitor_ip_stats`
   rows whose `last_seen` is older than the same cutoff.
-- `only_scraper_flagged` (optional boolean, default `false`): when
-  `true`, restricts the delete to rows flagged as scraper —
-  `data.flags.scraper` on `Monitor`, the `flagged` column on
+- `only_blocked` (optional boolean, default `false`): when `true`,
+  restricts the delete to rows belonging to an IP present in
+  `monitor_blocked_ips` (confirmed/blocked, not just flagged by the live
+  heuristic) — matched via `data.ips` on `Monitor`, the `ip` column on
   `IpStat` — instead of every row past the cutoff.
+  > ⚠️ **Breaking change in v0.7.0**: this parameter was named
+  > `only_scraper_flagged` and matched `data.flags.scraper`/
+  > `IpStat.flagged` instead — the automatic, non-cumulative heuristic
+  > signal from the *last* request seen from that IP, never reviewed by
+  > anyone. That made `pruneData` capable of permanently deleting rows
+  > for an IP on an unreviewed false positive. It now matches
+  > `monitor_blocked_ips` (an IP the user actually confirmed/blocked)
+  > instead.
 
 Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4}`.
 
