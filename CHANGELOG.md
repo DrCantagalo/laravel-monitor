@@ -410,6 +410,31 @@ See README, "User listing (`getUsers`, `getUserVisits`)".
 
 ---
 
+## [0.3.0] - 2026-08-31
+### Changed — BREAKING
+- `getPages` no longer aggregates a scraper signal at the path level:
+  removed `'scraper'` from `MonitorController::PAGES_FILTERS` and from
+  the per-path array built by `buildPagesResult` (it used to bubble
+  `data.flags.scraper` from whichever visitor hit the path up to the
+  path itself — misleading, since a path like `/` could be marked
+  "possible scraper" just because one bot passed through it once).
+  Response shape drops the `scraper` field from each `getPages` item;
+  the `filter=scraper` value is no longer accepted (`422` if used).
+- The scraper heuristic (`ScraperSignalDetector`) is unaffected and
+  keeps running exactly as before — it's now purely an IP/visitor-level
+  concept, read via `getVisitorsByIp`/`monitor_ip_stats`.
+  `flagScraperPath`/`BlockedPath` (the honeypot mechanism: blocks a path
+  + the IPs that already visited it) is also unaffected — it never
+  depended on this field.
+- **Migration**: if your dashboard/front-end reads `row.scraper` from
+  `getPages` items or sends `filter=scraper`, drop both — filter on
+  `getVisitorsByIp`'s `flagged`/`safe` fields instead for IP-level
+  scraper signal.
+
+See README, "Paginated page listing (`getPages`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

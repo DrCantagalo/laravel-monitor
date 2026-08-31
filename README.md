@@ -393,17 +393,21 @@ action on top of this table (`getVisitorsByIp`).
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the
 permanent `local_token` **or** the ephemeral read token from
-`issueReadToken`). Aggregates every `Monitor.data.page`/`data.not_found`/
-`data.flags.scraper` into one entry per path (`host/path`, same key
-format as `data.page`) instead of shipping raw `Monitor` rows:
+`issueReadToken`). Aggregates every `Monitor.data.page`/`data.not_found`
+into one entry per path (`host/path`, same key format as `data.page`)
+instead of shipping raw `Monitor` rows. As of `0.3.0`, this listing no
+longer carries a scraper signal at the path level — a path like `/` could
+end up marked "possible scraper" just because one bot happened to pass
+through it once. The scraper heuristic still runs exactly the same, it's
+just scoped to the IP/visitor level now (see `getVisitorsByIp` below).
+`flagScraperPath`'s honeypot mechanism (block a path + the IPs that
+already visited it) is unaffected — it never depended on this field:
 
 - `page` (default `1`), `per_page` (default `20`, max `100`).
 - `filter`: `all` (default), `404` (path was ever hit while the response
-  was a 404), `clean` (not 404, not scraper, not blocked), `scraper`
-  (at least one visit to that path came from a `Monitor` flagged
-  `data.flags.scraper`), `blocked` (path is in `monitor_blocked_paths`,
-  matched by suffix the same way `flagScraperPath` does). An unknown
-  `filter` value returns `422`.
+  was a 404), `clean` (not 404, not blocked), `blocked` (path is in
+  `monitor_blocked_paths`, matched by suffix the same way
+  `flagScraperPath` does). An unknown `filter` value returns `422`.
 - `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
   accepts for a `where` comparison): filters by the **`Monitor` row's**
   `updated_at`, not a per-page-hit timestamp — the schema has no
@@ -412,7 +416,7 @@ format as `data.page`) instead of shipping raw `Monitor` rows:
   hit on this exact date". Good enough to narrow down recent activity;
   don't rely on it for exact per-hit auditing.
 - Response: `{"success": true, "data": [{"path": "example.com/a",
-  "hits": 12, "not_found": false, "scraper": false, "blocked": false},
+  "hits": 12, "not_found": false, "blocked": false},
   ...], "meta": {"page": 1, "per_page": 20, "total": 47, "last_page": 3}}`.
 
 Result is cached (`Cache::remember`, TTL

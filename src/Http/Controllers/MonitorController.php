@@ -136,12 +136,17 @@ class MonitorController extends Controller
     /**
      * Enum de valores aceitos pelo parâmetro `filter` de getPages.
      */
-    protected const PAGES_FILTERS = ['all', '404', 'clean', 'scraper', 'blocked'];
+    protected const PAGES_FILTERS = ['all', '404', 'clean', 'blocked'];
 
     /**
      * Lista paginada/filtrável de paths visitados, agregando hits/estado
-     * 404/scraper/blocked por path (chave `host/path`, mesmo formato de
+     * 404/blocked por path (chave `host/path`, mesmo formato de
      * `data.page`) — nunca manda as linhas `Monitor` cruas pro cliente.
+     * Não agrega mais o sinal de scraper: era `data.flags.scraper` do
+     * visitante subindo pro path (confuso — um path como `/` podia
+     * aparecer marcado "possible scraper" só porque um bot passou por ele
+     * uma vez). O sinal de scraper continua existindo normalmente, só que
+     * fica restrito ao nível de IP/visitante (ver getVisitorsByIp).
      *
      * `date_from`/`date_to` filtram pela `updated_at` da linha `Monitor`
      * (não existe timestamp por página/hit no schema atual — cada linha
@@ -178,7 +183,7 @@ class MonitorController extends Controller
     }
 
     /**
-     * Agrega `data.page`/`data.not_found`/`data.flags.scraper` de todas
+     * Agrega `data.page`/`data.not_found` de todas
      * as linhas `Monitor` (opcionalmente restritas por `updated_at`) num
      * mapa por path, aplica `filter`, ordena por hits desc e pagina em
      * memória — a agregação não dá pra fazer em SQL porque os dados
@@ -201,7 +206,6 @@ class MonitorController extends Controller
 
         $query->select('data')->chunk(200, function ($monitors) use (&$aggregated) {
             foreach ($monitors as $monitor) {
-                $isScraper = (bool) data_get($monitor, 'data.flags.scraper', false);
                 $notFound = (array) data_get($monitor, 'data.not_found', []);
 
                 foreach ((array) data_get($monitor, 'data.page', []) as $path => $hits) {
@@ -209,17 +213,12 @@ class MonitorController extends Controller
                         'path' => $path,
                         'hits' => 0,
                         'not_found' => false,
-                        'scraper' => false,
                     ];
 
                     $aggregated[$path]['hits'] += (int) $hits;
 
                     if (! empty($notFound[$path])) {
                         $aggregated[$path]['not_found'] = true;
-                    }
-
-                    if ($isScraper) {
-                        $aggregated[$path]['scraper'] = true;
                     }
                 }
             }
@@ -237,8 +236,7 @@ class MonitorController extends Controller
         $filtered = array_values(array_filter($aggregated, function ($row) use ($filter) {
             return match ($filter) {
                 '404' => $row['not_found'],
-                'clean' => ! $row['not_found'] && ! $row['scraper'] && ! $row['blocked'],
-                'scraper' => $row['scraper'],
+                'clean' => ! $row['not_found'] && ! $row['blocked'],
                 'blocked' => $row['blocked'],
                 default => true,
             };
