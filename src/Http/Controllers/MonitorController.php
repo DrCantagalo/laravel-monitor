@@ -5,12 +5,14 @@ namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\PathReview;
+use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
 
 class MonitorController extends Controller
 {
@@ -631,6 +633,28 @@ class MonitorController extends Controller
         Cache::increment('monitor:listings:version');
     }
 
+    /**
+     * Regenera o arquivo de deny-list (ver `monitor:export-denylist`) sempre
+     * que `monitor_blocked_ips` muda, se `monitor.denylist_auto_export`
+     * estiver ligado (opt-in, default false). Chamado só pelos 3 pontos que
+     * de fato mexem em `monitor_blocked_ips` (updateBlockedIps/unblockIp/
+     * flagScraperPath) - unflagPath não mexe nessa tabela, não precisa
+     * regenerar nada. Fail-open: escrita em disco não pode derrubar a
+     * action principal de bloquear/desbloquear IP.
+     */
+    protected function maybeAutoExportDenylist(): void
+    {
+        if (! config('monitor.denylist_auto_export')) {
+            return;
+        }
+
+        try {
+            DenylistExporter::writeToDisk(config('monitor.denylist_format', 'apache'));
+        } catch (\Throwable $e) {
+            Log::error('Monitor denylist auto-export failed: ' . $e->getMessage());
+        }
+    }
+
     protected function clearData(Request $request)
     {
         // futuramente: validação/admin check
@@ -755,6 +779,7 @@ class MonitorController extends Controller
         }
 
         $this->invalidateListingsCache();
+        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,
@@ -781,6 +806,7 @@ class MonitorController extends Controller
         $removed = BlockedIp::where('ip', $ip)->delete() > 0;
         Cache::forget("monitor:blocked-ip:{$ip}");
         $this->invalidateListingsCache();
+        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,
@@ -841,6 +867,8 @@ class MonitorController extends Controller
                 $blockedIps[$ip] = true;
             }
         });
+
+        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,

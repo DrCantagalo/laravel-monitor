@@ -53,7 +53,10 @@ class MonitorServiceProvider extends ServiceProvider
         $this->loadRoutesFrom(__DIR__.'/routes/api.php');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([\Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand::class]);
+            $this->commands([
+                \Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand::class,
+                \Drcantagalo\LaravelMonitor\Console\Commands\MonitorExportDenylistCommand::class,
+            ]);
         }
 
         $this->publishes([

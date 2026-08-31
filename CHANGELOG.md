@@ -466,6 +466,28 @@ See README, "Paginated page listing (`getPages`)" and the new
 
 ---
 
+## [0.5.0] - 2026-08-31
+### Added
+- New `monitor:export-denylist {--format=apache|nginx}` command:
+  generates a web-server deny-list snippet from `monitor_blocked_ips`
+  (`Require not ip x.x.x.x` per line for Apache, `deny x.x.x.x;` for
+  Nginx), written to `config('monitor.denylist_path')` (default
+  `storage_path('app/monitor/denylist.conf')`). New
+  `Support\DenylistExporter` class backs both the command and the
+  auto-export hook below.
+- New config keys: `denylist_auto_export` (bool, default `false`),
+  `denylist_format` (`apache`/`nginx`, default `apache`), `denylist_path`.
+- Opt-in auto-export: when `denylist_auto_export` is `true`, the file is
+  regenerated automatically every time `monitor_blocked_ips` changes
+  (`updateBlockedIps`/`unblockIp`/`flagScraperPath`). Fails open — a
+  write error is logged, never breaks the block/unblock action itself.
+  Off by default; a fresh install never writes to disk without this
+  being explicitly enabled.
+
+See README, "Web-server deny-list export (`monitor:export-denylist`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

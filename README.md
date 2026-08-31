@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.4.0)
+# Laravel Monitor (v0.5.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -356,6 +356,43 @@ that weren't (or don't need to be) tied to a specific path.
   (`false` when the IP wasn't blocked to begin with — not an error), or
   `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
   is missing/invalid.
+
+## Web-server deny-list export (`monitor:export-denylist`)
+
+Generates a deny-list snippet from `monitor_blocked_ips`, for blocking IPs
+at the web-server level (Apache/Nginx) instead of/in addition to the
+application-level block in `MonitorMethod`. Useful once the blocked-IP
+list grows large enough that rejecting requests before they even reach PHP
+is worth it.
+
+```
+php artisan monitor:export-denylist --format=apache
+php artisan monitor:export-denylist --format=nginx
+```
+
+- **`--format`**: `apache` or `nginx`. If omitted, falls back to
+  `config('monitor.denylist_format')` (default `apache`).
+- **Output path**: `config('monitor.denylist_path')` (default
+  `storage_path('app/monitor/denylist.conf')`), directory created
+  automatically if it doesn't exist yet.
+- **Apache** format: one `Require not ip x.x.x.x` per line — meant to be
+  `Include`d from the vhost config. Apache re-reads included files
+  automatically, no reload needed.
+- **Nginx** format: one `deny x.x.x.x;` per line. Nginx does **not** pick
+  up config changes on its own — you (or your own cron/deploy hook) need
+  to run `nginx -s reload` after the file changes. The package
+  deliberately does not attempt to trigger this itself (the web app
+  process isn't the right place to reload the web server).
+
+**Auto-export** (opt-in, default off): set `config('monitor.denylist_auto_export')`
+to `true` to regenerate the file automatically every time
+`monitor_blocked_ips` changes (`updateBlockedIps`/`unblockIp`/
+`flagScraperPath` — not `unflagPath`, which never touches that table).
+Uses `config('monitor.denylist_format')` since there's no CLI flag to read
+from at that point. Fails open: a write error (e.g. permissions) is logged
+and never breaks the block/unblock action itself. The `artisan` command
+keeps working manually regardless of this flag — a fresh install doesn't
+start writing to disk without the consuming app explicitly opting in.
 
 ## Scraper signal detection
 
