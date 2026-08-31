@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.2.1)
+# Laravel Monitor (v0.4.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -299,6 +299,24 @@ WordPress).
   **not** unblock the IPs `flagScraperPath` may have blocked because of
   that path — use `unblockIp` for those individually.
 
+- **`markPathSafe`** (same auth as `flagScraperPath`, since `0.4.0`):
+  `POST /monitor/handler?action=markPathSafe` with
+  `{"path": "old-campaign-link"}` (host-less, same convention as
+  `flagScraperPath`) records the path in `monitor_path_reviews` with
+  `status: 'safe'` and `reviewed_at: now()`. Purely a review-state flag —
+  unlike `flagScraperPath`, it blocks nothing; it just removes the path
+  from `getPages`' `pending_review` queue (see below) once a human has
+  confirmed a recurring `404` isn't a scraper probe (e.g. an old link
+  that was removed on purpose). Response: `{"success": true, "path":
+  "...", "status": "safe"}`, or `{"success": false, "message": "No path
+  provided"}` (422) if `path` is missing/empty.
+- **`unmarkPathSafe`** (same auth): reverts it — `POST
+  /monitor/handler?action=unmarkPathSafe` with `{"path":
+  "old-campaign-link"}` deletes the `monitor_path_reviews` row, so the
+  path goes back to the default `pending` state. Response: `{"success":
+  true, "path": "...", "was_safe": true|false}` (`false` when the path
+  wasn't marked safe to begin with — not an error).
+
 ## Manual IP blocking (`updateBlockedIps`)
 
 Blocks a list of IPs outright — `MonitorMethod` rejects (`403`) any
@@ -401,13 +419,22 @@ end up marked "possible scraper" just because one bot happened to pass
 through it once. The scraper heuristic still runs exactly the same, it's
 just scoped to the IP/visitor level now (see `getVisitorsByIp` below).
 `flagScraperPath`'s honeypot mechanism (block a path + the IPs that
-already visited it) is unaffected — it never depended on this field:
+already visited it) is unaffected — it never depended on this field.
+
+Since `0.4.0`, each path also carries a review `status` — `pending`
+(default, never reviewed) or `safe` (marked via `markPathSafe`, see
+above) — sourced from `monitor_path_reviews`, matched by suffix the same
+way `blocked`/`monitor_blocked_paths` already was:
 
 - `page` (default `1`), `per_page` (default `20`, max `100`).
-- `filter`: `all` (default), `404` (path was ever hit while the response
-  was a 404), `clean` (not 404, not blocked), `blocked` (path is in
-  `monitor_blocked_paths`, matched by suffix the same way
-  `flagScraperPath` does). An unknown `filter` value returns `422`.
+- `filter`: `pending_review` (**default when `filter` is omitted**:
+  `not_found = true` AND `status != 'safe'` AND `blocked = false` — the
+  "still needs a human look" queue), `all` (the full dump — pass this
+  explicitly to get the old default-listing behavior back), `404` (path
+  was ever hit while the response was a 404), `clean` (not 404, not
+  blocked), `blocked` (path is in `monitor_blocked_paths`, matched by
+  suffix the same way `flagScraperPath` does). An unknown `filter` value
+  returns `422`.
 - `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
   accepts for a `where` comparison): filters by the **`Monitor` row's**
   `updated_at`, not a per-page-hit timestamp — the schema has no
@@ -416,16 +443,17 @@ already visited it) is unaffected — it never depended on this field:
   hit on this exact date". Good enough to narrow down recent activity;
   don't rely on it for exact per-hit auditing.
 - Response: `{"success": true, "data": [{"path": "example.com/a",
-  "hits": 12, "not_found": false, "blocked": false},
+  "hits": 12, "not_found": false, "blocked": false, "status": "pending"},
   ...], "meta": {"page": 1, "per_page": 20, "total": 47, "last_page": 3}}`.
 
 Result is cached (`Cache::remember`, TTL
 `config('monitor.pages_cache_ttl_minutes')`, default 5 minutes) keyed by
 a hash of the request params. Since the array/file cache drivers don't
 support `Cache::tags()`, invalidation works via a version counter
-instead: `flagScraperPath`/`unflagPath` bump it, which changes every
-`getPages` cache key at once — old entries are simply never read again
-and expire on their own TTL, rather than being individually deleted.
+instead: `flagScraperPath`/`unflagPath`/`markPathSafe`/`unmarkPathSafe`
+bump it, which changes every `getPages` cache key at once — old entries
+are simply never read again and expire on their own TTL, rather than
+being individually deleted.
 
 ## Paginated visitor/blocklist listing (`getVisitorsByIp`, `getBlockedIps`, `getBlockedPaths`)
 

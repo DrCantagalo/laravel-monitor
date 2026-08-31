@@ -10,6 +10,7 @@ use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
+use Drcantagalo\LaravelMonitor\Models\PathReview;
 
 class MonitorController extends Controller
 {
@@ -90,6 +91,12 @@ class MonitorController extends Controller
             case 'unflagPath':
                 return $this->unflagPath($request);
 
+            case 'markPathSafe':
+                return $this->markPathSafe($request);
+
+            case 'unmarkPathSafe':
+                return $this->unmarkPathSafe($request);
+
             case 'updateRules':
                 return $this->updateRules($request);
 
@@ -135,15 +142,17 @@ class MonitorController extends Controller
 
     /**
      * Enum de valores aceitos pelo parâmetro `filter` de getPages.
+     * `pending_review` é o default quando `filter` não é enviado (ver
+     * getPages) mas também pode ser pedido explicitamente.
      */
-    protected const PAGES_FILTERS = ['all', '404', 'clean', 'blocked'];
+    protected const PAGES_FILTERS = ['all', '404', 'clean', 'blocked', 'pending_review'];
 
     /**
      * Lista paginada/filtrável de paths visitados, agregando hits/estado
-     * 404/blocked por path (chave `host/path`, mesmo formato de
-     * `data.page`) — nunca manda as linhas `Monitor` cruas pro cliente.
-     * Não agrega mais o sinal de scraper: era `data.flags.scraper` do
-     * visitante subindo pro path (confuso — um path como `/` podia
+     * 404/blocked/status de revisão por path (chave `host/path`, mesmo
+     * formato de `data.page`) — nunca manda as linhas `Monitor` cruas pro
+     * cliente. Não agrega mais o sinal de scraper: era `data.flags.scraper`
+     * do visitante subindo pro path (confuso — um path como `/` podia
      * aparecer marcado "possible scraper" só porque um bot passou por ele
      * uma vez). O sinal de scraper continua existindo normalmente, só que
      * fica restrito ao nível de IP/visitante (ver getVisitorsByIp).
@@ -153,12 +162,18 @@ class MonitorController extends Controller
      * agrega várias páginas de um mesmo visitante — então isso é uma
      * aproximação: "atividade daquele visitante no período", não
      * "hit exato nesse path na data X").
+     *
+     * Sem `filter` explícito, o default é `pending_review` (não `all`):
+     * a fila "ainda não analisado" (404 + não marcado como safe + não
+     * bloqueado) vira a listagem padrão do dashboard, em vez do dump
+     * completo. Um cliente que precise do dump completo continua podendo
+     * pedir `filter=all` explicitamente.
      */
     protected function getPages(Request $request)
     {
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
-        $filter = (string) $request->input('filter', 'all');
+        $filter = (string) $request->input('filter', 'pending_review');
         $dateFrom = $request->input('date_from');
         $dateTo = $request->input('date_to');
 
@@ -225,11 +240,19 @@ class MonitorController extends Controller
         });
 
         $blockedPaths = BlockedPath::pluck('path');
+        // Só os paths marcados 'safe' importam pro match por sufixo (mesmo
+        // padrão de $blockedPaths acima) — qualquer path sem linha em
+        // monitor_path_reviews é 'pending' por padrão, sem precisar de
+        // linha nenhuma pra representar esse estado.
+        $safePaths = PathReview::where('status', 'safe')->pluck('path');
 
         foreach ($aggregated as $path => &$row) {
             $row['blocked'] = $blockedPaths->contains(
                 fn ($blockedPath) => $path === $blockedPath || str_ends_with($path, '/' . $blockedPath)
             );
+            $row['status'] = $safePaths->contains(
+                fn ($safePath) => $path === $safePath || str_ends_with($path, '/' . $safePath)
+            ) ? 'safe' : 'pending';
         }
         unset($row);
 
@@ -238,6 +261,7 @@ class MonitorController extends Controller
                 '404' => $row['not_found'],
                 'clean' => ! $row['not_found'] && ! $row['blocked'],
                 'blocked' => $row['blocked'],
+                'pending_review' => $row['not_found'] && $row['status'] !== 'safe' && ! $row['blocked'],
                 default => true,
             };
         }));
@@ -852,6 +876,66 @@ class MonitorController extends Controller
             'success' => true,
             'path' => $path,
             'was_flagged' => $removed,
+        ]);
+    }
+
+    /**
+     * Marca um path (sem host, mesmo formato de flagScraperPath) como
+     * `safe`, tirando-o da fila `pending_review` de getPages — usada
+     * quando quem revisa confirma que um 404 recorrente não é scraper
+     * (ex: link antigo removido do site, sem nenhuma malícia). Não tem
+     * nenhum efeito de bloqueio (diferente de flagScraperPath); é só o
+     * status exposto por getPages/buildPagesResult.
+     */
+    protected function markPathSafe(Request $request)
+    {
+        $path = ltrim((string) $request->input('path', ''), '/');
+
+        if ($path === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No path provided',
+            ], 422);
+        }
+
+        PathReview::updateOrCreate(
+            ['path' => $path],
+            ['status' => 'safe', 'reviewed_at' => now()]
+        );
+
+        $this->invalidatePagesCache();
+
+        return response()->json([
+            'success' => true,
+            'path' => $path,
+            'status' => 'safe',
+        ]);
+    }
+
+    /**
+     * Reverte markPathSafe: apaga a linha de monitor_path_reviews, e o
+     * path volta a ser 'pending' por padrão (mesma linha de raciocínio
+     * de unblockIp/unflagPath removendo em vez de gravar um segundo
+     * estado explícito).
+     */
+    protected function unmarkPathSafe(Request $request)
+    {
+        $path = ltrim((string) $request->input('path', ''), '/');
+
+        if ($path === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No path provided',
+            ], 422);
+        }
+
+        $removed = PathReview::where('path', $path)->where('status', 'safe')->delete() > 0;
+        $this->invalidatePagesCache();
+
+        return response()->json([
+            'success' => true,
+            'path' => $path,
+            'was_safe' => $removed,
         ]);
     }
 

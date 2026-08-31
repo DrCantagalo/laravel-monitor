@@ -435,6 +435,37 @@ See README, "Paginated page listing (`getPages`)".
 
 ---
 
+## [0.4.0] - 2026-08-31
+### Added
+- Path is now a persisted review entity, not just an on-the-fly
+  aggregate of `data.page`. New `monitor_path_reviews` table (`path`,
+  `status` — `pending` default or `safe`, `reviewed_at`) + new model
+  `PathReview`.
+- Two new write actions on `MonitorController`, same auth as
+  `flagScraperPath` (permanent `local_token` only): `markPathSafe`
+  (`{"path": "..."}` → records the path as reviewed/`safe`) and
+  `unmarkPathSafe` (reverts it — deletes the review row, path goes back
+  to the default `pending` state). Neither blocks anything; it's purely
+  a review-state flag consumed by `getPages`.
+- `getPages`/`buildPagesResult` now exposes a `status` field
+  (`pending`/`safe`) per path, matched by suffix against
+  `monitor_path_reviews` the same way `blocked` already is against
+  `monitor_blocked_paths`.
+
+### Changed — BREAKING
+- `getPages`'s default `filter` (when the parameter is omitted) is now
+  `pending_review` — `not_found = true` AND `status != 'safe'` AND
+  `blocked = false` — instead of `all`. This is the "still needs a human
+  look" queue, meant to become the dashboard's default listing. Callers
+  that relied on the implicit default returning every path must now pass
+  `filter=all` explicitly. `pending_review` is also available as an
+  explicit filter value.
+
+See README, "Paginated page listing (`getPages`)" and the new
+`markPathSafe`/`unmarkPathSafe` entries right after `unflagPath`.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
