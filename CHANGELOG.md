@@ -488,6 +488,22 @@ See README, "Web-server deny-list export (`monitor:export-denylist`)".
 
 ---
 
+## [0.6.0] - 2026-08-31
+### Added
+- New read-only action `getVisitorPaths` (`GET/POST
+  /monitor/handler?action=getVisitorPaths`, `ip=...`, same auth as
+  `getVisitorsByIp` — permanent `local_token` or the ephemeral read
+  token): given an IP, scans every `Monitor` whose `data.ips` contains
+  it and aggregates the paths (`data.page`) it's been seen on, sorted by
+  hits descending. Lets the dashboard confirm visually that an IP is a
+  scraper before blocking it. No pagination/caching — small per-IP
+  result set, called on demand.
+
+See README, "Paginated visitor/blocklist listing", new
+`getVisitorPaths` entry right after `getVisitorsByIp`.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

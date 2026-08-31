@@ -40,7 +40,7 @@ class MonitorController extends Controller
         // clearData/updateBlockedIps/updateRules/issueReadToken, que
         // exigem o local_token permanente.
         $isValidReadToken = in_array($action, [
-            'getData', 'getPages', 'getVisitorsByIp', 'getBlockedIps', 'getBlockedPaths',
+            'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserVisits',
         ], true)
             && $token
@@ -62,6 +62,9 @@ class MonitorController extends Controller
 
             case 'getVisitorsByIp':
                 return $this->getVisitorsByIp($request);
+
+            case 'getVisitorPaths':
+                return $this->getVisitorPaths($request);
 
             case 'getBlockedIps':
                 return $this->getBlockedIps($request);
@@ -394,6 +397,56 @@ class MonitorController extends Controller
                 'last_page' => $paginator->lastPage(),
             ],
         ];
+    }
+
+    /**
+     * Dado um IP, agrega os paths (`data.page`) de todos os `Monitor` que
+     * já viram esse IP (`data.ips` contém o IP) — serve pra confirmar
+     * visualmente que um IP é scraper antes de bloquear. Ao contrário de
+     * `flagScraperPath` (que dado um path escaneia todos os `Monitor` e
+     * casa por sufixo, já que o mesmo path pode aparecer sob hosts
+     * diferentes), aqui o match é direto (IP não tem variação de host) -
+     * é o mesmo escaneamento em chunks, só invertido: filtra por IP em vez
+     * de path, e agrega paths em vez de IPs. Sem paginação/cache: dataset
+     * pequeno por IP, chamada sob demanda ao expandir uma linha no
+     * dashboard, não em toda carga de página.
+     */
+    protected function getVisitorPaths(Request $request)
+    {
+        $ip = (string) $request->input('ip', '');
+
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $aggregated = [];
+
+        Monitor::query()->select('data')->chunk(200, function ($monitors) use ($ip, &$aggregated) {
+            foreach ($monitors as $monitor) {
+                $ips = (array) data_get($monitor, 'data.ips', []);
+
+                if (! in_array($ip, $ips, true)) {
+                    continue;
+                }
+
+                foreach ((array) data_get($monitor, 'data.page', []) as $path => $hits) {
+                    $aggregated[$path] = ($aggregated[$path] ?? 0) + (int) $hits;
+                }
+            }
+        });
+
+        arsort($aggregated);
+
+        return response()->json([
+            'success' => true,
+            'ip' => $ip,
+            'paths' => collect($aggregated)
+                ->map(fn ($hits, $path) => ['path' => $path, 'hits' => $hits])
+                ->values(),
+        ]);
     }
 
     /**

@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.5.0)
+# Laravel Monitor (v0.6.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -510,6 +510,16 @@ ephemeral read token from `issueReadToken`).
   "last_seen": "...", "flagged": false, "flagged_signals": null,
   "blocked": false}, ...], "meta": {"page", "per_page", "total",
   "last_page"}}`.
+- **`getVisitorPaths`** (since `0.6.0`): given an `ip`
+  (`{"success": false, "message": "No valid IP provided"}`, `422`, if
+  missing/invalid), scans every `Monitor` whose `data.ips` contains that
+  IP and aggregates the paths (`data.page`) it's been seen on — lets you
+  confirm visually that an IP is a scraper before blocking it. No
+  pagination/caching: the result set per IP is small and this is a
+  lookup triggered on demand (e.g. expanding a row in the dashboard), not
+  loaded on every page view. Response: `{"success": true, "ip": "1.2.3.4",
+  "paths": [{"path": "example.com/wp-admin/install.php", "hits": 3},
+  ...]}`, sorted by hits descending.
 - **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
   `monitor_blocked_paths` (`{"path", "created_at"}`) — no `filter`
