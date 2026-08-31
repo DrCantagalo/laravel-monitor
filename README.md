@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.8.0)
+# Laravel Monitor (v0.9.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -222,7 +222,8 @@ application's backend — only a short-lived, read-only token does.
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
-  `getBlockedIps`, `getBlockedPaths`, `getUsers`, `getUserVisits`)**.
+  `getBlockedIps`, `getBlockedPaths`, `getUsers`, `getUserVisits`,
+  `getBlockResults`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -356,6 +357,55 @@ that weren't (or don't need to be) tied to a specific path.
   (`false` when the IP wasn't blocked to begin with — not an error), or
   `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
   is missing/invalid.
+
+## Blocked-attempt counter (`monitor_block_results`)
+
+Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both
+branches: the IP itself is in `monitor_blocked_ips`, **or** the path it
+hit is in `monitor_blocked_paths` — including a brand-new IP that was
+never separately blocked, hitting an already-flagged honeypot path)
+increments a per-IP counter in the new `monitor_block_results` table
+(`ip` unique, `counter`, `last_attempt_at`). This is a raw "how many
+times has this IP been turned away" tally, independent of `monitor_ip_stats`
+(which only tracks requests that were actually let through/tracked).
+
+- **Atomic upsert**: the increment is a single
+  `DB::table('monitor_block_results')->upsert(...)` call (Laravel's query
+  builder — portable across MySQL/SQLite, generating `ON DUPLICATE KEY
+  UPDATE`/`ON CONFLICT` as appropriate for the active driver), not a
+  `firstOrCreate` + `increment` pair — the latter is two round-trips and
+  races when concurrent requests from the same IP hit the same blocked
+  endpoint at once (a common shape for a bot hammering a honeypot path),
+  potentially under-counting.
+- **Fail-open**: wrapped in the same `try`/`catch (QueryException)`
+  pattern as the rest of `MonitorMethod` — if `monitor_block_results`
+  hasn't been migrated yet in some environment, the increment is skipped
+  (logged via `Log::warning`) and the request is still blocked (`abort(403)`
+  runs unconditionally, outside the try/catch).
+- **`blocked_attempts_total`**: a new field on the existing `getData`
+  response (`SUM(counter)` across every row) — reuses the same
+  client-side fetch that already powers the dashboard's KPI cards instead
+  of adding a dedicated endpoint for one number.
+- **`getBlockResults`**: new paginated, read-token-eligible action (same
+  auth as `getVisitorsByIp`/`getBlockedIps` — permanent `local_token` or
+  the ephemeral read token) — `GET /monitor/handler?action=getBlockResults`,
+  params `page` (default `1`), `per_page` (default `20`, max `100`).
+  Response: `{"success": true, "data": [{"ip": "203.0.113.7", "counter": 42},
+  ...], "meta": {"page", "per_page", "total", "last_page"}}`, ordered by
+  `counter` descending (most-blocked IPs first). If the table isn't
+  migrated yet, returns an empty page instead of erroring (same fail-open
+  principle as above).
+- **Caching**: both `blocked_attempts_total` and `getBlockResults` use a
+  short, fixed TTL (`config('monitor.block_results_cache_ttl_seconds')`,
+  default `45` seconds) — deliberately **not** the versioned cache scheme
+  shared by `getPages`/`getVisitorsByIp`/etc
+  (`invalidatePagesCache`/`invalidateListingsCache`). That scheme assumes
+  rare mutation (a manual admin action bumps the version once); this
+  counter can increment on every single request from a hammering bot, and
+  bumping a shared cache version that often would thrash the cache for
+  every other unrelated listing on the dashboard.
+
+See CHANGELOG `[0.9.0]` for the full rationale.
 
 ## Web-server deny-list export (`monitor:export-denylist`)
 

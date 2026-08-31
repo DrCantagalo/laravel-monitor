@@ -11,6 +11,7 @@ use Exception;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -60,6 +61,7 @@ class MonitorMethod
         }
 
         if ($blocked) {
+            $this->recordBlockedAttempt($ip);
             abort(403);
         }
 
@@ -108,5 +110,40 @@ class MonitorMethod
             (int) config('monitor.blocked_ip_cache_ttl', 60),
             fn () => BlockedIp::where('ip', $ip)->exists()
         );
+    }
+
+    /**
+     * Incrementa o contador de tentativas bloqueadas desse IP em
+     * `monitor_block_results` (task 83) — chamado logo antes do
+     * `abort(403)` acima, cobrindo os dois motivos de bloqueio de uma vez
+     * só: `$blocked` já é o OR de `isBlocked()`/`isPathBlocked()`, então
+     * não importa qual dos dois disparou — o IP da request atual é quem
+     * toma o 403 e é quem conta aqui, inclusive um IP nunca antes visto
+     * batendo num path já flagado como honeypot (nunca esteve em
+     * `monitor_blocked_ips` por si só).
+     *
+     * Upsert atômico via query builder (uma query, sem race entre um
+     * SELECT+UPDATE/INSERT concorrentes do mesmo IP martelando o mesmo
+     * endpoint bloqueado) — `upsert()` gera o SQL correto pro driver ativo
+     * (`ON DUPLICATE KEY UPDATE` no MySQL, `ON CONFLICT` no SQLite/Postgres),
+     * mesmo motivo de escolha já documentado pros outros upserts do
+     * pacote (`IpStat::recordVisit`).
+     *
+     * Fail-open: se `monitor_block_results` ainda não existir (migration
+     * não rodou), essa query não pode derrubar o bloqueio em si —
+     * `abort(403)` roda de qualquer jeito, fora deste método, mesmo se o
+     * catch abaixo disparar.
+     */
+    protected function recordBlockedAttempt(string $ip): void
+    {
+        try {
+            DB::table('monitor_block_results')->upsert(
+                ['ip' => $ip, 'counter' => 1, 'last_attempt_at' => now()],
+                ['ip'],
+                ['counter' => DB::raw('counter + 1'), 'last_attempt_at' => now()]
+            );
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
+        }
     }
 }

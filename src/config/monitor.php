@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.8.0',
+    'version' => '0.9.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -94,5 +94,17 @@ return [
 
     // Path absoluto do arquivo de deny-list gerado.
     'denylist_path' => storage_path('app/monitor/denylist.conf'),
+
+    // TTL (segundos) do cache de blockedAttemptsTotal (exposto em
+    // getData) e getBlockResults. Fixo e curto de propósito, *fora* do
+    // esquema versionado (monitor:pages:version/monitor:listings:version)
+    // usado por getPages/getVisitorsByIp/etc — aquele esquema assume
+    // mutação rara (ação manual de admin bloqueando/desbloqueando algo);
+    // monitor_block_results incrementa a cada request bloqueada (um bot
+    // martelando um endpoint flagado pode gerar centenas por segundo), e
+    // bumpar uma versão de cache compartilhada a cada uma delas
+    // invalidaria getVisitorsByIp/getBlockedIps/etc pra todo mundo sem
+    // necessidade.
+    'block_results_cache_ttl_seconds' => 45,
 
 ];

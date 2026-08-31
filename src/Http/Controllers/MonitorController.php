@@ -2,14 +2,17 @@
 
 namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockedPath;
+use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\PathReview;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
@@ -41,7 +44,7 @@ class MonitorController extends Controller
         // exigem o local_token permanente.
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
-            'getUsers', 'getUserVisits',
+            'getUsers', 'getUserVisits', 'getBlockResults',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -77,6 +80,9 @@ class MonitorController extends Controller
 
             case 'getUserVisits':
                 return $this->getUserVisits($request);
+
+            case 'getBlockResults':
+                return $this->getBlockResults($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -145,10 +151,92 @@ class MonitorController extends Controller
     protected function getData(Request $request)
     {
         $data = Monitor::all(); // futuramente adicionar filtros, período etc.
+
         return response()->json([
             'success' => true,
-            'data' => $data
+            'data' => $data,
+            // Task 83: soma agregada de monitor_block_results, pro
+            // dashboard reusar o mesmo fetch que já alimenta os cards de
+            // KPI em vez de bater um endpoint novo só pra esse número.
+            'blocked_attempts_total' => $this->blockedAttemptsTotal(),
         ]);
+    }
+
+    /**
+     * `SUM(counter)` de `monitor_block_results` — total de tentativas
+     * bloqueadas (IP na blocklist OU path honeypot) já vistas por esta
+     * installation. Cacheado com TTL curto e fixo
+     * (`monitor.block_results_cache_ttl_seconds`), *não* o esquema
+     * versionado de invalidatePagesCache/invalidateListingsCache: aquele
+     * esquema assume mutação rara (ação manual de admin); este contador
+     * incrementa a cada request bloqueada — um bot martelando um endpoint
+     * flagado pode gerar centenas de incrementos por segundo, e bumpar
+     * uma versão de cache compartilhada a cada uma delas junto invalidaria
+     * (e recalcularia) getVisitorsByIp/getBlockedIps/etc pra todo mundo
+     * sem necessidade nenhuma. Fail-open: tabela ainda não migrada não
+     * pode quebrar getData.
+     */
+    protected function blockedAttemptsTotal(): int
+    {
+        return Cache::remember(
+            'monitor:block-results:total',
+            now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45)),
+            function () {
+                try {
+                    return (int) DB::table('monitor_block_results')->sum('counter');
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao calcular blocked_attempts_total. Erro original: ' . $e->getMessage());
+
+                    return 0;
+                }
+            }
+        );
+    }
+
+    /**
+     * Listagem paginada de `monitor_block_results` (`ip`, `counter`),
+     * ordenada por `counter` desc — os IPs mais insistentes primeiro. Mesmo
+     * auth de leitura de getVisitorsByIp/getBlockedIps (`local_token`
+     * permanente ou o token efêmero de issueReadToken). Cache com o mesmo
+     * TTL curto/fixo de `blockedAttemptsTotal()` (não o esquema versionado
+     * — mesma justificativa: mutação a cada request bloqueada, não a cada
+     * ação de admin). Fail-open: se a tabela ainda não existir, devolve
+     * uma página vazia em vez de derrubar a action.
+     */
+    protected function getBlockResults(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        $cacheKey = 'monitor:block-results:list:' . md5(json_encode([$page, $perPage]));
+        $ttl = now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
+            try {
+                $paginator = BlockResult::query()
+                    ->orderByDesc('counter')
+                    ->paginate($perPage, ['ip', 'counter'], 'page', $page);
+
+                return [
+                    'data' => $paginator->items(),
+                    'meta' => [
+                        'page' => $paginator->currentPage(),
+                        'per_page' => $paginator->perPage(),
+                        'total' => $paginator->total(),
+                        'last_page' => $paginator->lastPage(),
+                    ],
+                ];
+            } catch (QueryException $e) {
+                Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao listar getBlockResults. Erro original: ' . $e->getMessage());
+
+                return [
+                    'data' => [],
+                    'meta' => ['page' => $page, 'per_page' => $perPage, 'total' => 0, 'last_page' => 1],
+                ];
+            }
+        });
+
+        return response()->json(['success' => true] + $result);
     }
 
     /**

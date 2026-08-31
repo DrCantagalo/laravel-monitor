@@ -559,6 +559,46 @@ visitor/blocklist listing".
 
 ---
 
+## [0.9.0] - 2026-08-31
+### Added
+- New `monitor_block_results` table (`ip` unique, `counter`,
+  `last_attempt_at`) + new model `BlockResult` — a raw tally of blocked
+  attempts per IP, independent of `monitor_ip_stats` (which only tracks
+  requests that were actually let through).
+- `MonitorMethod` now increments that counter right before every
+  `abort(403)`, covering both branches that lead to a block: the IP
+  itself already in `monitor_blocked_ips`, **and** the path it hit being
+  in `monitor_blocked_paths` (a brand-new IP that was never separately
+  blocked, hitting an already-flagged honeypot path, still counts).
+  Increment is a single atomic `DB::table('monitor_block_results')->upsert(...)`
+  (Laravel's query builder, portable across MySQL/SQLite) instead of
+  `firstOrCreate` + `increment` — the latter is two round-trips and races
+  under concurrent hits from the same IP, a common shape for a bot
+  hammering a blocked endpoint. Wrapped in the same fail-open
+  `try`/`catch (QueryException)` pattern already used by the rest of
+  `MonitorMethod` — a not-yet-migrated table logs a warning and skips the
+  increment, it never stops the request from being blocked.
+- New field `blocked_attempts_total` (`SUM(counter)`) on the existing
+  `getData` response — reuses the same client-side fetch that already
+  powers the dashboard's KPI cards instead of adding a dedicated endpoint
+  for one number.
+- New read action `getBlockResults`: paginated `{ip, counter}` listing
+  ordered by `counter` descending, same auth as `getVisitorsByIp`/
+  `getBlockedIps` (permanent `local_token` or the ephemeral read token).
+  Fails open to an empty page if the table isn't migrated yet.
+- New config key `block_results_cache_ttl_seconds` (default `45`).
+  `blocked_attempts_total`/`getBlockResults` use this short, fixed TTL
+  instead of the versioned cache scheme shared by `getPages`/
+  `getVisitorsByIp`/etc (`invalidatePagesCache`/`invalidateListingsCache`)
+  — that scheme assumes rare mutation (a manual admin action bumps the
+  version once); this counter can increment on every single request from
+  a hammering bot, and bumping a shared cache version that often would
+  thrash the cache for every other unrelated listing on the dashboard.
+
+See README, "Blocked-attempt counter (`monitor_block_results`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
