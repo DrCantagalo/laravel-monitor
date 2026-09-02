@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.10.0)
+# Laravel Monitor (v0.11.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -550,6 +550,18 @@ on every tracked request from that IP), `first_seen`/`last_seen`
 recent `ScraperSignalDetector` result for that IP, same semantics as
 `data.flags.scraper` on `Monitor` (reflects the latest request, not an
 accumulated OR of every request ever seen from that IP).
+
+Since `0.11.0`, `recordVisit()` is a single atomic
+`DB::table('monitor_ip_stats')->upsert(...)` call (`ON DUPLICATE KEY
+UPDATE`/`ON CONFLICT` depending on the driver) instead of a
+`where('ip', $ip)->first()` followed by `create()`/`save()` — the old
+non-atomic version let two concurrent requests from the same IP both see
+no existing row and both try to `create()`, and the second one violated
+the `ip` unique constraint and threw an uncaught `QueryException` (a real
+500 for the visitor/bot making the request). `first_seen`/`created_at`
+are only ever written on insert (never touched by the update clause, so
+they survive every later visit); `safe` is left out of the upsert
+entirely, same as before — only `markIpSafe`/`unmarkIpSafe` set it.
 
 Since `0.8.0`, the table also carries a `safe` column (boolean, default
 `false`) — a persisted, human-reviewed verdict on that IP, set/cleared

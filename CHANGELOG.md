@@ -654,6 +654,30 @@ See README, "Aggregated dashboard totals (`getData`)".
 
 ---
 
+## [0.11.0] - 2026-09-02
+### Fixed
+- **Race condition in `IpStat::recordVisit()`**: the old
+  `where('ip', $ip)->first()` + `create()`/`save()` sequence wasn't
+  atomic. Two concurrent requests from the same IP (common with bots
+  hammering a site) could both see no existing row, both attempt
+  `create()`, and the second would violate the `monitor_ip_stats_ip_unique`
+  constraint and throw an uncaught `QueryException` — a real `500` for
+  the visitor/bot making that request, confirmed in production
+  (cantagalo.it logs, `Duplicate entry '<ip>' for key
+  'monitor_ip_stats_ip_unique'`, multiple hits within the same second).
+  Replaced with a single atomic
+  `DB::table('monitor_ip_stats')->upsert(...)` (`ON DUPLICATE KEY
+  UPDATE`/`ON CONFLICT` depending on the driver) — same pattern already
+  used by `MonitorMethod::recordBlockedAttempt()` for
+  `monitor_block_results`. `first_seen`/`created_at` only appear in the
+  insert values (never in the update clause), so they're preserved
+  across every later visit; `safe` is untouched either way, same as
+  before.
+
+See README, "Per-IP stats (`monitor_ip_stats`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

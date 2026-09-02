@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 
 class IpStat extends Model
 {
@@ -32,28 +33,50 @@ class IpStat extends Model
      * mesmo que o request mais recente desse IP tenha voltado a marcar
      * `flagged = true` (ver buildVisitorsResult, que é quem de fato
      * respeita `safe` ao decidir o que expor como fila de revisão).
+     *
+     * Task 90: até a 0.10.0 este método fazia `where('ip',
+     * $ip)->first()` seguido de `create()`/`save()` — não-atômico. Duas
+     * requests do mesmo IP em paralelo (comum em bots martelando um
+     * endpoint) podiam ambas ver `null` no `first()` e ambas tentarem
+     * `create()`, e a segunda violava a constraint UNIQUE de `ip` e
+     * lançava `QueryException` não capturada pro visitante/bot original
+     * (500), confirmado em produção (ver bugs/laravel-monitor.md).
+     * Trocado por `upsert()` do query builder — uma query só, sem
+     * SELECT+INSERT/UPDATE separados pra correr atrás um do outro (`ON
+     * DUPLICATE KEY UPDATE` no MySQL, `ON CONFLICT` no SQLite/Postgres) —
+     * mesmo padrão já usado por `MonitorMethod::recordBlockedAttempt()`
+     * pra `monitor_block_results`. `first_seen`/`created_at` só entram no
+     * array de insert (nunca no de update), preservando o valor original
+     * em conflitos; `safe` fica de fora dos dois arrays de propósito —
+     * usa o default `false` da coluna no insert, e nunca é tocado num
+     * conflito (só markIpSafe/unmarkIpSafe mexem nele). Bypassa os casts
+     * do Eloquent (upsert() é query builder puro), por isso o
+     * `json_encode` manual de `flagged_signals` e o cast de `$flagged`
+     * pra int abaixo.
      */
     public static function recordVisit(string $ip, bool $flagged, array $signals): void
     {
-        $stat = static::where('ip', $ip)->first();
+        $now = now();
 
-        if ($stat) {
-            $stat->visit_count++;
-            $stat->last_seen = now();
-            $stat->flagged = $flagged;
-            $stat->flagged_signals = $signals;
-            $stat->save();
-
-            return;
-        }
-
-        static::create([
-            'ip' => $ip,
-            'visit_count' => 1,
-            'first_seen' => now(),
-            'last_seen' => now(),
-            'flagged' => $flagged,
-            'flagged_signals' => $signals,
-        ]);
+        DB::table('monitor_ip_stats')->upsert(
+            [
+                'ip' => $ip,
+                'visit_count' => 1,
+                'first_seen' => $now,
+                'last_seen' => $now,
+                'flagged' => (int) $flagged,
+                'flagged_signals' => json_encode($signals),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ],
+            ['ip'],
+            [
+                'visit_count' => DB::raw('visit_count + 1'),
+                'last_seen' => $now,
+                'flagged' => (int) $flagged,
+                'flagged_signals' => json_encode($signals),
+                'updated_at' => $now,
+            ]
+        );
     }
 }
