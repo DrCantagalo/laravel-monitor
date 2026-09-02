@@ -678,6 +678,44 @@ See README, "Per-IP stats (`monitor_ip_stats`)".
 
 ---
 
+## [0.12.0] - 2026-09-02
+### Fixed
+- **`filter=flagged` no longer includes already-blocked IPs**: an IP
+  already present in `monitor_blocked_ips` has already been confirmed as
+  a scraper by a human — it no longer needs to show up in the
+  "possible scraper" review queue exposed by `getVisitorsByIp`. Added
+  `whereNotIn('ip', $blockedIps)` to the `flagged` branch of
+  `buildVisitorsResult()` (the `clean` and `blocked` branches already
+  handled this correctly). It still shows up under `filter=blocked`, as
+  before.
+- **Per-user "Visits" count was always 1**: `buildUsersResult()` counted
+  `Monitor` rows (`COUNT(*)`) grouped by `user_id` to build the
+  `visits_count` shown by `getUsers` — but a `Monitor` row is reused
+  across sessions for the same device/browser (reconnected via the
+  remember-me cookie, see `SessionVisitorTracker::track()`), not created
+  per visit. A user who always returns from the same browser therefore
+  always had exactly 1 row, so `visits_count` was always 1 regardless of
+  how many times they actually visited.
+
+  Two related bugs, fixed together:
+  1. `data.visits` (the field meant for this, already incremented by
+     `Monitor::newVisit()`) was only touched by the 2 remember-me
+     reconnection paths in `SessionVisitorTracker::track()` — the normal
+     "session already tracked" path (the most common one, every
+     subsequent request within the same browser session) never
+     incremented it. Now it does, on every tracked request.
+  2. `buildUsersResult()` now sums `data.visits` per `user_id`
+     (`jsonNumericSumExpression()`, the same portable MySQL/SQLite
+     expression already used by `visitsTotal()` in `getData`) instead of
+     counting rows. Rows with no `visits` key (data from before this
+     version) are simply excluded from the sum rather than causing an
+     error.
+
+See README, "Per-IP stats (`monitor_ip_stats`)" and "Aggregated dashboard
+totals (`getData`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

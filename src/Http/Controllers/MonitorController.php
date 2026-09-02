@@ -2,20 +2,21 @@
 
 namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
-use Illuminate\Database\QueryException;
-use Illuminate\Http\Request;
-use Illuminate\Routing\Controller;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
-use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
+use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\PathReview;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
+use Illuminate\Database\QueryException;
+use Illuminate\Http\Request;
+use Illuminate\Routing\Controller;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class MonitorController extends Controller
 {
@@ -123,7 +124,7 @@ class MonitorController extends Controller
             default:
                 return response()->json([
                     'success' => false,
-                    'message' => 'Invalid action'
+                    'message' => 'Invalid action',
                 ], 400);
         }
     }
@@ -194,7 +195,7 @@ class MonitorController extends Controller
 
                     return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
                 } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] falha ao calcular visits_total em getData. Erro original: ' . $e->getMessage());
+                    Log::warning('[laravel-monitor] falha ao calcular visits_total em getData. Erro original: '.$e->getMessage());
 
                     return 0;
                 }
@@ -229,7 +230,7 @@ class MonitorController extends Controller
 
                     return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
                 } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] falha ao calcular sessions_total em getData. Erro original: ' . $e->getMessage());
+                    Log::warning('[laravel-monitor] falha ao calcular sessions_total em getData. Erro original: '.$e->getMessage());
 
                     return 0;
                 }
@@ -256,7 +257,7 @@ class MonitorController extends Controller
                 try {
                     return (int) IpStat::count();
                 } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] tabela monitor_ip_stats não encontrada ao calcular unique_ips_total. Erro original: ' . $e->getMessage());
+                    Log::warning('[laravel-monitor] tabela monitor_ip_stats não encontrada ao calcular unique_ips_total. Erro original: '.$e->getMessage());
 
                     return 0;
                 }
@@ -312,7 +313,7 @@ class MonitorController extends Controller
                 try {
                     return (int) DB::table('monitor_block_results')->sum('counter');
                 } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao calcular blocked_attempts_total. Erro original: ' . $e->getMessage());
+                    Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao calcular blocked_attempts_total. Erro original: '.$e->getMessage());
 
                     return 0;
                 }
@@ -335,7 +336,7 @@ class MonitorController extends Controller
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
 
-        $cacheKey = 'monitor:block-results:list:' . md5(json_encode([$page, $perPage]));
+        $cacheKey = 'monitor:block-results:list:'.md5(json_encode([$page, $perPage]));
         $ttl = now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45));
 
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
@@ -354,7 +355,7 @@ class MonitorController extends Controller
                     ],
                 ];
             } catch (QueryException $e) {
-                Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao listar getBlockResults. Erro original: ' . $e->getMessage());
+                Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao listar getBlockResults. Erro original: '.$e->getMessage());
 
                 return [
                     'data' => [],
@@ -411,7 +412,7 @@ class MonitorController extends Controller
         }
 
         $version = Cache::get('monitor:pages:version', 1);
-        $cacheKey = 'monitor:pages:v' . $version . ':' . md5(json_encode([
+        $cacheKey = 'monitor:pages:v'.$version.':'.md5(json_encode([
             $page, $perPage, $filter, $dateFrom, $dateTo,
         ]));
         $ttl = now()->addMinutes((int) config('monitor.pages_cache_ttl_minutes', 5));
@@ -474,10 +475,10 @@ class MonitorController extends Controller
 
         foreach ($aggregated as $path => &$row) {
             $row['blocked'] = $blockedPaths->contains(
-                fn ($blockedPath) => $path === $blockedPath || str_ends_with($path, '/' . $blockedPath)
+                fn ($blockedPath) => $path === $blockedPath || str_ends_with($path, '/'.$blockedPath)
             );
             $row['status'] = $safePaths->contains(
-                fn ($safePath) => $path === $safePath || str_ends_with($path, '/' . $safePath)
+                fn ($safePath) => $path === $safePath || str_ends_with($path, '/'.$safePath)
             ) ? 'safe' : 'pending';
         }
         unset($row);
@@ -581,7 +582,9 @@ class MonitorController extends Controller
      * exclui IPs já marcados `safe`, e a ordenação sempre prioriza
      * `flagged = true AND safe = false` (a fila de trabalho de verdade)
      * antes de cair no desempate por `visit_count`, não importa o filtro
-     * pedido.
+     * pedido. Desde a task 91: `filter=flagged` também exclui IPs já em
+     * `monitor_blocked_ips` — um IP bloqueado já foi confirmado como
+     * scraper, não precisa reaparecer na fila de "possível".
      */
     protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
     {
@@ -601,8 +604,10 @@ class MonitorController extends Controller
             // safe = false: um IP marcado safe já foi revisado por um
             // humano — não deve reaparecer na fila de "flagged" só porque
             // a heurística automática disparou de novo num request
-            // seguinte (ver IpStat::recordVisit).
-            'flagged' => $query->where('flagged', true)->where('safe', false),
+            // seguinte (ver IpStat::recordVisit). whereNotIn($blockedIps):
+            // um IP já bloqueado já foi confirmado como scraper, não deve
+            // reaparecer na fila de "possível" (task 91).
+            'flagged' => $query->where('flagged', true)->where('safe', false)->whereNotIn('ip', $blockedIps),
             'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
             'blocked' => $query->whereIn('ip', $blockedIps),
             default => null,
@@ -774,10 +779,20 @@ class MonitorController extends Controller
      * Listagem agregada de visitantes por `user_id` (CRM), paginada —
      * um dashboard vendo "quem são meus usuários autenticados e quando
      * foi a última atividade de cada um", sem escanear `data` em PHP:
-     * conta linhas e agrega `MAX(updated_at)` direto em SQL, agrupando
+     * agrega `SUM(data.visits)`/`MAX(updated_at)` direto em SQL, agrupando
      * pela coluna gerada indexada (`monitors_user_id`, task 40) em MySQL
      * — nunca `where('data->user_id', ...)` cru, que não usa o índice
      * (ver `Monitor::scopeForUserId()`).
+     *
+     * Desde a task 92: `visits_count` soma `data.visits` (via
+     * `jsonNumericSumExpression()`, mesma expressão já usada por
+     * `visitsTotal()` em getData) em vez de `COUNT(*)` de linhas
+     * `Monitor` — uma linha `Monitor` é reaproveitada por dispositivo/
+     * navegador (reconectado via remember-me entre sessões, ver
+     * `SessionVisitorTracker::track()`), não criada por visita, então
+     * `COUNT(*)` sempre dava 1 pra um usuário que só troca de sessão no
+     * mesmo navegador. `SUM` ignora linhas sem a chave `visits` (dados
+     * antigos, de antes desta task); por isso o `?? 0` no map abaixo.
      *
      * `name`/`email`: como não existe coluna própria pra isso (só
      * aparecem dentro do blob `data` quando o app hospedeiro chamou
@@ -805,11 +820,12 @@ class MonitorController extends Controller
     protected function buildUsersResult(int $page, int $perPage): array
     {
         $column = $this->userIdColumn();
+        $visitsExpression = $this->jsonNumericSumExpression('visits');
 
         $paginator = Monitor::query()
             ->whereNotNull($column)
             ->select("{$column} as user_id")
-            ->selectRaw('COUNT(*) as visits_count')
+            ->selectRaw("SUM({$visitsExpression}) as visits_count")
             ->selectRaw('MAX(updated_at) as last_activity')
             ->groupBy($column)
             ->orderByDesc('last_activity')
@@ -833,7 +849,7 @@ class MonitorController extends Controller
                 'user_id' => $row->user_id,
                 'visits_count' => (int) $row->visits_count,
                 'last_activity' => $row->last_activity
-                    ? \Illuminate\Support\Carbon::parse($row->last_activity)->toIso8601String()
+                    ? Carbon::parse($row->last_activity)->toIso8601String()
                     : null,
                 'name' => $latest ? data_get($latest, 'data.name') : null,
                 'email' => $latest ? data_get($latest, 'data.email') : null,
@@ -912,7 +928,7 @@ class MonitorController extends Controller
     {
         $version = Cache::get('monitor:listings:version', 1);
 
-        return "monitor:listings:{$prefix}:v{$version}:" . md5(json_encode($params));
+        return "monitor:listings:{$prefix}:v{$version}:".md5(json_encode($params));
     }
 
     /**
@@ -948,7 +964,7 @@ class MonitorController extends Controller
         try {
             DenylistExporter::writeToDisk(config('monitor.denylist_format', 'apache'));
         } catch (\Throwable $e) {
-            Log::error('Monitor denylist auto-export failed: ' . $e->getMessage());
+            Log::error('Monitor denylist auto-export failed: '.$e->getMessage());
         }
     }
 
@@ -959,7 +975,7 @@ class MonitorController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'All monitor data cleared'
+            'message' => 'All monitor data cleared',
         ]);
     }
 
@@ -1241,7 +1257,7 @@ class MonitorController extends Controller
             $pages = (array) data_get($monitor, 'data.page', []);
 
             $matches = collect(array_keys($pages))->contains(
-                fn ($key) => $key === $path || str_ends_with($key, '/' . $path)
+                fn ($key) => $key === $path || str_ends_with($key, '/'.$path)
             );
 
             if (! $matches) {
@@ -1363,7 +1379,7 @@ class MonitorController extends Controller
         // implementar depois
         return response()->json([
             'success' => true,
-            'message' => 'Monitoring rules updated (stub)'
+            'message' => 'Monitoring rules updated (stub)',
         ]);
     }
 }

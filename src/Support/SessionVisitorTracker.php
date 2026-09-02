@@ -15,7 +15,7 @@ class SessionVisitorTracker
 
     public function __construct(?ScraperSignalDetector $scraperSignalDetector = null)
     {
-        $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
+        $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector;
     }
 
     /**
@@ -61,7 +61,7 @@ class SessionVisitorTracker
         // o cookie do visitante antigo antes de qualquer front-end
         // conseguir usá-lo - o remember-me nunca reconectava de fato um
         // visitante que voltava com a sessão PHP expirada.
-        if (!$user && !session('monitor_id')) {
+        if (! $user && ! session('monitor_id')) {
             $cookieToken = $request->cookie(config('monitor.remember_cookie', 'monitor_id_token'));
 
             if ($cookieToken) {
@@ -75,7 +75,7 @@ class SessionVisitorTracker
         }
 
         if (session('monitor_id')) {
-            if (!$user) {
+            if (! $user) {
                 $user = Monitor::find(session('monitor_id'));
             }
             if ($user) {
@@ -83,6 +83,13 @@ class SessionVisitorTracker
                 $data['page'] = $data['page'] ?? [];
                 $data['page'][$path] = ($data['page'][$path] ?? 0) + 1;
                 $data['ua'] = $userAgent;
+                // Todo request rastreado conta como uma visita, igual aos
+                // dois caminhos de reconexão via remember-me acima
+                // (Monitor::newVisit) — sem isso, `data.visits` nunca
+                // avançava no caminho mais comum (sessão já rastreada),
+                // deixando o contador de "Visits" por usuário do dashboard
+                // sempre travado em 1 (task 92).
+                $data['visits'] = ($data['visits'] ?? 0) + 1;
 
                 if ($notFound) {
                     $data['not_found'] = $data['not_found'] ?? [];
@@ -115,11 +122,11 @@ class SessionVisitorTracker
         $data = [
             'page' => [$path => 1],
             'sessions' => [session()->getId()],
-            'ips'  => [$ip],
-            'ua'   => $userAgent,
+            'ips' => [$ip],
+            'ua' => $userAgent,
             'id-token' => $rememberToken,
             'flags' => [
-                'scraper'         => $isScraper,
+                'scraper' => $isScraper,
                 'scraper_signals' => $signals,
             ],
         ];

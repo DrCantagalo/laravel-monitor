@@ -239,10 +239,17 @@ what did each of them do".
   "last_activity": "2026-08-30T12:00:00+00:00", "name": null, "email":
   null}, ...], "meta": {"page", "per_page", "total", "last_page"}}`,
   ordered by `last_activity` descending. Aggregation
-  (`COUNT(*)`/`MAX(updated_at)`) and pagination run in SQL, grouped by
-  the same indexed generated column `Monitor::forUserId()` uses on
-  MySQL (`monitors_user_id`) — never the raw `data->user_id`
+  (`SUM(data.visits)`/`MAX(updated_at)`) and pagination run in SQL,
+  grouped by the same indexed generated column `Monitor::forUserId()`
+  uses on MySQL (`monitors_user_id`) — never the raw `data->user_id`
   expression, for the same index-matching reason documented above.
+  - Since `0.12.0`: `visits_count` sums `data.visits` per `user_id`
+    (same portable MySQL/SQLite JSON expression `visitsTotal()` uses in
+    `getData`) instead of counting `Monitor` rows. A `Monitor` row is
+    reused across sessions for the same device/browser (reconnected via
+    the remember-me cookie), not created per visit, so counting rows
+    used to always give `1` for a user who only ever visits from the
+    same browser.
 - **`getUserVisits`**: given `user_id` (required, `422` if missing),
   paginated listing of that user's raw `Monitor` rows (via
   `Monitor::forUserId($id)`, newest first) — `id`, `data` (pages, IPs,
@@ -670,6 +677,11 @@ ephemeral read token from `issueReadToken`).
     `flagged = true AND safe = false` rows first (the actual "needs
     review" work queue), falling back to the existing `visit_count desc`
     ordering within each group.
+  - Since `0.12.0`: `filter=flagged` also excludes IPs already present in
+    `monitor_blocked_ips` — an IP that's already been blocked has already
+    been confirmed as a scraper, so it no longer needs to show up in the
+    "possible scraper" queue too. It still shows up under
+    `filter=blocked`, as before.
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
   missing/invalid), scans every `Monitor` whose `data.ips` contains that
