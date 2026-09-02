@@ -501,15 +501,32 @@ php artisan monitor:export-denylist --format=nginx
   deliberately does not attempt to trigger this itself (the web app
   process isn't the right place to reload the web server).
 
-**Auto-export** (opt-in, default off): set `config('monitor.denylist_auto_export')`
-to `true` to regenerate the file automatically every time
-`monitor_blocked_ips` changes (`updateBlockedIps`/`unblockIp`/
-`flagScraperPath` — not `unflagPath`, which never touches that table).
-Uses `config('monitor.denylist_format')` since there's no CLI flag to read
-from at that point. Fails open: a write error (e.g. permissions) is logged
-and never breaks the block/unblock action itself. The `artisan` command
-keeps working manually regardless of this flag — a fresh install doesn't
-start writing to disk without the consuming app explicitly opting in.
+**Exporting**: the package never regenerates this file on its own — you
+decide when. Three ways to trigger it:
+
+- Run `php artisan monitor:export-denylist` by hand, whenever you want.
+- **`exportDenylist`** (`Authorization: Bearer <local_token>`, same auth as
+  `updateBlockedIps`/`clearData` — never accepted with the ephemeral read
+  token, since it writes to disk on the host server): `POST
+  /monitor/handler?action=exportDenylist`, no body needed. Regenerates the
+  file using `config('monitor.denylist_format')` and returns `{"success":
+  true, "path": "..."}` (or `{"success": false, "message": "..."}` with a
+  500 if the write fails, e.g. permissions). This is what a dashboard/UI
+  button ("Export denylist now") calls.
+- Schedule your own cron on the host server, e.g. to re-export once a day
+  right before Apache/Nginx would otherwise pick up a stale file:
+
+  ```
+  0 3 * * * cd /path/to/your/app && php artisan monitor:export-denylist >> /dev/null 2>&1
+  ```
+
+There used to be a `denylist_auto_export` config flag that regenerated the
+file automatically on every `updateBlockedIps`/`unblockIp`/
+`flagScraperPath` call — removed (see CHANGELOG) because it rewrites the
+*entire* file on every single call, which scales badly when reviewing a
+large queue of flagged IPs one by one, for a freshness guarantee most
+consumers didn't need faster than their own web server reloads config
+anyway.
 
 ## Scraper signal detection
 

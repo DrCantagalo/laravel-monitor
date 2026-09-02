@@ -121,6 +121,9 @@ class MonitorController extends Controller
             case 'issueReadToken':
                 return $this->issueReadToken($request);
 
+            case 'exportDenylist':
+                return $this->exportDenylist($request);
+
             default:
                 return response()->json([
                     'success' => false,
@@ -947,25 +950,34 @@ class MonitorController extends Controller
     }
 
     /**
-     * Regenera o arquivo de deny-list (ver `monitor:export-denylist`) sempre
-     * que `monitor_blocked_ips` muda, se `monitor.denylist_auto_export`
-     * estiver ligado (opt-in, default false). Chamado só pelos 3 pontos que
-     * de fato mexem em `monitor_blocked_ips` (updateBlockedIps/unblockIp/
-     * flagScraperPath) - unflagPath não mexe nessa tabela, não precisa
-     * regenerar nada. Fail-open: escrita em disco não pode derrubar a
-     * action principal de bloquear/desbloquear IP.
+     * Regenera o arquivo de deny-list sob demanda (ver
+     * `monitor:export-denylist`, equivalente via artisan). Diferente do
+     * antigo `maybeAutoExportDenylist()` (removido - opt-in automático a
+     * cada updateBlockedIps/unblockIp/flagScraperPath, reescrevia o
+     * arquivo inteiro a cada request), esta action só roda quando o
+     * consumidor do pacote pede explicitamente (botão no dashboard, cron
+     * próprio via API, etc) - controle explícito de quando exportar, em
+     * vez de uma flag que dispara sozinha. Exige `local_token` (não entra
+     * em `$isValidReadToken` no dispatcher) por disparar escrita em disco
+     * no servidor do cliente.
      */
-    protected function maybeAutoExportDenylist(): void
+    protected function exportDenylist(Request $request)
     {
-        if (! config('monitor.denylist_auto_export')) {
-            return;
+        try {
+            $path = DenylistExporter::writeToDisk(config('monitor.denylist_format', 'apache'));
+        } catch (\Throwable $e) {
+            Log::error('Monitor denylist export failed: '.$e->getMessage());
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to write denylist file',
+            ], 500);
         }
 
-        try {
-            DenylistExporter::writeToDisk(config('monitor.denylist_format', 'apache'));
-        } catch (\Throwable $e) {
-            Log::error('Monitor denylist auto-export failed: '.$e->getMessage());
-        }
+        return response()->json([
+            'success' => true,
+            'path' => $path,
+        ]);
     }
 
     protected function clearData(Request $request)
@@ -1112,7 +1124,6 @@ class MonitorController extends Controller
         }
 
         $this->invalidateListingsCache();
-        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,
@@ -1139,7 +1150,6 @@ class MonitorController extends Controller
         $removed = BlockedIp::where('ip', $ip)->delete() > 0;
         Cache::forget("monitor:blocked-ip:{$ip}");
         $this->invalidateListingsCache();
-        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,
@@ -1274,8 +1284,6 @@ class MonitorController extends Controller
                 $blockedIps[$ip] = true;
             }
         });
-
-        $this->maybeAutoExportDenylist();
 
         return response()->json([
             'success' => true,

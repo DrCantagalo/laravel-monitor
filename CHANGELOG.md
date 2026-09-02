@@ -716,6 +716,36 @@ totals (`getData`)".
 
 ---
 
+## [0.13.0] - 2026-09-02
+### Removed
+- **Breaking**: `denylist_auto_export` config key removed, along with the
+  automatic regeneration it triggered on every `updateBlockedIps`/
+  `unblockIp`/`flagScraperPath` call. It rewrote the *entire* deny-list
+  file (not incrementally) on every single call — scales badly when a
+  user reviews and blocks a large queue of flagged IPs one page at a
+  time, for a freshness guarantee most consumers didn't actually need
+  faster than their own web server already reloads config (typically
+  once a day via cron, not in real time). If your published
+  `config/monitor.php` still has `'denylist_auto_export' => true`, it
+  simply becomes an inert key now — no error, just no longer read
+  anywhere.
+
+### Added
+- **`exportDenylist` API action**: `POST /monitor/handler?action=exportDenylist`
+  (same auth as `updateBlockedIps`/`clearData` — permanent `local_token`
+  only, never accepted with the ephemeral read token, since it writes to
+  disk on the host server). Regenerates the deny-list file on demand and
+  returns `{"success": true, "path": "..."}`. Gives the consuming app
+  explicit control over *when* to export instead of a flag that decides
+  by itself — call it from a dashboard button, your own cron hitting the
+  API, or anywhere else that makes sense for your deployment. The
+  `monitor:export-denylist` artisan command is unaffected and keeps
+  working exactly as before.
+
+See README, "Web-server deny-list export (`monitor:export-denylist`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

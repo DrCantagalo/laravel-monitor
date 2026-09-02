@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.12.0',
+    'version' => '0.13.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -79,17 +79,9 @@ return [
     // updateBlockedIps/unblockIp/flagScraperPath/unflagPath.
     'listings_cache_ttl_minutes' => 5,
 
-    // Regeneração automática do arquivo de deny-list (ver
-    // `monitor:export-denylist`) sempre que monitor_blocked_ips muda
-    // (updateBlockedIps/unblockIp/flagScraperPath). Opt-in: default false
-    // - uma instalação nova não passa a escrever arquivo no disco sem o
-    // consumidor do pacote decidir ligar isso explicitamente. O comando
-    // artisan continua funcionando manualmente independente desta flag.
-    'denylist_auto_export' => false,
-
-    // Formato usado por monitor:export-denylist quando --format não é
-    // passado, e pela auto-exportação acima (que não tem como receber
-    // flag de CLI). 'apache' ou 'nginx'.
+    // Formato usado por monitor:export-denylist e pela action
+    // `exportDenylist` da API quando --format/format não é passado.
+    // 'apache' ou 'nginx'.
     'denylist_format' => 'apache',
 
     // Path absoluto do arquivo de deny-list gerado.

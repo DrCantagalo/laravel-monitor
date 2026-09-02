@@ -7,9 +7,10 @@ use Illuminate\Support\Facades\File;
 
 /**
  * Gera um arquivo de deny-list (Apache ou Nginx) a partir de
- * `monitor_blocked_ips`, consumido por `monitor:export-denylist` (chamada
- * manual) e pela auto-exportação opt-in em `MonitorController` (ver
- * `monitor.denylist_auto_export`).
+ * `monitor_blocked_ips`, consumido por `monitor:export-denylist` (comando
+ * artisan) e pela action `exportDenylist` da API do `MonitorController`
+ * (ambos disparados explicitamente pelo consumidor do pacote - o pacote
+ * não exporta sozinho).
  */
 class DenylistExporter
 {
