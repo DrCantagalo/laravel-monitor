@@ -746,6 +746,22 @@ See README, "Web-server deny-list export (`monitor:export-denylist`)".
 
 ---
 
+## [0.14.0] - 2026-09-02
+### Added
+- **`monitor:update` artisan command**: syncs the published copy of
+  `config/monitor.php` with the package's current template after a
+  `composer update`. Adds new config keys introduced by newer package
+  versions (preserving their template comment), reports (but never
+  overwrites) keys whose value differs from the template default, warns
+  about keys the template no longer has, and always refreshes `version`
+  to match the actually installed version
+  (`Composer\InstalledVersions::getPrettyVersion()`). Run it after every
+  `composer update drcantagalo/laravel-monitor` — see README, "Updating".
+
+See README, "Updating".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
