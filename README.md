@@ -1,9 +1,66 @@
-# Laravel Monitor (v0.9.0)
+# Laravel Monitor (v0.10.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
 > ⚠️ **This is an early testing release.**  
 > API and config shape may still change between minor versions. See `CHANGELOG.md` for what each release actually added/fixed.
+
+## Aggregated dashboard totals (`getData`)
+
+`GET /monitor/handler?action=getData` — same auth as the other read
+actions (permanent `local_token` **or** the ephemeral read token from
+`issueReadToken`).
+
+**Breaking change in `0.10.0`**: this endpoint used to return every
+`monitors` row as-is (`{"success": true, "data": [...]}`), which meant
+loading the *entire* table into memory and serializing it in one response.
+That's fine on a fresh install, but it reliably exhausts PHP's
+`memory_limit` once the table grows into the tens of thousands of rows
+(confirmed in production at ~19.5k rows — see CHANGELOG `[0.10.0]`).
+`getData` now returns only pre-aggregated totals, computed without ever
+loading a full `Monitor` row into PHP:
+
+```json
+{
+  "success": true,
+  "visitors_total": 19532,
+  "visits_total": 84210,
+  "sessions_total": 21044,
+  "unique_ips_total": 8117,
+  "blocked_attempts_total": 342
+}
+```
+
+- **`visitors_total`**: `Monitor::count()` — one row per recognized
+  device/browser (see "Remember-me" above).
+- **`visits_total`**: `SUM` of `data.visits` across every row, computed in
+  SQL directly on the JSON column (`JSON_EXTRACT`/`json_extract`
+  depending on the driver) — never loads a row into PHP.
+- **`sessions_total`**: `SUM` of the length of `data.sessions` per row
+  (`JSON_LENGTH`/`json_array_length`), also computed in SQL. This is a
+  count of recorded sessions, **not** a cross-row deduplicated count —
+  in practice a session id only ever belongs to one `Monitor` row, so
+  this already reflects the real total in the overwhelming majority of
+  installs, but there's no dedicated table enforcing that globally
+  (unlike IPs, see below).
+- **`unique_ips_total`**: `IpStat::count()` — reuses `monitor_ip_stats`
+  (see "Per-IP stats" below), which already keeps exactly one row per
+  unique IP ever seen. Deliberately **not** a scan/dedupe of
+  `data.ips` across every `Monitor` row.
+- **`blocked_attempts_total`**: unchanged, see "Blocked-attempt counter"
+  below.
+- All four new totals share a short, fixed cache TTL
+  (`config('monitor.data_totals_cache_ttl_seconds')`, default `45`
+  seconds — same rationale as `block_results_cache_ttl_seconds`) and
+  fail open to `0` if the underlying table/column isn't there yet on an
+  older, not-yet-migrated install (logged via `Log::warning`).
+
+If your integration was reading the raw `data` array from `getData`,
+there is no drop-in replacement — it was removed entirely rather than
+turned into a paginated sample, since no known consumer needed row-level
+detail from this specific action (row-level detail is what `getPages`/
+`getVisitorsByIp`/`getUserVisits` are for). See CHANGELOG `[0.10.0]` for
+the full rationale.
 
 ## Remember-me (returning visitor recognition)
 
@@ -240,10 +297,13 @@ application's backend — only a short-lived, read-only token does.
 ## 404 tracking + scrapper path blocking
 
 `MonitorMethod` records, per visited path, whether the response was a
-`404` (`data.not_found[path] = true`) — lets a dashboard built on top of
-`getData` flag paths that don't actually exist on the monitored site (a
+`404` (`data.not_found[path] = true`) — aggregated by `getPages` (see
+"Paginated page listing" below) into a `not_found` flag per path, letting
+a dashboard flag paths that don't actually exist on the monitored site (a
 common scraper tell: `/wp-admin/install.php` on a site that isn't
-WordPress).
+WordPress). Since `0.10.0`, `getData` no longer exposes raw `Monitor` rows
+at all (see "Aggregated dashboard totals" below) — this per-path detail
+only ever came from `getPages`.
 
 > **Requires a `Route::fallback()` in the `web` middleware group to catch
 > genuinely nonexistent paths.** `MonitorMethod` only runs for requests

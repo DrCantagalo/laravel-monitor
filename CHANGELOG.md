@@ -599,6 +599,61 @@ See README, "Blocked-attempt counter (`monitor_block_results`)".
 
 ---
 
+## [0.10.0] - 2026-09-02
+### Fixed
+- **Memory exhaustion in `getData`** (`MonitorController::getData()`):
+  the action loaded `Monitor::all()` — every row of `monitors`,
+  unpaginated — into a single Eloquent collection and serialized it as
+  one JSON response. Confirmed in production (cantagalo.it) throwing
+  `Allowed memory size of 134217728 bytes exhausted` once the table
+  reached ~19.5k rows (~6.7MB of raw JSON in the `data` column alone,
+  before accounting for per-row Eloquent object overhead) — well past
+  PHP-FPM's 128MB `memory_limit`. Every other read action in this
+  controller (`getPages`, `getVisitorsByIp`, `getUsers`, etc.) already
+  paginated or aggregated in SQL; `getData` was the one action still
+  doing a full unbounded load, unchanged since it was first written.
+
+### Changed
+- **Breaking: `getData` response shape.** The raw `data` array is gone —
+  replaced with four SQL-computed totals: `visitors_total` (row count),
+  `visits_total` (`SUM` of `data.visits` via `JSON_EXTRACT`/
+  `json_extract`), `sessions_total` (`SUM` of `data.sessions` array
+  length via `JSON_LENGTH`/`json_array_length`), and `unique_ips_total`
+  (`IpStat::count()`, reusing the `monitor_ip_stats` table introduced in
+  `0.8.0` instead of re-deriving IP uniqueness from `data.ips`).
+  `blocked_attempts_total` (added in `0.9.0`) is unchanged. None of the
+  four new totals ever instantiates a full `Monitor` row in PHP — the
+  first three are pure SQL aggregates over the JSON column, and the
+  fourth is a `COUNT(*)` against an already-denormalized table, so the
+  fix doesn't just paginate the memory problem into a slower shape, it
+  removes the unbounded PHP-side aggregation entirely.
+  - Decision: **no** paginated-sample replacement for the raw `data`
+    array. No known consumer of `getData` needed row-level detail from
+    this specific action — the home-page dashboard only used it to
+    compute the same totals client-side, and row-level detail is
+    already available from `getPages`/`getVisitorsByIp`/`getUserVisits`.
+    Adding a partial `data` sample back would keep a foot-gun for larger
+    installs (any per-page limit is still an arbitrary cap that hides
+    data) for no consumer that actually needs it.
+  - `sessions_total` counts recorded sessions (`SUM` of per-row array
+    lengths), not a cross-row deduplicated count like
+    `unique_ips_total` — there's no `monitor_session_stats` table to
+    dedupe against. In practice a session id belongs to exactly one
+    `Monitor` row (`Monitor::newVisit()` already dedupes within a row
+    before pushing), so this matches the real unique count in the
+    overwhelming majority of installs; it's a documented approximation
+    rather than a guaranteed exact figure, unlike `unique_ips_total`.
+  - New config key `data_totals_cache_ttl_seconds` (default `45`,
+    same TTL/rationale as `block_results_cache_ttl_seconds` — these
+    totals mutate on every tracked request, so they use a short fixed
+    TTL outside the versioned `getPages`/`getVisitorsByIp` cache scheme).
+    All four totals fail open to `0` (logged via `Log::warning`) if the
+    backing table/column isn't migrated yet on an older install.
+
+See README, "Aggregated dashboard totals (`getData`)".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

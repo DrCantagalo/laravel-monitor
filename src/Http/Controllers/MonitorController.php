@@ -148,18 +148,145 @@ class MonitorController extends Controller
         ]);
     }
 
+    /**
+     * Task 88: até a 0.9.0 este endpoint devolvia `Monitor::all()` cru —
+     * carregava TODAS as linhas de `monitors` como models Eloquent numa
+     * response JSON só, o que estourava o `memory_limit` do PHP-FPM em
+     * qualquer installation com volume real de tracking (confirmado em
+     * produção com 19.5k linhas, ver bugs/laravel-monitor.md). O dump de
+     * `data` foi removido de vez (não substituído por amostra paginada —
+     * nenhum consumidor conhecido precisa das linhas cruas, só dos
+     * agregados abaixo, e o dashboard já os usava só pra somar totais
+     * client-side). **Breaking change**, ver CHANGELOG `[0.10.0]`.
+     */
     protected function getData(Request $request)
     {
-        $data = Monitor::all(); // futuramente adicionar filtros, período etc.
-
         return response()->json([
             'success' => true,
-            'data' => $data,
+            'visitors_total' => (int) Monitor::count(),
+            'visits_total' => $this->visitsTotal(),
+            'sessions_total' => $this->sessionsTotal(),
+            'unique_ips_total' => $this->uniqueIpsTotal(),
             // Task 83: soma agregada de monitor_block_results, pro
             // dashboard reusar o mesmo fetch que já alimenta os cards de
             // KPI em vez de bater um endpoint novo só pra esse número.
             'blocked_attempts_total' => $this->blockedAttemptsTotal(),
         ]);
+    }
+
+    /**
+     * `SUM(data.visits)` de todas as linhas `Monitor`, agregado direto em
+     * SQL sobre o blob JSON (`JSON_EXTRACT`/`json_extract`, conforme o
+     * driver) — nunca instancia uma linha `Monitor` inteira em PHP, ao
+     * contrário do `Monitor::all()` que causava a memory exhaustion
+     * original. Mesmo esquema de cache curto/fixo de `blockedAttemptsTotal()`
+     * (mutação a cada request rastreada via `Monitor::newVisit()`, não faz
+     * sentido usar o esquema versionado de getPages/getVisitorsByIp).
+     */
+    protected function visitsTotal(): int
+    {
+        return Cache::remember(
+            'monitor:data:visits-total',
+            now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
+            function () {
+                try {
+                    $expression = $this->jsonNumericSumExpression('visits');
+
+                    return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] falha ao calcular visits_total em getData. Erro original: ' . $e->getMessage());
+
+                    return 0;
+                }
+            }
+        );
+    }
+
+    /**
+     * `SUM` do tamanho de `data.sessions` por linha `Monitor`
+     * (`JSON_LENGTH`/`json_array_length`, conforme o driver) — conta
+     * quantas sessions foram registradas no total, **sem** dedupe entre
+     * linhas (ao contrário de `uniqueIpsTotal()` abaixo, que dedupe de
+     * verdade via `monitor_ip_stats`). Na prática cada session_id só
+     * aparece numa única linha `Monitor` (um dispositivo reconhecido via
+     * `remember_cookie` — ver `Monitor::newVisit()`, que já dedupe dentro
+     * da própria linha antes de dar push), então esse número já reflete o
+     * total de sessions distintas na imensa maioria dos casos; não é uma
+     * garantia matemática de unicidade global só porque não existe uma
+     * tabela `monitor_session_stats` dedicada (ao contrário de IPs, que já
+     * tinham `monitor_ip_stats` de outra feature). Calculado 100% em SQL,
+     * sem chunk: `JSON_LENGTH`/`json_array_length` operam por linha no
+     * próprio SGBD, sem precisar trazer o JSON pra PHP.
+     */
+    protected function sessionsTotal(): int
+    {
+        return Cache::remember(
+            'monitor:data:sessions-total',
+            now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
+            function () {
+                try {
+                    $expression = $this->jsonArrayLengthExpression('sessions');
+
+                    return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] falha ao calcular sessions_total em getData. Erro original: ' . $e->getMessage());
+
+                    return 0;
+                }
+            }
+        );
+    }
+
+    /**
+     * Contagem de IPs únicos vistos por esta installation — reusa
+     * `monitor_ip_stats` (1 linha por IP, já mantida por
+     * `IpStat::recordVisit()` a cada request rastreada) em vez de dedupear
+     * `data.ips` na unha: evita reinventar, dentro de `getData`, a mesma
+     * agregação que motivou a criação daquela tabela em primeiro lugar
+     * (ver README, "Per-IP stats"). `COUNT(*)` puro, sem risco de memória.
+     * Fail-open: instalação ainda não migrada pra `0.8.0`+ (onde a tabela
+     * foi introduzida) não pode quebrar getData.
+     */
+    protected function uniqueIpsTotal(): int
+    {
+        return Cache::remember(
+            'monitor:data:unique-ips-total',
+            now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
+            function () {
+                try {
+                    return (int) IpStat::count();
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] tabela monitor_ip_stats não encontrada ao calcular unique_ips_total. Erro original: ' . $e->getMessage());
+
+                    return 0;
+                }
+            }
+        );
+    }
+
+    /**
+     * Expressão SQL portável (MySQL/SQLite — os dois drivers realmente
+     * usados, ver `userIdColumn()`) pra somar um campo numérico escalar
+     * dentro do blob `data`, com `CAST` pro tipo certo (sem o cast, o MySQL
+     * soma a string extraída como 0 quando o path não existe em algumas
+     * versões, e o SQLite trata o retorno de `json_extract` como REAL em
+     * vez de INTEGER em certas comparações).
+     */
+    protected function jsonNumericSumExpression(string $field): string
+    {
+        return Monitor::query()->getConnection()->getDriverName() === 'mysql'
+            ? "CAST(JSON_EXTRACT(data, '$.{$field}') AS UNSIGNED)"
+            : "CAST(json_extract(data, '$.{$field}') AS INTEGER)";
+    }
+
+    /**
+     * Expressão SQL portável pro tamanho de um array dentro do blob `data`.
+     */
+    protected function jsonArrayLengthExpression(string $field): string
+    {
+        return Monitor::query()->getConnection()->getDriverName() === 'mysql'
+            ? "JSON_LENGTH(data, '$.{$field}')"
+            : "json_array_length(data, '$.{$field}')";
     }
 
     /**

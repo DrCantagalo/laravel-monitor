@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.9.0',
+    'version' => '0.10.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -106,5 +106,13 @@ return [
     // invalidaria getVisitorsByIp/getBlockedIps/etc pra todo mundo sem
     // necessidade.
     'block_results_cache_ttl_seconds' => 45,
+
+    // TTL (segundos) do cache de visitors_total/visits_total/
+    // sessions_total/unique_ips_total (agregados de getData desde a
+    // 0.10.0, ver README "Aggregated dashboard totals"). Mesmo raciocínio
+    // de block_results_cache_ttl_seconds: mutação a cada request
+    // rastreada (Monitor::newVisit/IpStat::recordVisit), fora do esquema
+    // versionado de getPages/getVisitorsByIp.
+    'data_totals_cache_ttl_seconds' => 45,
 
 ];
