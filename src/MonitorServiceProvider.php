@@ -2,10 +2,14 @@
 
 namespace Drcantagalo\LaravelMonitor;
 
-use Illuminate\Support\ServiceProvider;
+use Drcantagalo\LaravelMonitor\Console\Commands\MonitorExportDenylistCommand;
+use Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand;
+use Drcantagalo\LaravelMonitor\Console\Commands\MonitorUpdateCommand;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
+use Drcantagalo\LaravelMonitor\Support\Monitor;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Cookie\Middleware\EncryptCookies;
+use Illuminate\Support\ServiceProvider;
 
 class MonitorServiceProvider extends ServiceProvider
 {
@@ -39,7 +43,7 @@ class MonitorServiceProvider extends ServiceProvider
         // MonitorMethod gravar monitor_id nela, entao a gravacao nunca
         // persistia entre requests (bug: cada request criava um Monitor
         // novo em vez de reaproveitar o da sessao).
-        $kernel->appendMiddlewareToGroup('web', \Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod::class);
+        $kernel->appendMiddlewareToGroup('web', MonitorMethod::class);
 
         // O cookie de remember-me é lido diretamente via $request->cookie()
         // no endpoint público, sem passar pelo decrypt padrao do Laravel
@@ -54,8 +58,9 @@ class MonitorServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->commands([
-                \Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand::class,
-                \Drcantagalo\LaravelMonitor\Console\Commands\MonitorExportDenylistCommand::class,
+                MonitorInstallCommand::class,
+                MonitorExportDenylistCommand::class,
+                MonitorUpdateCommand::class,
             ]);
         }
 
@@ -72,6 +77,6 @@ class MonitorServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(__DIR__.'/config/monitor.php', 'monitor');
 
-        $this->app->singleton('monitor', fn () => new \Drcantagalo\LaravelMonitor\Support\Monitor());
+        $this->app->singleton('monitor', fn () => new Monitor);
     }
 }

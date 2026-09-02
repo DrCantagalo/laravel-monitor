@@ -5,6 +5,47 @@
 > ⚠️ **This is an early testing release.**  
 > API and config shape may still change between minor versions. See `CHANGELOG.md` for what each release actually added/fixed.
 
+## Updating
+
+First-time setup is `composer require drcantagalo/laravel-monitor` followed
+by `php artisan monitor:install` (interactive: terms, publish
+config/migrations, migrate, register the installation). `monitor:install`
+is **not** meant to run again on every update — running it a second time
+would re-ask every prompt for a project that's already set up.
+
+After a plain `composer update drcantagalo/laravel-monitor` (bumping to a
+new version of an already-installed project), run:
+
+```
+php artisan monitor:update
+```
+
+This keeps your published `config/monitor.php` (a static copy created by
+`vendor:publish --tag=monitor-config`) in sync with the package, without
+touching anything you've customized:
+
+- Adds any config key that's new in this version (with its explanatory
+  comment carried over from the package template) — these keys are
+  otherwise invisible in your published file until you update it, even
+  though `mergeConfigFrom()` already covers them at runtime with the
+  package default.
+- **Never** overwrites a key your published file already has — including
+  `dashboard_origin` or any other value you've customized. If a key's
+  value is still whatever the package used to default to (i.e. you never
+  actually customized it and it's now stale), the command only reports
+  it — updating it is your call, not the command's.
+- Updates the `version` key to the actually-installed version (read from
+  Composer, not from the package template), so
+  `config('monitor.version')` reported by `monitor:install`'s handshake
+  stays accurate.
+- Warns about any key your published file still has that no longer
+  exists in the current template — usually means it was removed or
+  renamed in a breaking change (check `CHANGELOG.md`).
+
+Always safe to run again — it's idempotent (a second run with no new
+package version is a no-op). No confirmation prompts, since this is
+routine maintenance, not first-time setup.
+
 ## Aggregated dashboard totals (`getData`)
 
 `GET /monitor/handler?action=getData` — same auth as the other read
