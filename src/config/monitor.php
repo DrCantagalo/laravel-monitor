@@ -74,9 +74,11 @@ return [
     // próxima ofensa, antes de incrementar a atual).
     'auto_block_strike_decay_cooldown_days' => 30,
 
-    // A partir de quantos strikes acumulados um bloqueio automático vira
-    // permanente (blocked_until = null) em vez de expirar sozinho.
-    'auto_block_permanent_after_strikes' => 10,
+    // A partir de quantas ofensas na vida inteira desse IP (contador que
+    // NUNCA decai, ao contrário de strike_count acima — ver comentário em
+    // ScraperBlocker) um bloqueio automático vira permanente
+    // (blocked_until = null) em vez de expirar sozinho.
+    'auto_block_permanent_after_lifetime_offenses' => 10,
 
     // Intervalo (horas) do cron que o consumidor do pacote configura pra
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa

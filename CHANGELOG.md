@@ -768,20 +768,25 @@ See README, "Updating".
   the base infrastructure for automatic blocking (laravel-monitor 95) —
   first offense blocks for 2h, each subsequent offense before full decay
   doubles the duration (4h, 8h, 16h, ...), a configurable cooldown decays
-  `strike_count` back down after quiet periods, and sustained reincidence
-  eventually promotes the block to permanent. Modeled after
-  fail2ban/CrowdSec instead of a static blocklist, since IPs get reused
-  over time (CGNAT, dynamic residential/cloud IPs) and a permanent block
-  can end up punishing an unrelated later visitor. This release only adds
-  the infrastructure and the schema/query changes needed for it to work
+  `strike_count` back down after quiet periods, and a separate,
+  never-decaying `lifetime_offense_count` eventually promotes the block
+  to permanent once it crosses a threshold — kept separate from
+  `strike_count` specifically so a patient attacker who paces reoffenses
+  at or above the cooldown can't stay under the escalation forever (see
+  README, "Why two counters, not one"). Modeled after fail2ban/CrowdSec
+  instead of a static blocklist, since IPs get reused over time (CGNAT,
+  dynamic residential/cloud IPs) and a permanent block can end up
+  punishing an unrelated later visitor. This release only adds the
+  infrastructure and the schema/query changes needed for it to work
   correctly — nothing yet calls `registerOffense()` automatically (that's
   upcoming automatic-blocking work); manual blocking via
   `updateBlockedIps`/`blockIps` is untouched and stays permanent as
   before.
 - New `monitor_blocked_ips` columns: `blocked_until` (nullable, indexed —
-  `null` means permanent), `strike_count`, `last_offense_at`.
+  `null` means permanent), `strike_count`, `lifetime_offense_count`,
+  `last_offense_at`.
 - New config keys: `auto_block_strike_decay_cooldown_days` (default `30`),
-  `auto_block_permanent_after_strikes` (default `10`),
+  `auto_block_permanent_after_lifetime_offenses` (default `10`),
   `denylist_export_interval_hours` (default `24`).
 
 ### Changed

@@ -467,9 +467,9 @@ that weren't (or don't need to be) tied to a specific path.
   is missing/invalid.
 
 **Note**: `updateBlockedIps`/`unblockIp` never touch `blocked_until`/
-`strike_count`/`last_offense_at` — those columns only exist for the
-automatic path below. A manually blocked IP stays permanent exactly as
-before, with no expiration and no escalation.
+`strike_count`/`lifetime_offense_count`/`last_offense_at` — those columns
+only exist for the automatic path below. A manually blocked IP stays
+permanent exactly as before, with no expiration and no escalation.
 
 ## Temporary, escalating IP blocking (`ScraperBlocker`)
 
@@ -487,22 +487,51 @@ punishing an unrelated legitimate visitor who inherits that IP months
 later. Escalating, self-expiring blocks make automatic blocking safe
 enough to not require a human reviewing every flagged IP first.
 
-- **First offense**: blocks for `2^1 = 2` hours.
+Two separate counters drive this, on purpose — see "Why two counters"
+below for the bug this avoids:
+
+- `strike_count`: decays over time, drives only how long *this* block
+  lasts.
+- `lifetime_offense_count`: never decays, only ever increments, drives
+  the permanent-promotion threshold.
+
+- **First offense**: `strike_count`/`lifetime_offense_count` both start
+  at `1`, block lasts `2^1 = 2` hours.
 - **Each subsequent offense** (before the block from the previous one
-  fully decays, see below) doubles the exponent: 2nd offense → `2^2 = 4h`,
-  3rd → `2^3 = 8h`, 4th → `2^4 = 16h`, and so on.
+  fully decays, see below) doubles the exponent on `strike_count`: 2nd
+  offense → `2^2 = 4h`, 3rd → `2^3 = 8h`, 4th → `2^4 = 16h`, and so on.
+  `lifetime_offense_count` simply increments by 1 every time,
+  unconditionally.
 - **Decay**: every `config('monitor.auto_block_strike_decay_cooldown_days')`
   (default `30`) days that pass *without* a new offense from that IP,
   `strike_count` drops by 1 (never below 1) the next time that IP offends
   again — so an IP that goes quiet is treated as less of a repeat offender
-  the next time it shows up, instead of escalating forever from stale
-  history.
-- **Permanent promotion**: once `strike_count` reaches
-  `config('monitor.auto_block_permanent_after_strikes')` (default `10`),
-  `blocked_until` is set to `null` (permanent) instead of a new expiry —
-  only sustained, undecayed reincidence gets there.
+  for how long the *next* block lasts. `lifetime_offense_count` is
+  **never** touched by decay.
+- **Permanent promotion**: once `lifetime_offense_count` reaches
+  `config('monitor.auto_block_permanent_after_lifetime_offenses')`
+  (default `10`), `blocked_until` is set to `null` (permanent) instead of
+  a new expiry — regardless of what `strike_count` currently is.
 - `source` is overwritten with whatever triggered the latest offense (the
   most recent trigger is the relevant one for that column).
+
+**Why two counters, not one**: an earlier version of this feature used a
+single counter for both decay and the permanent threshold. With linear
+decay (−1 strike per full cooldown period, floored at 1), any IP that
+reoffends at an interval ≥ the cooldown always gets decayed back to the
+floor before the new offense is added — once that counter reaches `2`,
+it's stuck there forever (`2 − 1 = 1`, `+1 = 2`, repeat), no matter how
+many times the IP reoffends over months or years. A patient attacker who
+simply waits out the cooldown between attacks would never reach the
+permanent threshold. Splitting the counters fixes this: `strike_count`
+still decays and correctly reflects "how hot is this IP *right now*" for
+sizing the current block, while `lifetime_offense_count` is a simple,
+un-decaying tally of "how many times has this IP ever offended" that
+guarantees even a well-paced repeat offender eventually crosses the
+permanent threshold — it just takes longer, proportional to how patient
+they are, which is the correct tradeoff (monthly reoffending for two
+years is objectively less severe than daily reoffending, but should
+still end in a permanent block if it never stops).
 
 `MonitorMethod::isBlocked()` treats a `blocked_until` in the past as not
 blocked — the existing `blocked_ip_cache_ttl` cache (default 60s) already
