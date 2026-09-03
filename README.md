@@ -1,4 +1,4 @@
-# Laravel Monitor (v0.11.0)
+# Laravel Monitor (v0.15.0)
 
 **Laravel Monitor** is an experimental package designed to test the initial installation flow for a lightweight Laravel package providing basic CRM tools, access monitoring, and anti-scraper features. Designed to track visits, manage sessions, and detect potentially malicious scrapers.
 
@@ -466,6 +466,49 @@ that weren't (or don't need to be) tied to a specific path.
   `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
   is missing/invalid.
 
+**Note**: `updateBlockedIps`/`unblockIp` never touch `blocked_until`/
+`strike_count`/`last_offense_at` — those columns only exist for the
+automatic path below. A manually blocked IP stays permanent exactly as
+before, with no expiration and no escalation.
+
+## Temporary, escalating IP blocking (`ScraperBlocker`)
+
+Since `0.15.0`, `monitor_blocked_ips` supports **temporary, escalating**
+blocks (`ScraperBlocker::registerOffense(string $ip, string $source)`),
+modeled after fail2ban/CrowdSec rather than a static blocklist. This is the
+mechanism behind *automatic* blocking (honeypot hits, scraper-signal
+thresholds — see the changelog entries for the versions that wire each
+trigger up); manual blocking via `updateBlockedIps`/`blockIps` is
+unaffected and stays permanent (see note above).
+
+Why temporary: IPs get reused over time (CGNAT, dynamic residential IPs,
+elastic cloud IPs), so a permanent block from one bad actor can end up
+punishing an unrelated legitimate visitor who inherits that IP months
+later. Escalating, self-expiring blocks make automatic blocking safe
+enough to not require a human reviewing every flagged IP first.
+
+- **First offense**: blocks for `2^1 = 2` hours.
+- **Each subsequent offense** (before the block from the previous one
+  fully decays, see below) doubles the exponent: 2nd offense → `2^2 = 4h`,
+  3rd → `2^3 = 8h`, 4th → `2^4 = 16h`, and so on.
+- **Decay**: every `config('monitor.auto_block_strike_decay_cooldown_days')`
+  (default `30`) days that pass *without* a new offense from that IP,
+  `strike_count` drops by 1 (never below 1) the next time that IP offends
+  again — so an IP that goes quiet is treated as less of a repeat offender
+  the next time it shows up, instead of escalating forever from stale
+  history.
+- **Permanent promotion**: once `strike_count` reaches
+  `config('monitor.auto_block_permanent_after_strikes')` (default `10`),
+  `blocked_until` is set to `null` (permanent) instead of a new expiry —
+  only sustained, undecayed reincidence gets there.
+- `source` is overwritten with whatever triggered the latest offense (the
+  most recent trigger is the relevant one for that column).
+
+`MonitorMethod::isBlocked()` treats a `blocked_until` in the past as not
+blocked — the existing `blocked_ip_cache_ttl` cache (default 60s) already
+guarantees an expired block disappears from the application within that
+window, no separate job/cron needed.
+
 ## Blocked-attempt counter (`monitor_block_results`)
 
 Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both
@@ -568,6 +611,17 @@ file automatically on every `updateBlockedIps`/`unblockIp`/
 large queue of flagged IPs one by one, for a freshness guarantee most
 consumers didn't need faster than their own web server reloads config
 anyway.
+
+**`denylist_export_interval_hours`** (default `24`): since `0.15.0`,
+temporary blocks (see "Temporary, escalating IP blocking" above) are only
+included in the generated file if the time remaining until `blocked_until`
+is at least this many hours — a block expiring sooner than your next
+scheduled export would never get its `Require not ip`/`deny` line removed
+in time, leaving the web server blocking an IP the application has already
+released. Set this to match the actual frequency of whatever cron you
+configure to run `monitor:export-denylist`/`exportDenylist` (e.g. `24` for
+the daily example above). Permanent blocks (`blocked_until = null`) are
+always included, no matter this setting.
 
 ## Scraper signal detection
 

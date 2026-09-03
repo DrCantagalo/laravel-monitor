@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.14.0',
+    'version' => '0.15.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -64,6 +64,26 @@ return [
     // monitor_blocked_ips/monitor_blocked_paths a cada request. Invalidado
     // por IP/path ao bloquear via updateBlockedIps/flagScraperPath.
     'blocked_ip_cache_ttl' => 60,
+
+    // Bloqueio automático temporário e escalonado (ScraperBlocker::
+    // registerOffense, tasks 95-97). Não afeta bloqueio manual
+    // (updateBlockedIps/blockIps), que continua permanente.
+
+    // Dias sem nenhuma ofensa nova pra decair 1 strike do strike_count de
+    // um IP (ex: 65 dias parado com cooldown de 30 = decai 2 strikes na
+    // próxima ofensa, antes de incrementar a atual).
+    'auto_block_strike_decay_cooldown_days' => 30,
+
+    // A partir de quantos strikes acumulados um bloqueio automático vira
+    // permanente (blocked_until = null) em vez de expirar sozinho.
+    'auto_block_permanent_after_strikes' => 10,
+
+    // Intervalo (horas) do cron que o consumidor do pacote configura pra
+    // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa
+    // esse valor pra excluir do arquivo gerado qualquer bloqueio
+    // temporário que vá expirar antes do próximo export — ajuste pra
+    // bater com a frequência real do seu cron, ver README.
+    'denylist_export_interval_hours' => 24,
 
     // TTL (minutos) do cache da action getPages (resultado já agregado e
     // paginado). Chave inclui um contador de versão incrementado em

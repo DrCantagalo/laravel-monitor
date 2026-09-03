@@ -20,8 +20,7 @@ class MonitorMethod
     public function __construct(
         protected SessionVisitorTracker $sessionTracker,
         protected AnonymousVisitorTracker $anonymousTracker,
-    ) {
-    }
+    ) {}
 
     public function handle(Request $request, Closure $next): Response
     {
@@ -37,7 +36,7 @@ class MonitorMethod
         // informação (ex: "/dashboard/3/blacklist" não dizia se veio de
         // "app.exemplo.com" ou "admin.exemplo.com").
         $pathOnly = ltrim($request->path(), '/');
-        $path = $request->getHost() . '/' . $pathOnly;
+        $path = $request->getHost().'/'.$pathOnly;
         $ip = $request->ip();
         $userAgent = $request->header('User-Agent');
 
@@ -56,7 +55,7 @@ class MonitorMethod
         try {
             $blocked = $this->isBlocked($ip) || $this->isPathBlocked($pathOnly);
         } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_blocked_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
+            Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_blocked_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
             $blocked = false;
         }
 
@@ -78,7 +77,7 @@ class MonitorMethod
                 $this->anonymousTracker->track($request, $path, $userAgent, $ip, $notFound);
             }
         } catch (Exception $e) {
-            Log::error("Monitor Package Error: " . $e->getMessage());
+            Log::error('Monitor Package Error: '.$e->getMessage());
         }
 
         return $response;
@@ -102,13 +101,22 @@ class MonitorMethod
      * por `monitor.blocked_ip_cache_ttl` segundos pra evitar uma query por
      * request. Cache é invalidado em `updateBlockedIps` ao adicionar um
      * IP novo.
+     *
+     * `blocked_until` null = permanente (bloqueio manual, ou automático já
+     * escalado a permanente — ver `ScraperBlocker::registerOffense`);
+     * um `blocked_until` no passado não conta mais como bloqueado. Como o
+     * TTL do cache acima já é curto por padrão (60s), a expiração natural
+     * do cache garante que um bloqueio expirado some da aplicação nesse
+     * intervalo, sem precisar de nenhum job/cron dedicado.
      */
     protected function isBlocked(string $ip): bool
     {
         return Cache::remember(
             "monitor:blocked-ip:{$ip}",
             (int) config('monitor.blocked_ip_cache_ttl', 60),
-            fn () => BlockedIp::where('ip', $ip)->exists()
+            fn () => BlockedIp::where('ip', $ip)
+                ->where(fn ($q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>', now()))
+                ->exists()
         );
     }
 
@@ -143,7 +151,7 @@ class MonitorMethod
                 ['counter' => DB::raw('counter + 1'), 'last_attempt_at' => now()]
             );
         } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: ' . $e->getMessage());
+            Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
         }
     }
 }

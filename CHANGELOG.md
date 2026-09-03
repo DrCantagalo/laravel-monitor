@@ -762,6 +762,43 @@ See README, "Updating".
 
 ---
 
+## [0.15.0] - 2026-09-03
+### Added
+- **Temporary, escalating IP blocking** (`Support/ScraperBlocker::registerOffense()`),
+  the base infrastructure for automatic blocking (laravel-monitor 95) —
+  first offense blocks for 2h, each subsequent offense before full decay
+  doubles the duration (4h, 8h, 16h, ...), a configurable cooldown decays
+  `strike_count` back down after quiet periods, and sustained reincidence
+  eventually promotes the block to permanent. Modeled after
+  fail2ban/CrowdSec instead of a static blocklist, since IPs get reused
+  over time (CGNAT, dynamic residential/cloud IPs) and a permanent block
+  can end up punishing an unrelated later visitor. This release only adds
+  the infrastructure and the schema/query changes needed for it to work
+  correctly — nothing yet calls `registerOffense()` automatically (that's
+  upcoming automatic-blocking work); manual blocking via
+  `updateBlockedIps`/`blockIps` is untouched and stays permanent as
+  before.
+- New `monitor_blocked_ips` columns: `blocked_until` (nullable, indexed —
+  `null` means permanent), `strike_count`, `last_offense_at`.
+- New config keys: `auto_block_strike_decay_cooldown_days` (default `30`),
+  `auto_block_permanent_after_strikes` (default `10`),
+  `denylist_export_interval_hours` (default `24`).
+
+### Changed
+- **Breaking**: `MonitorMethod::isBlocked()` and
+  `Support/DenylistExporter::build()` now treat a `blocked_until` in the
+  past as not blocked / not exported. Any consumer with custom code
+  querying `monitor_blocked_ips` directly and assuming every row is an
+  active, permanent block needs to account for the new columns.
+  `DenylistExporter::build()` additionally excludes a temporary block
+  whose remaining time is shorter than
+  `config('monitor.denylist_export_interval_hours')`, to avoid a stale
+  web-server-level deny entry outliving the application-level block. See
+  README, "Temporary, escalating IP blocking" and "Web-server deny-list
+  export".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
