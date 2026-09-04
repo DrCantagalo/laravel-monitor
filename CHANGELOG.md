@@ -820,6 +820,31 @@ See README, "Updating".
 
 ---
 
+## [0.16.0] - 2026-09-04
+### Added
+- **Automatic flagged→blocked promotion** (laravel-monitor 96), on top of
+  the `ScraperBlocker` infrastructure from `0.15.0`. Two triggers now call
+  `ScraperBlocker::registerOffense()` automatically:
+  - `SessionVisitorTracker`/`AnonymousVisitorTracker` register an offense
+    when a single tracked request triggers
+    `config('monitor.auto_block_signal_threshold')` (default `3`) or more
+    scraper signals — separate from, and higher-confidence than,
+    `scraper_signal_threshold` (default `2`), which only sets
+    `data.flags.scraper` for human review. Wired into both trackers, since
+    real scrapers typically don't carry a session.
+  - Honeypot hits (`flagScraperPath`) now go through
+    `ScraperBlocker::registerOffense()` instead of a direct
+    `BlockedIp::firstOrCreate()` — the honeypot block is now temporary and
+    escalating like every other automatic block, instead of permanent and
+    static from the first hit. A single hit still suffices to trigger it
+    (no signal count needed); curating which paths count as honeypots
+    stays entirely manual.
+- New config key: `auto_block_signal_threshold` (default `3`).
+
+See README, "Temporary, escalating IP blocking" → "Automatic triggers".
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

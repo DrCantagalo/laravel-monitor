@@ -538,6 +538,34 @@ blocked — the existing `blocked_ip_cache_ttl` cache (default 60s) already
 guarantees an expired block disappears from the application within that
 window, no separate job/cron needed.
 
+### Automatic triggers (since `0.16.0`)
+
+Two triggers call `ScraperBlocker::registerOffense()` automatically — no
+human reviewing the flagged-IP queue required:
+
+- **Scraper-signal threshold**: `SessionVisitorTracker`/
+  `AnonymousVisitorTracker` already run `ScraperSignalDetector` on every
+  tracked request to decide `data.flags.scraper`. When the number of
+  signals triggered on a single request reaches
+  `config('monitor.auto_block_signal_threshold')` (default `3`, higher
+  than `scraper_signal_threshold`'s default of `2` on purpose —
+  auto-blocking acts without a human, so it deserves more confidence than
+  a flag meant for review), that IP gets an offense registered. Both
+  trackers wire this up, not just the session one — real scrapers
+  typically don't carry a session, so covering only
+  `SessionVisitorTracker` would miss the common case.
+- **Honeypot hits** (`flagScraperPath`): any IP seen hitting a path
+  flagged as a honeypot registers an offense immediately — a single hit
+  is enough, no signal count needed, since a path nobody legitimate would
+  ever request is already the highest-confidence signal available.
+  Before `0.16.0` this called `BlockedIp::firstOrCreate()` directly
+  (permanent, static block from the first hit); it now goes through the
+  same escalating/expiring mechanism as every other automatic block.
+
+Curating which paths count as a honeypot stays 100% manual (a human still
+decides which routes nobody legitimate would ever hit) — only what
+happens when one is hit follows the escalation system above.
+
 ## Blocked-attempt counter (`monitor_block_results`)
 
 Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both

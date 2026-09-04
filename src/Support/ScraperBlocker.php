@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * Bloqueio temporário e escalonado (laravel-monitor 95), inspirado em
@@ -66,6 +67,17 @@ class ScraperBlocker
             : now()->addHours(2 ** $strikeCount);
 
         $blockedIp->save();
+
+        // Sem isso, um IP recém-bloqueado automaticamente (honeypot ou
+        // threshold de sinais, task 96) continuaria passando por
+        // MonitorMethod::isBlocked() por até blocked_ip_cache_ttl (default
+        // 60s) depois do registro - o cache já era invalidado nos
+        // caminhos manuais (updateBlockedIps/flagScraperPath chamam
+        // Cache::forget explicitamente), mas nada fazia isso pro caminho
+        // automático até agora, já que nada chamava registerOffense() a
+        // partir do tráfego real antes da task 96 existir (a 95 só testava
+        // a classe isolada).
+        Cache::forget("monitor:blocked-ip:{$ip}");
 
         return $blockedIp;
     }

@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.15.1',
+    'version' => '0.16.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -79,6 +79,16 @@ return [
     // ScraperBlocker) um bloqueio automático vira permanente
     // (blocked_until = null) em vez de expirar sozinho.
     'auto_block_permanent_after_lifetime_offenses' => 10,
+
+    // Quantos sinais de scraper (mesma heurística de scraper_signal_threshold
+    // acima) disparados numa única request bastam pra chamar
+    // ScraperBlocker::registerOffense automaticamente (SessionVisitorTracker/
+    // AnonymousVisitorTracker::maybeAutoBlock, task 96) — separado e mais
+    // alto que scraper_signal_threshold de propósito: aquele só marca
+    // data.flags.scraper pra revisão humana, este bloqueia sozinho, e
+    // merece mais confiança/sinais concordando antes de agir sem humano no
+    // circuito.
+    'auto_block_signal_threshold' => 3,
 
     // Intervalo (horas) do cron que o consumidor do pacote configura pra
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa

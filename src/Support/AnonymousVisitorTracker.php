@@ -10,9 +10,31 @@ class AnonymousVisitorTracker
 {
     protected ScraperSignalDetector $scraperSignalDetector;
 
-    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null)
+    protected ScraperBlocker $scraperBlocker;
+
+    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null)
     {
         $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
+        $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker();
+    }
+
+    /**
+     * laravel-monitor 96: promoção automática de flagged->blocked quando os
+     * sinais de scraper da request atual passam de `auto_block_signal_threshold`
+     * (separado e mais alto que `scraper_signal_threshold`, que só decide
+     * `data.flags.scraper` pra revisão humana - autoblock age sozinho e
+     * merece mais confiança). Entra na escada temporária/escalonada de
+     * `ScraperBlocker`, não vira permanente direto. Cobrir este tracker (sem
+     * sessão) é o caso mais comum pra scrapers de verdade, que tipicamente
+     * não carregam sessão.
+     */
+    protected function maybeAutoBlock(string $ip, array $signals): void
+    {
+        $threshold = (int) config('monitor.auto_block_signal_threshold', 3);
+
+        if (count($signals) >= $threshold) {
+            $this->scraperBlocker->registerOffense($ip, 'auto-signal');
+        }
     }
 
     /**
@@ -25,6 +47,7 @@ class AnonymousVisitorTracker
         $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
         IpStat::recordVisit($ip, $isScraper, $signals);
+        $this->maybeAutoBlock($ip, $signals);
 
         $user = Monitor::where('data->ips', 'like', "%{$ip}%")->first();
 

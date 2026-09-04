@@ -9,6 +9,7 @@ use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\PathReview;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
+use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -1279,8 +1280,12 @@ class MonitorController extends Controller
                     continue;
                 }
 
-                BlockedIp::firstOrCreate(['ip' => $ip], ['source' => 'scraper-path']);
-                Cache::forget("monitor:blocked-ip:{$ip}");
+                // laravel-monitor 96: honeypot é o sinal de maior confiança
+                // do auto-block (um hit já basta, sem contagem de sinais) -
+                // passa a seguir a mesma escada temporária/escalonada do
+                // resto do auto-block em vez de virar permanente e estático
+                // desde o primeiro hit. Ver ScraperBlocker::registerOffense.
+                (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
                 $blockedIps[$ip] = true;
             }
         });
