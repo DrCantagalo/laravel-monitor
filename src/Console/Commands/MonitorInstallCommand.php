@@ -120,9 +120,14 @@ class MonitorInstallCommand extends Command
                 'installation_hash' => $installationHash,
                 'local_token' => $localToken,
             ];
-            File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
             $this->info($t('hash_created'));
         }
+
+        // Persistido pra monitor:update ler sem perguntar de novo a cada
+        // execução (comando repetido, ao contrário deste, que roda uma vez
+        // só) - ver MonitorUpdateCommand::resolveLang().
+        $config['lang'] = $this->lang;
+        File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
 
         $gitignore = $this->confirm($t('gitignore'), true);
 

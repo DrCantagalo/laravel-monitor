@@ -43,8 +43,22 @@ touching anything you've customized:
   renamed in a breaking change (check `CHANGELOG.md`).
 
 Always safe to run again — it's idempotent (a second run with no new
-package version is a no-op). No confirmation prompts, since this is
-routine maintenance, not first-time setup.
+package version is a no-op).
+
+`composer update` only refreshes `vendor/` — it never runs `migrate`.
+Package migrations are auto-discovered at runtime
+(`loadMigrationsFrom()`, no publish needed), but still need to actually
+run against your database. If the command finds package migrations that
+haven't been applied yet, it lists them and asks (default yes) whether to
+run `php artisan migrate` right there — same pattern as the migration
+prompt in `monitor:install`.
+
+`monitor:update` is fully translated (en/it/pt), same as `monitor:install`
+— but it doesn't ask which language to use every time, since it's meant
+to be run routinely rather than once. It reuses the language chosen
+during `monitor:install` (persisted in
+`storage/monitor/installation.json`); falls back to English if that file
+or the `lang` key isn't there (installations done before this).
 
 ## Aggregated dashboard totals (`getData`)
 

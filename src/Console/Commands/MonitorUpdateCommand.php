@@ -21,13 +21,64 @@ class MonitorUpdateCommand extends Command
 
     protected $description = 'Atualiza config/monitor.php publicado com as chaves novas do pacote, sem tocar em customizações existentes';
 
+    /**
+     * Ao contrário de monitor:install (roda uma vez só), monitor:update
+     * roda repetido a cada `composer update` — perguntar o idioma toda
+     * vez seria ruim. O idioma vem de storage/monitor/installation.json
+     * (['lang'], persistido por monitor:install desde que essa própria
+     * chave passou a existir) via resolveLang(); fallback 'en' pra
+     * instalação feita antes disso ou sem installation.json.
+     */
+    protected array $translations = [
+        'en' => [
+            'not_published' => "config/monitor.php is not published in this project. Run 'php artisan vendor:publish --tag=monitor-config' first.",
+            'updated' => 'Laravel Monitor: config/monitor.php updated.',
+            'new_keys' => 'New keys added: ',
+            'no_new_keys' => 'No new keys.',
+            'version_updated' => 'Version updated: ',
+            'none' => '(none)',
+            'stale_keys' => "Custom keys with a value different from the package's current default (not changed, manual decision):",
+            'removed_keys' => 'Keys present in your config but removed/renamed in the current package template (check the CHANGELOG):',
+            'pending_migrations' => 'Package migrations not yet applied:',
+            'confirm_migrate' => 'Can we run the pending migrations now?',
+        ],
+        'it' => [
+            'not_published' => "config/monitor.php non è pubblicato in questo progetto. Esegui prima 'php artisan vendor:publish --tag=monitor-config'.",
+            'updated' => 'Laravel Monitor: config/monitor.php aggiornato.',
+            'new_keys' => 'Nuove chiavi aggiunte: ',
+            'no_new_keys' => 'Nessuna chiave nuova.',
+            'version_updated' => 'Versione aggiornata: ',
+            'none' => '(nessuna)',
+            'stale_keys' => 'Chiavi personalizzate con un valore diverso dal default attuale del pacchetto (non modificate, decisione manuale):',
+            'removed_keys' => 'Chiavi presenti nella tua config ma rimosse/rinominate nel template attuale del pacchetto (controlla il CHANGELOG):',
+            'pending_migrations' => 'Migrazioni del pacchetto ancora non applicate:',
+            'confirm_migrate' => 'Possiamo eseguire ora le migrazioni pendenti?',
+        ],
+        'pt' => [
+            'not_published' => "config/monitor.php não está publicado neste projeto. Rode 'php artisan vendor:publish --tag=monitor-config' primeiro.",
+            'updated' => 'Laravel Monitor: config/monitor.php atualizado.',
+            'new_keys' => 'Chaves novas adicionadas: ',
+            'no_new_keys' => 'Nenhuma chave nova.',
+            'version_updated' => 'Versão atualizada: ',
+            'none' => '(nenhuma)',
+            'stale_keys' => 'Chaves customizadas com valor diferente do default atual do pacote (não alteradas, decisão manual):',
+            'removed_keys' => 'Chaves presentes na sua config mas removidas/renomeadas no template atual do pacote (confira o CHANGELOG):',
+            'pending_migrations' => 'Migrations do pacote ainda não aplicadas:',
+            'confirm_migrate' => 'Podemos rodar as migrations pendentes agora?',
+        ],
+    ];
+
+    protected string $lang = 'en';
+
     public function handle(): int
     {
+        $this->lang = $this->resolveLang();
+
         $publishedPath = config_path('monitor.php');
         $templatePath = __DIR__.'/../../config/monitor.php';
 
         if (! File::exists($publishedPath)) {
-            $this->warn("config/monitor.php não está publicado neste projeto. Rode 'php artisan vendor:publish --tag=monitor-config' primeiro.");
+            $this->warn($this->t('not_published'));
 
             return 1;
         }
@@ -92,14 +143,39 @@ class MonitorUpdateCommand extends Command
         }
 
         $this->newLine();
-        $this->warn('Migrations do pacote ainda não aplicadas:');
+        $this->warn($this->t('pending_migrations'));
         foreach ($pending as $migration) {
             $this->line("  - {$migration}");
         }
 
-        if ($this->confirm('Podemos rodar as migrations pendentes agora?', true)) {
+        if ($this->confirm($this->t('confirm_migrate'), true)) {
             $this->call('migrate');
         }
+    }
+
+    /**
+     * Lê o idioma persistido por MonitorInstallCommand em
+     * storage/monitor/installation.json (['lang']). Fallback 'en' se o
+     * arquivo não existir, não tiver a chave (instalação feita antes
+     * desta task) ou não for um JSON válido.
+     */
+    protected function resolveLang(): string
+    {
+        $configFile = storage_path('monitor/installation.json');
+
+        if (! File::exists($configFile)) {
+            return 'en';
+        }
+
+        $config = json_decode(File::get($configFile), true);
+        $lang = $config['lang'] ?? null;
+
+        return array_key_exists($lang, $this->translations) ? $lang : 'en';
+    }
+
+    protected function t(string $key): string
+    {
+        return $this->translations[$this->lang][$key];
     }
 
     /**
@@ -168,27 +244,27 @@ class MonitorUpdateCommand extends Command
 
     protected function summarize(array $addedKeys, array $staleKeys, array $removedKeys, ?string $oldVersion, ?string $newVersion): void
     {
-        $this->info('Laravel Monitor: config/monitor.php atualizado.');
+        $this->info($this->t('updated'));
 
         if ($addedKeys !== []) {
-            $this->line('Chaves novas adicionadas: '.implode(', ', $addedKeys));
+            $this->line($this->t('new_keys').implode(', ', $addedKeys));
         } else {
-            $this->line('Nenhuma chave nova.');
+            $this->line($this->t('no_new_keys'));
         }
 
         if ($oldVersion !== $newVersion && $newVersion !== null) {
-            $this->line('Versão atualizada: '.($oldVersion ?? '(nenhuma)')." -> {$newVersion}");
+            $this->line($this->t('version_updated').($oldVersion ?? $this->t('none'))." -> {$newVersion}");
         }
 
         if ($staleKeys !== []) {
-            $this->warn('Chaves customizadas com valor diferente do default atual do pacote (não alteradas, decisão manual):');
+            $this->warn($this->t('stale_keys'));
             foreach ($staleKeys as $key) {
                 $this->line("  - {$key}");
             }
         }
 
         if ($removedKeys !== []) {
-            $this->warn('Chaves presentes na sua config mas removidas/renomeadas no template atual do pacote (confira o CHANGELOG):');
+            $this->warn($this->t('removed_keys'));
             foreach ($removedKeys as $key) {
                 $this->line("  - {$key}");
             }

@@ -882,6 +882,17 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
   pergunta (mesmo padrão de `monitor:install`, default sim) se pode
   rodá-las na hora. Silencioso se a tabela de migrations ainda não
   existir (instalação nova, antes do primeiro `migrate`).
+- **`monitor:update` totalmente traduzido (en/it/pt)**, mesmo padrão de
+  `monitor:install` (array `$translations` + helper `$t()`) — cobre todas
+  as strings user-facing: aviso de config não publicada, todo o resumo de
+  `summarize()` (chaves novas, versão atualizada, chaves customizadas,
+  chaves removidas) e o aviso/pergunta de migrations pendentes acima.
+  Diferente do `install` (roda uma vez, pergunta o idioma na hora), o
+  `update` roda repetido a cada `composer update` — em vez de perguntar
+  toda vez, reusa o idioma escolhido no `install`, agora persistido em
+  `storage/monitor/installation.json` (`lang`, chave nova nesse arquivo).
+  Fallback pra `en` se o arquivo ou a chave não existir (instalação feita
+  antes desta versão).
 
 ---
 
