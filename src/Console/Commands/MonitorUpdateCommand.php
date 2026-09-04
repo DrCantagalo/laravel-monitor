@@ -61,7 +61,7 @@ class MonitorUpdateCommand extends Command
         File::put($publishedPath, $source);
 
         $this->summarize($addedKeys, $staleKeys, $removedKeys, $oldVersion, $newVersion);
-        $this->warnPendingMigrations();
+        $this->confirmPendingMigrations();
 
         return 0;
     }
@@ -71,11 +71,11 @@ class MonitorUpdateCommand extends Command
      * roda migrate. As migrations em si são resolvidas automaticamente
      * (`loadMigrationsFrom()` no MonitorServiceProvider, sem precisar
      * publicar), mas aplicá-las no banco ainda depende de alguém rodar
-     * `php artisan migrate`. Aqui isso é natural (mesmo processo de deploy
-     * que roda o `composer update`), mas outros consumidores do pacote não
-     * têm esse hábito garantido — só avisar.
+     * `php artisan migrate`. Mesmo padrão de `monitor:install` (pergunta
+     * antes de migrar, default sim) — em vez de só avisar, oferece rodar
+     * na hora.
      */
-    protected function warnPendingMigrations(): void
+    protected function confirmPendingMigrations(): void
     {
         $migrator = $this->laravel['migrator'];
 
@@ -96,7 +96,10 @@ class MonitorUpdateCommand extends Command
         foreach ($pending as $migration) {
             $this->line("  - {$migration}");
         }
-        $this->line("Rode 'php artisan migrate' para aplicá-las.");
+
+        if ($this->confirm('Podemos rodar as migrations pendentes agora?', true)) {
+            $this->call('migrate');
+        }
     }
 
     /**
