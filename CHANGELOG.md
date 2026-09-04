@@ -762,6 +762,22 @@ See README, "Updating".
 
 ---
 
+## [0.15.1] - 2026-09-04
+### Fixed
+- Version-only re-release. The `v0.15.0` tag was published pointing at
+  `4c057ee` (the original `laravel-monitor 95` design, which had the
+  `strike_count` plateau bug) instead of the immediately following fix
+  commit that separated `strike_count` from `lifetime_offense_count` —
+  the fix commit kept the same `0.15.0` version number, so the auto-tag
+  script tagged the wrong commit. `v0.15.0` itself is left as published
+  (never rewriting a public tag); `0.15.1` carries the fix that was
+  already on `main` and in this changelog's `0.15.0` entry below, with
+  no other code changes. Anyone who installed `^0.15.0` before this
+  release should upgrade to `^0.15.1` to get the corrected two-counter
+  behavior.
+
+---
+
 ## [0.15.0] - 2026-09-03
 ### Added
 - **Temporary, escalating IP blocking** (`Support/ScraperBlocker::registerOffense()`),
