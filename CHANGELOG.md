@@ -869,6 +869,21 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
 
 ---
 
+## [0.18.0] - 2026-09-04
+### Added
+- **`monitor:update` agora avisa sobre migrations pendentes do pacote.**
+  `composer update` só atualiza os arquivos em `vendor/` — não roda
+  `php artisan migrate`. As migrations do pacote já são resolvidas
+  automaticamente via `loadMigrationsFrom()` (sem precisar publicar), mas
+  aplicá-las no banco continua dependendo de rodar `migrate` manualmente
+  (ou via deploy). Depois de sincronizar `config/monitor.php`,
+  `monitor:update` agora compara as migrations do pacote contra a tabela
+  de migrations já rodadas e, se houver pendências, lista os arquivos e
+  sugere `php artisan migrate`. Silencioso se a tabela de migrations
+  ainda não existir (instalação nova, antes do primeiro `migrate`).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

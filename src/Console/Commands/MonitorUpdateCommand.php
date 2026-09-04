@@ -61,8 +61,42 @@ class MonitorUpdateCommand extends Command
         File::put($publishedPath, $source);
 
         $this->summarize($addedKeys, $staleKeys, $removedKeys, $oldVersion, $newVersion);
+        $this->warnPendingMigrations();
 
         return 0;
+    }
+
+    /**
+     * `composer update` só atualiza os arquivos do pacote em vendor/ — não
+     * roda migrate. As migrations em si são resolvidas automaticamente
+     * (`loadMigrationsFrom()` no MonitorServiceProvider, sem precisar
+     * publicar), mas aplicá-las no banco ainda depende de alguém rodar
+     * `php artisan migrate`. Aqui isso é natural (mesmo processo de deploy
+     * que roda o `composer update`), mas outros consumidores do pacote não
+     * têm esse hábito garantido — só avisar.
+     */
+    protected function warnPendingMigrations(): void
+    {
+        $migrator = $this->laravel['migrator'];
+
+        if (! $migrator->repositoryExists()) {
+            return;
+        }
+
+        $files = $migrator->getMigrationFiles(__DIR__.'/../../database/migrations');
+        $ran = $migrator->getRepository()->getRan();
+        $pending = array_values(array_diff(array_keys($files), $ran));
+
+        if ($pending === []) {
+            return;
+        }
+
+        $this->newLine();
+        $this->warn('Migrations do pacote ainda não aplicadas:');
+        foreach ($pending as $migration) {
+            $this->line("  - {$migration}");
+        }
+        $this->line("Rode 'php artisan migrate' para aplicá-las.");
     }
 
     /**
