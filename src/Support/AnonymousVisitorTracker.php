@@ -12,10 +12,13 @@ class AnonymousVisitorTracker
 
     protected ScraperBlocker $scraperBlocker;
 
-    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null)
+    protected BlockedIpCleaner $blockedIpCleaner;
+
+    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null)
     {
         $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
         $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker();
+        $this->blockedIpCleaner = $blockedIpCleaner ?? new BlockedIpCleaner();
     }
 
     /**
@@ -48,6 +51,7 @@ class AnonymousVisitorTracker
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);
+        $this->blockedIpCleaner->maybeCleanup();
 
         $user = Monitor::where('data->ips', 'like', "%{$ip}%")->first();
 

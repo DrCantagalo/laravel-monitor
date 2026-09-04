@@ -566,6 +566,39 @@ Curating which paths count as a honeypot stays 100% manual (a human still
 decides which routes nobody legitimate would ever hit) — only what
 happens when one is hit follows the escalation system above.
 
+### Periodic cleanup (since `0.17.0`)
+
+`monitor_blocked_ips` rows never mattered forever — once a temporary block
+expires and its decay cooldown passes, the row has nothing left to
+contribute (`ScraperBlocker::registerOffense()` only reads it if that IP
+offends again). `Support/BlockedIpCleaner::maybeCleanup()` deletes those
+rows periodically, with no cron of your own to configure: it runs the same
+way Laravel's own session garbage collection does
+(`Illuminate\Session\Middleware\StartSession::collectGarbage()`), except
+on a deterministic cached timestamp instead of a probability — called from
+both trackers on every tracked request, it only actually sweeps once
+`config('monitor.blocked_ips_cleanup_interval_hours')` (default `1`) has
+passed since the last sweep. On a low-traffic site this means cleanup runs
+on the first visit *after* the interval elapses, not on the clock exactly
+— the same limitation Laravel's session GC has, not a regression.
+
+A row is only deleted when **all** of these hold:
+- `blocked_until` is not `null` (a permanent block is never touched).
+- `blocked_until` is already in the past (expired).
+- `config('monitor.auto_block_strike_decay_cooldown_days')` has already
+  passed since `last_offense_at` (the decay window is over too, not just
+  the block itself).
+- `lifetime_offense_count === 1`.
+
+That last condition protects the fix described in "Why two counters, not
+one" above: deleting a row with `lifetime_offense_count >= 2` would erase
+its repeat-offense history, letting a patient attacker who paces reoffenses
+get a free reset every cleanup cycle — the same plateau hole, through a
+different door. Only an IP that offended exactly once in its lifetime and
+never came back is safe to forget; that should be the vast majority of
+isolated flags (most never reoffend), so the table stays small in practice
+even while permanently keeping every row with 2+ offenses.
+
 ## Blocked-attempt counter (`monitor_block_results`)
 
 Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both

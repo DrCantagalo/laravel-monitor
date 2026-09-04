@@ -845,6 +845,30 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
 
 ---
 
+## [0.17.0] - 2026-09-04
+### Added
+- **Periodic cleanup of expired `monitor_blocked_ips` rows** (laravel-monitor 97),
+  via new `Support/BlockedIpCleaner::maybeCleanup()`. Called from both
+  `SessionVisitorTracker` and `AnonymousVisitorTracker` on every tracked
+  request, same place `0.16.0` calls `ScraperBlocker::registerOffense()` —
+  no consumer-configured cron needed, runs on a deterministic cached
+  timestamp instead (same idea as Laravel's own session garbage
+  collection, `session.lottery`, but timestamp-based instead of
+  probability-based). Only actually sweeps once
+  `config('monitor.blocked_ips_cleanup_interval_hours')` (default `1`) has
+  passed since the last sweep.
+  - Deletes a row only when it's a temporary block (`blocked_until` not
+    `null` — permanent blocks are never touched), already expired
+    (`blocked_until` in the past), the decay cooldown has also elapsed
+    since `last_offense_at`, **and** `lifetime_offense_count === 1`. That
+    last condition protects the two-counter fix from `0.15.0`: deleting a
+    row with 2+ lifetime offenses would erase its repeat-offense history
+    and give a patient attacker a free reset every cleanup cycle. See
+    README, "Periodic cleanup".
+- New config key: `blocked_ips_cleanup_interval_hours` (default `1`).
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

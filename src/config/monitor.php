@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.16.0',
+    'version' => '0.17.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -89,6 +89,16 @@ return [
     // merece mais confiança/sinais concordando antes de agir sem humano no
     // circuito.
     'auto_block_signal_threshold' => 3,
+
+    // De quantas em quantas horas `Support/BlockedIpCleaner::maybeCleanup()`
+    // (chamado a cada request rastreada, task 97) roda a limpeza de linhas
+    // antigas de monitor_blocked_ips (bloqueio temporário já expirado, já
+    // fora da janela de decaimento, e que ofendeu uma única vez na vida -
+    // ver comentário da classe pra por que só essa combinação é segura de
+    // apagar). Determinístico via timestamp em cache, não probabilístico
+    // como a GC de sessão do Laravel - sem exigir cron externo do
+    // consumidor do pacote.
+    'blocked_ips_cleanup_interval_hours' => 1,
 
     // Intervalo (horas) do cron que o consumidor do pacote configura pra
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa
