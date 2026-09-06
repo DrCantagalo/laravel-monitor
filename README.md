@@ -412,6 +412,23 @@ only ever came from `getPages`.
     or `{"success": false, "message": "No path provided"}` (422) if
     `path` is missing/empty.
 
+- **`flagScraperPaths`** (same auth as `flagScraperPath`, since `0.19.0`):
+  batch version — `POST /monitor/handler?action=flagScraperPaths` with
+  `{"paths": ["wp-admin/install.php", ".env", ...]}`. Same effect as
+  calling `flagScraperPath` once per path (each path blocked, every IP
+  that visited any of them blocked too), but as a single request instead
+  of one HTTP call per path — avoids bursting the caller's own client
+  with N requests when flagging dozens/hundreds of paths at once (e.g. a
+  "select many, flag as trap" bulk action, or an automated triage run).
+  Also more efficient server-side: the `Monitor` table scan needed to
+  find IPs that visited the flagged paths happens once for the whole
+  batch, not once per path. Invalid entries (non-string, empty after
+  trimming) are silently skipped rather than failing the whole batch.
+  Response: `{"success": true, "paths": [...only the ones actually
+  flagged...], "blocked_ips": [...]}`, or `{"success": false, "message":
+  "No paths provided"}` / `"No valid paths provided"` (422) if `paths` is
+  missing/empty or every entry was invalid.
+
 - **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
   `POST /monitor/handler?action=unflagPath` with
   `{"path": "wp-admin/install.php"}` removes the path from
@@ -433,6 +450,16 @@ only ever came from `getPages`.
   that was removed on purpose). Response: `{"success": true, "path":
   "...", "status": "safe"}`, or `{"success": false, "message": "No path
   provided"}` (422) if `path` is missing/empty.
+- **`markPathsSafe`** (same auth as `flagScraperPath`, since `0.19.0`):
+  batch version of `markPathSafe` — `POST
+  /monitor/handler?action=markPathsSafe` with `{"paths":
+  ["old-campaign-link", ...]}`. Same rationale as `flagScraperPaths`:
+  avoids one HTTP request per path when clearing many entries from the
+  `pending_review` queue at once. No blocking side effect, same as the
+  singular version. Response: `{"success": true, "paths": [...only the
+  ones actually marked...]}`, or `{"success": false, "message": "No
+  paths provided"}` / `"No valid paths provided"` (422).
+
 - **`unmarkPathSafe`** (same auth): reverts it — `POST
   /monitor/handler?action=unmarkPathSafe` with `{"path":
   "old-campaign-link"}` deletes the `monitor_path_reviews` row, so the

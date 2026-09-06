@@ -107,11 +107,17 @@ class MonitorController extends Controller
             case 'flagScraperPath':
                 return $this->flagScraperPath($request);
 
+            case 'flagScraperPaths':
+                return $this->flagScraperPaths($request);
+
             case 'unflagPath':
                 return $this->unflagPath($request);
 
             case 'markPathSafe':
                 return $this->markPathSafe($request);
+
+            case 'markPathsSafe':
+                return $this->markPathsSafe($request);
 
             case 'unmarkPathSafe':
                 return $this->unmarkPathSafe($request);
@@ -1298,6 +1304,94 @@ class MonitorController extends Controller
     }
 
     /**
+     * Versão em lote de `flagScraperPath`, mesmo padrão de
+     * `updateBlockedIps` (array de paths, best-effort - ignora entradas
+     * inválidas em vez de falhar tudo, invalida cache uma vez só no
+     * final). Existe pra evitar N requests HTTP separadas (uma por path)
+     * quando dezenas/centenas de paths precisam ser flagados de uma vez
+     * (botão "Flag selected as trap" no dashboard, e
+     * TriageMonitorPathsJob no home-page) - uma rajada dessas via
+     * `flagScraperPath` singular, uma chamada por path, é ruim pro
+     * servidor do lado de cá (rate limit/WAF genérico) sem ganho nenhum.
+     * Diferença de eficiência real vs. chamar o singular em loop: a
+     * varredura de `Monitor` pra achar IPs que visitaram os paths
+     * acontece UMA VEZ pra todo o lote aqui, não uma vez por path.
+     */
+    protected function flagScraperPaths(Request $request)
+    {
+        $paths = $request->input('paths', []);
+
+        if (! is_array($paths) || empty($paths)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No paths provided',
+            ], 422);
+        }
+
+        $flagged = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path)) {
+                continue;
+            }
+
+            $path = ltrim($path, '/');
+
+            if ($path === '') {
+                continue;
+            }
+
+            BlockedPath::firstOrCreate(['path' => $path]);
+            Cache::forget("monitor:blocked-path:{$path}");
+            $flagged[] = $path;
+        }
+
+        if (empty($flagged)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid paths provided',
+            ], 422);
+        }
+
+        $blockedIps = [];
+
+        // Mesmo match por sufixo de flagScraperPath (path pode aparecer
+        // sob hosts diferentes na mesma installation) - só que checando
+        // contra a lista inteira de paths do lote de uma vez, não um só.
+        Monitor::all()->each(function (Monitor $monitor) use ($flagged, &$blockedIps) {
+            $pages = array_keys((array) data_get($monitor, 'data.page', []));
+
+            $matchedAny = collect($flagged)->contains(
+                fn ($path) => collect($pages)->contains(
+                    fn ($key) => $key === $path || str_ends_with($key, '/'.$path)
+                )
+            );
+
+            if (! $matchedAny) {
+                return;
+            }
+
+            foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
+                if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+                    continue;
+                }
+
+                (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
+                $blockedIps[$ip] = true;
+            }
+        });
+
+        $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
+
+        return response()->json([
+            'success' => true,
+            'paths' => $flagged,
+            'blocked_ips' => array_keys($blockedIps),
+        ]);
+    }
+
+    /**
      * Reverte `flagScraperPath` para um path: remove de
      * `monitor_blocked_paths` e limpa o cache lido por
      * `MonitorMethod::isPathBlocked()`. Não desbloqueia os IPs que
@@ -1357,6 +1451,60 @@ class MonitorController extends Controller
             'success' => true,
             'path' => $path,
             'status' => 'safe',
+        ]);
+    }
+
+    /**
+     * Versão em lote de `markPathSafe`, mesmo padrão de `flagScraperPaths`/
+     * `updateBlockedIps` acima (array, best-effort, sem efeito colateral
+     * de bloqueio) - usada pelo botão "Mark selected as safe" (que hoje
+     * fazia uma chamada por path via `Promise.all` no JS do dashboard) e
+     * por `TriageMonitorPathsJob`.
+     */
+    protected function markPathsSafe(Request $request)
+    {
+        $paths = $request->input('paths', []);
+
+        if (! is_array($paths) || empty($paths)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No paths provided',
+            ], 422);
+        }
+
+        $marked = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path)) {
+                continue;
+            }
+
+            $path = ltrim($path, '/');
+
+            if ($path === '') {
+                continue;
+            }
+
+            PathReview::updateOrCreate(
+                ['path' => $path],
+                ['status' => 'safe', 'reviewed_at' => now()]
+            );
+
+            $marked[] = $path;
+        }
+
+        if (empty($marked)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid paths provided',
+            ], 422);
+        }
+
+        $this->invalidatePagesCache();
+
+        return response()->json([
+            'success' => true,
+            'paths' => $marked,
         ]);
     }
 

@@ -896,6 +896,23 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
 
 ---
 
+## [0.19.0] - 2026-09-06
+### Added
+- **Ações em lote pra paths: `flagScraperPaths` e `markPathsSafe`**
+  (plural, array de `paths`), mesmo padrão de `updateBlockedIps` que já
+  existia pro lado de IP (best-effort — ignora entradas inválidas em vez
+  de falhar tudo, invalida cache uma vez só no final do lote). Antes,
+  marcar/flagar vários paths de uma vez exigia uma requisição HTTP por
+  path (ex: o botão "Mark selected as safe" do dashboard fazia N chamadas
+  a `markPathSafe` em paralelo) — uma rajada dessas fica pior conforme o
+  número de paths cresce (rate limit/WAF genérico do lado que recebe,
+  sem ganho nenhum). `flagScraperPaths` também é mais eficiente que
+  chamar `flagScraperPath` N vezes: a varredura de `Monitor` pra achar
+  IPs que visitaram os paths do lote acontece uma vez só pra todos eles,
+  não uma vez por path.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks
