@@ -913,6 +913,50 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
 
 ---
 
+## [0.20.0] - 2026-09-07
+### Changed
+- **`monitor_blocked_paths` and `monitor_path_reviews` merged into a
+  single `monitor_paths` table.** They used to be two independent tables
+  with no FK between them and no action clearing the sibling table
+  (`flagScraperPath(s)` only touched `monitor_blocked_paths`,
+  `markPathSafe(s)` only touched `monitor_path_reviews`) — a path could
+  end up marked both `trap` (blocked) and `safe` (reviewed) at the same
+  time, a contradictory state the old code represented without any
+  complaint. Seen live on cantagalo.it. `monitor_paths` now holds one row
+  per path with a single `status` column (`safe`|`trap`; absence of a row
+  still means `pending`, same convention as before). Since
+  `flagScraperPath(s)`/`markPathSafe(s)` now `updateOrCreate` the *same*
+  row instead of writing to two separate tables, flagging and marking
+  safe are mutually exclusive by construction — the contradictory state
+  above can no longer happen.
+  - **Migration** (`2026_09_07_000000_merge_monitor_blocked_paths_and_path_reviews_into_monitor_paths.php`)
+    copies every row from both old tables into `monitor_paths` and drops
+    them. A path present in both old tables at once resolves to `trap` —
+    `monitor_blocked_paths` already causes an active `403` block
+    regardless of what `monitor_path_reviews` said (the real enforcement,
+    in `MonitorMethod::isPathBlocked()`, only ever read `BlockedPath`), so
+    `trap` winning is the only choice that preserves the protection
+    already in effect; `safe` winning would have silently unblocked paths
+    that were actively blocked, a security regression. Each conflicting
+    path found during the migration is logged via `Log::warning`, for
+    visibility into how many existed. `down()` reconstructs both old
+    tables from `monitor_paths`, best-effort — a path resolved to `trap`
+    during `up()` because of a conflict cannot recover its discarded
+    `safe` review row, which is intrinsic to resolving the conflict, not
+    a rollback limitation.
+  - **External contract unchanged**: `flagScraperPath(s)`, `unflagPath`,
+    `markPathSafe(s)`, `unmarkPathSafe`, `getPages` and `getBlockedPaths`
+    keep the exact same request/response shape as before — this is a
+    storage-only change. No consumer of the package's HTTP API needs to
+    change anything.
+  - `Models\BlockedPath` and `Models\PathReview` are removed, replaced by
+    the new `Models\MonitorPath`. These were internal to the package
+    (never part of the public HTTP contract), but if a consumer imported
+    them directly (unsupported usage), it will need to switch to
+    `MonitorPath` with an explicit `status` filter instead.
+
+---
+
 ## Future versions
 Planned:
 - Monitoring API hooks

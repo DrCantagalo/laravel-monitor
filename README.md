@@ -400,11 +400,14 @@ only ever came from `getPages`.
   read token): `POST /monitor/handler?action=flagScraperPath` with
   `{"path": "wp-admin/install.php"}` (host-less; a leading `/` is
   stripped if present). Two things happen:
-  1. The path is inserted into `monitor_blocked_paths`. From then on,
-     `MonitorMethod` rejects (`403`) any request whose path matches,
-     **regardless of host** — an installation shared by multiple
-     subdomains is protected on all of them at once, since the block
-     check ignores the host prefix that `data.page` uses.
+  1. The path's row in `monitor_paths` gets `status: 'trap'`
+     (`updateOrCreate`, since `0.20.0` — overwrites a `'safe'` status if
+     the path was previously marked safe via `markPathSafe`, making
+     flagging and marking safe mutually exclusive; see "Path review
+     state" below). From then on, `MonitorMethod` rejects (`403`) any
+     request whose path matches, **regardless of host** — an installation
+     shared by multiple subdomains is protected on all of them at once,
+     since the block check ignores the host prefix that `data.page` uses.
   2. Every IP already recorded (`data.ips`) against a `Monitor` that
      visited that path is blocked in `monitor_blocked_ips` (`source:
      'scraper-path'`), same mechanism as `updateBlockedIps`.
@@ -431,8 +434,8 @@ only ever came from `getPages`.
 
 - **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
   `POST /monitor/handler?action=unflagPath` with
-  `{"path": "wp-admin/install.php"}` removes the path from
-  `monitor_blocked_paths` and clears the corresponding
+  `{"path": "wp-admin/install.php"}` removes the path's `status: 'trap'`
+  row from `monitor_paths` and clears the corresponding
   `MonitorMethod::isPathBlocked()` cache entry immediately. Response:
   `{"success": true, "path": "...", "was_flagged": true|false}` (`false`
   when the path wasn't flagged to begin with — not an error). Does
@@ -442,14 +445,17 @@ only ever came from `getPages`.
 - **`markPathSafe`** (same auth as `flagScraperPath`, since `0.4.0`):
   `POST /monitor/handler?action=markPathSafe` with
   `{"path": "old-campaign-link"}` (host-less, same convention as
-  `flagScraperPath`) records the path in `monitor_path_reviews` with
-  `status: 'safe'` and `reviewed_at: now()`. Purely a review-state flag —
-  unlike `flagScraperPath`, it blocks nothing; it just removes the path
-  from `getPages`' `pending_review` queue (see below) once a human has
-  confirmed a recurring `404` isn't a scraper probe (e.g. an old link
-  that was removed on purpose). Response: `{"success": true, "path":
-  "...", "status": "safe"}`, or `{"success": false, "message": "No path
-  provided"}` (422) if `path` is missing/empty.
+  `flagScraperPath`) records the path in `monitor_paths` with
+  `status: 'safe'` and `reviewed_at: now()` (`updateOrCreate`, since
+  `0.20.0` — overwrites a `'trap'` status if the path was previously
+  flagged via `flagScraperPath`, making the two mutually exclusive).
+  Purely a review-state flag — unlike `flagScraperPath`, it blocks
+  nothing; it just removes the path from `getPages`' `pending_review`
+  queue (see below) once a human has confirmed a recurring `404` isn't a
+  scraper probe (e.g. an old link that was removed on purpose). Response:
+  `{"success": true, "path": "...", "status": "safe"}`, or `{"success":
+  false, "message": "No path provided"}` (422) if `path` is
+  missing/empty.
 - **`markPathsSafe`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version of `markPathSafe` — `POST
   /monitor/handler?action=markPathsSafe` with `{"paths":
@@ -462,10 +468,24 @@ only ever came from `getPages`.
 
 - **`unmarkPathSafe`** (same auth): reverts it — `POST
   /monitor/handler?action=unmarkPathSafe` with `{"path":
-  "old-campaign-link"}` deletes the `monitor_path_reviews` row, so the
-  path goes back to the default `pending` state. Response: `{"success":
-  true, "path": "...", "was_safe": true|false}` (`false` when the path
-  wasn't marked safe to begin with — not an error).
+  "old-campaign-link"}` deletes the path's `status: 'safe'` row from
+  `monitor_paths`, so the path goes back to the default `pending` state.
+  Response: `{"success": true, "path": "...", "was_safe": true|false}`
+  (`false` when the path wasn't marked safe to begin with — not an
+  error).
+
+> **Path review state (`monitor_paths`)**: since `0.20.0`, a path's
+> `trap`/`safe` status lives in a single table, one row per path (no row
+> = `pending`, the default). Before `0.20.0` these were two independent
+> tables (`monitor_blocked_paths` for `trap`, `monitor_path_reviews` for
+> `safe`) with no relationship between them — a path could end up marked
+> both at once, a contradictory state the old code didn't catch (seen
+> live in production). `flagScraperPath(s)`/`markPathSafe(s)` now write
+> to the same row (`updateOrCreate`), so flagging a path clears a prior
+> `safe` status and vice versa. See CHANGELOG `[0.20.0]` for the
+> migration that merges the old tables (existing data included; a
+> conflicting path is resolved to `trap`, logged via `Log::warning`
+> during the migration).
 
 ## Manual IP blocking (`updateBlockedIps`)
 
@@ -644,8 +664,9 @@ even while permanently keeping every row with 2+ offenses.
 
 Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both
 branches: the IP itself is in `monitor_blocked_ips`, **or** the path it
-hit is in `monitor_blocked_paths` — including a brand-new IP that was
-never separately blocked, hitting an already-flagged honeypot path)
+hit has `status: 'trap'` in `monitor_paths` — including a brand-new IP
+that was never separately blocked, hitting an already-flagged honeypot
+path)
 increments a per-IP counter in the new `monitor_block_results` table
 (`ip` unique, `counter`, `last_attempt_at`). This is a raw "how many
 times has this IP been turned away" tally, independent of `monitor_ip_stats`
@@ -861,8 +882,9 @@ already visited it) is unaffected — it never depended on this field.
 
 Since `0.4.0`, each path also carries a review `status` — `pending`
 (default, never reviewed) or `safe` (marked via `markPathSafe`, see
-above) — sourced from `monitor_path_reviews`, matched by suffix the same
-way `blocked`/`monitor_blocked_paths` already was:
+above) — sourced from `monitor_paths` (`status = 'safe'` rows; see "Path
+review state" above), matched by suffix the same way
+`blocked`/`monitor_paths` (`status = 'trap'`) already was:
 
 - `page` (default `1`), `per_page` (default `20`, max `100`).
 - `filter`: `pending_review` (**default when `filter` is omitted**:
@@ -870,9 +892,9 @@ way `blocked`/`monitor_blocked_paths` already was:
   "still needs a human look" queue), `all` (the full dump — pass this
   explicitly to get the old default-listing behavior back), `404` (path
   was ever hit while the response was a 404), `clean` (not 404, not
-  blocked), `blocked` (path is in `monitor_blocked_paths`, matched by
-  suffix the same way `flagScraperPath` does). An unknown `filter` value
-  returns `422`.
+  blocked), `blocked` (path has `status: 'trap'` in `monitor_paths`,
+  matched by suffix the same way `flagScraperPath` does). An unknown
+  `filter` value returns `422`.
 - `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
   accepts for a `where` comparison): filters by the **`Monitor` row's**
   `updated_at`, not a per-page-hit timestamp — the schema has no
@@ -937,8 +959,9 @@ ephemeral read token from `issueReadToken`).
   ...]}`, sorted by hits descending.
 - **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
-  `monitor_blocked_paths` (`{"path", "created_at"}`) — no `filter`
-  param, just `page`/`per_page`. Ordered newest-first.
+  `monitor_paths` rows with `status: 'trap'` (`{"path", "created_at"}`,
+  same shape as before `0.20.0`) — no `filter` param, just
+  `page`/`per_page`. Ordered newest-first.
 
 Unlike `getPages` (which has to aggregate a JSON blob per `Monitor`
 row in PHP), these three query normalized tables directly, so

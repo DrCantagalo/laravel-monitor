@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.19.0',
+    'version' => '0.20.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não
@@ -61,7 +61,7 @@ return [
 
     // TTL (segundos) do cache de lookup de IP/path bloqueado
     // (MonitorMethod::isBlocked/isPathBlocked), pra evitar uma query em
-    // monitor_blocked_ips/monitor_blocked_paths a cada request. Invalidado
+    // monitor_blocked_ips/monitor_paths a cada request. Invalidado
     // por IP/path ao bloquear via updateBlockedIps/flagScraperPath.
     'blocked_ip_cache_ttl' => 60,
 

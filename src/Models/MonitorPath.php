@@ -4,9 +4,9 @@ namespace Drcantagalo\LaravelMonitor\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class PathReview extends Model
+class MonitorPath extends Model
 {
-    protected $table = 'monitor_path_reviews';
+    protected $table = 'monitor_paths';
 
     protected $fillable = ['path', 'status', 'reviewed_at'];
 

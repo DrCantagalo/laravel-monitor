@@ -4,7 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Http\Middleware;
 
 use Closure;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
-use Drcantagalo\LaravelMonitor\Models\BlockedPath;
+use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Support\AnonymousVisitorTracker;
 use Drcantagalo\LaravelMonitor\Support\SessionVisitorTracker;
 use Exception;
@@ -55,7 +55,7 @@ class MonitorMethod
         try {
             $blocked = $this->isBlocked($ip) || $this->isPathBlocked($pathOnly);
         } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_blocked_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
+            Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
             $blocked = false;
         }
 
@@ -92,7 +92,7 @@ class MonitorMethod
         return Cache::remember(
             "monitor:blocked-path:{$path}",
             (int) config('monitor.blocked_ip_cache_ttl', 60),
-            fn () => BlockedPath::where('path', $path)->exists()
+            fn () => MonitorPath::where('path', $path)->where('status', 'trap')->exists()
         );
     }
 

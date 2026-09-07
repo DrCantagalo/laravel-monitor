@@ -3,11 +3,10 @@
 namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
-use Drcantagalo\LaravelMonitor\Models\BlockedPath;
 use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
-use Drcantagalo\LaravelMonitor\Models\PathReview;
+use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
 use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
@@ -476,12 +475,14 @@ class MonitorController extends Controller
             }
         });
 
-        $blockedPaths = BlockedPath::pluck('path');
+        $blockedPaths = MonitorPath::where('status', 'trap')->pluck('path');
         // Só os paths marcados 'safe' importam pro match por sufixo (mesmo
         // padrão de $blockedPaths acima) — qualquer path sem linha em
-        // monitor_path_reviews é 'pending' por padrão, sem precisar de
-        // linha nenhuma pra representar esse estado.
-        $safePaths = PathReview::where('status', 'safe')->pluck('path');
+        // monitor_paths é 'pending' por padrão, sem precisar de linha
+        // nenhuma pra representar esse estado. 'trap'/'safe' são mutuamente
+        // exclusivos (mesma linha, sobrescrita por flagScraperPath(s)/
+        // markPathSafe(s) — ver comentário em flagScraperPath).
+        $safePaths = MonitorPath::where('status', 'safe')->pluck('path');
 
         foreach ($aggregated as $path => &$row) {
             $row['blocked'] = $blockedPaths->contains(
@@ -741,8 +742,9 @@ class MonitorController extends Controller
     }
 
     /**
-     * Listagem paginada de `monitor_blocked_paths` — mesmo padrão de
-     * getBlockedIps.
+     * Listagem paginada dos paths com `status = 'trap'` em `monitor_paths`
+     * — mesmo padrão de getBlockedIps, mesmo response shape de antes da
+     * fusão em `monitor_paths` (`{"path", "created_at"}`).
      */
     protected function getBlockedPaths(Request $request)
     {
@@ -753,7 +755,7 @@ class MonitorController extends Controller
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
-            $paginator = BlockedPath::query()
+            $paginator = MonitorPath::where('status', 'trap')
                 ->orderByDesc('created_at')
                 ->paginate($perPage, ['path', 'created_at'], 'page', $page);
 
@@ -1241,11 +1243,15 @@ class MonitorController extends Controller
 
     /**
      * Flaga um path (sem host - a parte "variável" da URL, ex:
-     * "wp-admin/install.php") como scrapper. Duas coisas acontecem: (1) o
-     * path entra em `monitor_blocked_paths`, checado por `MonitorMethod`
-     * pra bloquear (403) qualquer request futura àquele path, em qualquer
-     * host que esta installation atenda; (2) os IPs que já visitaram esse
-     * path (via `data.page` dos registros de Monitor) são bloqueados em
+     * "wp-admin/install.php") como scrapper. Duas coisas acontecem: (1) a
+     * linha desse path em `monitor_paths` vira `status = 'trap'`
+     * (`updateOrCreate`, não `firstOrCreate` — sobrescreve um `'safe'`
+     * anterior, tornando flag/markSafe mutuamente exclusivos já que é a
+     * mesma linha/tabela desde a fusão que uniu `monitor_blocked_paths` e
+     * `monitor_path_reviews`), checada por `MonitorMethod` pra bloquear
+     * (403) qualquer request futura àquele path, em qualquer host que esta
+     * installation atenda; (2) os IPs que já visitaram esse path (via
+     * `data.page` dos registros de Monitor) são bloqueados em
      * `monitor_blocked_ips`, mesmo mecanismo de `updateBlockedIps`.
      */
     protected function flagScraperPath(Request $request)
@@ -1259,7 +1265,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        BlockedPath::firstOrCreate(['path' => $path]);
+        MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
         Cache::forget("monitor:blocked-path:{$path}");
         $this->invalidatePagesCache();
         $this->invalidateListingsCache();
@@ -1341,7 +1347,7 @@ class MonitorController extends Controller
                 continue;
             }
 
-            BlockedPath::firstOrCreate(['path' => $path]);
+            MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
             Cache::forget("monitor:blocked-path:{$path}");
             $flagged[] = $path;
         }
@@ -1392,11 +1398,15 @@ class MonitorController extends Controller
     }
 
     /**
-     * Reverte `flagScraperPath` para um path: remove de
-     * `monitor_blocked_paths` e limpa o cache lido por
+     * Reverte `flagScraperPath` para um path: remove a linha `status =
+     * 'trap'` correspondente em `monitor_paths` e limpa o cache lido por
      * `MonitorMethod::isPathBlocked()`. Não desbloqueia os IPs que
      * `flagScraperPath` bloqueou por causa desse path — isso é feito
-     * separadamente via `unblockIp`.
+     * separadamente via `unblockIp`. Scoped a `status = 'trap'` (não um
+     * delete cego por `path`): defensivo contra apagar por engano uma
+     * linha `'safe'` do mesmo path — na prática nunca deveria haver as
+     * duas ao mesmo tempo, já que flag/markSafe são mutuamente exclusivos
+     * na mesma linha desde a fusão em `monitor_paths`.
      */
     protected function unflagPath(Request $request)
     {
@@ -1409,7 +1419,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $removed = BlockedPath::where('path', $path)->delete() > 0;
+        $removed = MonitorPath::where('path', $path)->where('status', 'trap')->delete() > 0;
         Cache::forget("monitor:blocked-path:{$path}");
         $this->invalidatePagesCache();
         $this->invalidateListingsCache();
@@ -1427,7 +1437,9 @@ class MonitorController extends Controller
      * quando quem revisa confirma que um 404 recorrente não é scraper
      * (ex: link antigo removido do site, sem nenhuma malícia). Não tem
      * nenhum efeito de bloqueio (diferente de flagScraperPath); é só o
-     * status exposto por getPages/buildPagesResult.
+     * status exposto por getPages/buildPagesResult. `updateOrCreate`
+     * sobrescreve um `'trap'` anterior na mesma linha (mutuamente
+     * exclusivo com flagScraperPath desde a fusão em `monitor_paths`).
      */
     protected function markPathSafe(Request $request)
     {
@@ -1440,7 +1452,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        PathReview::updateOrCreate(
+        MonitorPath::updateOrCreate(
             ['path' => $path],
             ['status' => 'safe', 'reviewed_at' => now()]
         );
@@ -1485,7 +1497,7 @@ class MonitorController extends Controller
                 continue;
             }
 
-            PathReview::updateOrCreate(
+            MonitorPath::updateOrCreate(
                 ['path' => $path],
                 ['status' => 'safe', 'reviewed_at' => now()]
             );
@@ -1509,10 +1521,10 @@ class MonitorController extends Controller
     }
 
     /**
-     * Reverte markPathSafe: apaga a linha de monitor_path_reviews, e o
-     * path volta a ser 'pending' por padrão (mesma linha de raciocínio
-     * de unblockIp/unflagPath removendo em vez de gravar um segundo
-     * estado explícito).
+     * Reverte markPathSafe: apaga a linha `status = 'safe'` correspondente
+     * em `monitor_paths`, e o path volta a ser 'pending' por padrão (mesma
+     * linha de raciocínio de unblockIp/unflagPath removendo em vez de
+     * gravar um segundo estado explícito).
      */
     protected function unmarkPathSafe(Request $request)
     {
@@ -1525,7 +1537,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $removed = PathReview::where('path', $path)->where('status', 'safe')->delete() > 0;
+        $removed = MonitorPath::where('path', $path)->where('status', 'safe')->delete() > 0;
         $this->invalidatePagesCache();
 
         return response()->json([
