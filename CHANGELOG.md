@@ -913,6 +913,31 @@ See README, "Temporary, escalating IP blocking" → "Automatic triggers".
 
 ---
 
+## [0.20.1] - 2026-09-08
+### Fixed
+- **`flagScraperPath`/`flagScraperPaths` memory exhaustion on installations
+  with a large `monitors` table.** Both loaded the *entire* table into
+  memory at once (`Monitor::all()->each(...)`) to scan `data.page`/`data.ips`
+  for IPs that visited the path(s) being flagged — with enough rows this
+  blows past PHP-FPM's `memory_limit` and the request dies with a bare
+  500 (no JSON body, since the fatal happens before the response is
+  built). Seen live on cantagalo.it (self-monitored installation,
+  31.7k rows in `monitors`): every AI-triage batch that had at least one
+  path to flag failed this way, invisibly — no exception on the caller
+  side, so nothing got logged until the caller (home-page) started
+  logging the raw HTTP response instead of only real exceptions. Fix:
+  `Monitor::cursor()` instead of `::all()` — hydrates one row at a time
+  via a generator rather than the whole collection at once, same match
+  logic, no behavior change, memory cost now O(1) instead of O(rows).
+  Not fixed the same way as the `getData` memory exhaustion in `0.10.0`
+  (task 88) because that one only needed aggregate counts, expressible as
+  pure SQL (`SUM`/`JSON_LENGTH`); this one needs the actual JSON
+  page-key/IP values row by row in PHP for the suffix-match against the
+  flagged path(s), so a `cursor()` is the right tool here instead of an
+  aggregate query.
+
+---
+
 ## [0.20.0] - 2026-09-07
 ### Changed
 - **`monitor_blocked_paths` and `monitor_path_reviews` merged into a

@@ -1253,6 +1253,21 @@ class MonitorController extends Controller
      * installation atenda; (2) os IPs que já visitaram esse path (via
      * `data.page` dos registros de Monitor) são bloqueados em
      * `monitor_blocked_ips`, mesmo mecanismo de `updateBlockedIps`.
+     *
+     * `Monitor::cursor()`, não `::all()`: mesmo memory exhaustion do task
+     * 88 (`getData`, ver comentário acima em `visitsTotal()`), só que
+     * nunca corrigido aqui porque a varredura por path precisa mesmo de
+     * ler `data.page`/`data.ips` linha a linha em PHP (não dá pra virar
+     * uma agregação SQL simples feito visitsTotal - o match é por sufixo
+     * de string contra as CHAVES do JSON). `cursor()` hidrata um Monitor
+     * por vez via generator em vez da collection inteira de uma vez,
+     * então o custo de memória fica O(1) em vez de O(linhas da tabela) -
+     * confirmado em produção (cantagalo.it, auto-monitorado, 31.7k linhas
+     * em `monitors`): `Monitor::all()` estourava os 128MB de
+     * `memory_limit` do PHP-FPM e devolvia um 500 sem corpo pro chamador,
+     * silenciosamente (só virou visível depois de instrumentar o lado
+     * chamador - home-page `TriageMonitorPathsJob` - com log da resposta
+     * completa, não só da exceção).
      */
     protected function flagScraperPath(Request $request)
     {
@@ -1276,7 +1291,7 @@ class MonitorController extends Controller
         // aparecer sob hosts diferentes (multi-subdomínio na mesma
         // installation), por isso o match é feito pelo sufixo "/{$path}",
         // não por igualdade exata da chave.
-        Monitor::all()->each(function (Monitor $monitor) use ($path, &$blockedIps) {
+        Monitor::cursor()->each(function (Monitor $monitor) use ($path, &$blockedIps) {
             $pages = (array) data_get($monitor, 'data.page', []);
 
             $matches = collect(array_keys($pages))->contains(
@@ -1322,6 +1337,9 @@ class MonitorController extends Controller
      * Diferença de eficiência real vs. chamar o singular em loop: a
      * varredura de `Monitor` pra achar IPs que visitaram os paths
      * acontece UMA VEZ pra todo o lote aqui, não uma vez por path.
+     *
+     * `Monitor::cursor()`, não `::all()` - mesmo motivo do comentário em
+     * `flagScraperPath()` (singular) acima.
      */
     protected function flagScraperPaths(Request $request)
     {
@@ -1364,7 +1382,7 @@ class MonitorController extends Controller
         // Mesmo match por sufixo de flagScraperPath (path pode aparecer
         // sob hosts diferentes na mesma installation) - só que checando
         // contra a lista inteira de paths do lote de uma vez, não um só.
-        Monitor::all()->each(function (Monitor $monitor) use ($flagged, &$blockedIps) {
+        Monitor::cursor()->each(function (Monitor $monitor) use ($flagged, &$blockedIps) {
             $pages = array_keys((array) data_get($monitor, 'data.page', []));
 
             $matchedAny = collect($flagged)->contains(

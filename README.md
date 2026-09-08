@@ -414,6 +414,12 @@ only ever came from `getPages`.
   - Response: `{"success": true, "path": "...", "blocked_ips": [...]}`,
     or `{"success": false, "message": "No path provided"}` (422) if
     `path` is missing/empty.
+  - **Fixed in `0.20.1`**: the `Monitor` table scan for step 2 used to
+    load every row into memory at once (`Monitor::all()`), same class of
+    bug as `getData` in `0.10.0` above — confirmed exhausting PHP-FPM's
+    `memory_limit` in production at ~31.7k rows, returning a bare 500
+    with no body. Now uses `Monitor::cursor()` (one row hydrated at a
+    time), same matching logic, no response shape change.
 
 - **`flagScraperPaths`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version — `POST /monitor/handler?action=flagScraperPaths` with
