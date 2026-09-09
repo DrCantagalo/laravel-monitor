@@ -86,9 +86,20 @@ class MonitorMethod
     /**
      * Confere se o path (sem host) foi flagado como scrapper (via
      * flagScraperPath), cacheado como `isBlocked()` acima.
+     *
+     * `strtolower()` antes de comparar: `monitor_paths.path` é sempre
+     * gravado em minúsculo (`MonitorController::normalizePathInput()`),
+     * mas o path de uma request ao vivo mantém a caixa exata que o
+     * visitante mandou. Sem normalizar aqui, esta query dependeria da
+     * collation do banco pra casar (MySQL é case-insensitive por padrão,
+     * SQLite/Postgres não são) - explícito em vez de implícito, e a chave
+     * de cache também fica normalizada, senão "File.php" e "file.php"
+     * geram entradas de cache separadas pro mesmo bloqueio.
      */
     protected function isPathBlocked(string $path): bool
     {
+        $path = strtolower($path);
+
         return Cache::remember(
             "monitor:blocked-path:{$path}",
             (int) config('monitor.blocked_ip_cache_ttl', 60),

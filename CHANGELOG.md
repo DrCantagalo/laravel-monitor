@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.2] - 2026-09-09
+### Fixed
+- **A path flagged as trap kept showing as "pending" in the dashboard,
+  even after a successful flag.** Root cause: `monitor_paths.path` was
+  read/written with plain PHP string comparisons (`===`/`str_ends_with`)
+  in `buildPagesResult()` (the query behind `getPages`) and in the
+  IP-blocking scan inside `flagScraperPath(s)`, both case-sensitive - but
+  the same physical path can show up under different casing in
+  `data.page` (e.g. `File.php` vs `file.php`, each recorded exactly as a
+  visitor requested it). On MySQL, `monitor_paths.path`'s default
+  collation (`utf8mb4_unicode_ci`) is case-insensitive, so
+  `MonitorPath::updateOrCreate()` silently coalesced every casing variant
+  of the same path into one row, keeping whichever casing was inserted
+  first - a later flag of a differently-cased variant updated that same
+  row successfully (no error), but the dashboard listing, comparing the
+  exact-case aggregated key against that stored value in PHP, never
+  matched, so the row stayed "pending" forever. Confirmed live on
+  cantagalo.it: `File.php` and `file.php` are two separate rows in the
+  Pages tab (7 and 11 hits respectively), backed by a single
+  `monitor_paths` row - flagging either one via the dashboard updated the
+  DB correctly but only ever showed the lowercase-cased row as blocked.
+  Fix: paths are now normalized to lowercase at every write
+  (`flagScraperPath(s)`, `markPathSafe(s)`, `unflagPath`,
+  `unmarkPathSafe`, via a shared `normalizePathInput()`), and every
+  place that compares a path against `monitor_paths` values - the
+  dashboard listing (`buildPagesResult`), the IP-blocking scans in
+  `flagScraperPath(s)`, and the live 403 check
+  (`MonitorMethod::isPathBlocked()`) - now compares case-insensitively
+  explicitly in PHP, instead of relying on MySQL's default collation
+  (which SQLite/Postgres don't share, making the live-block check only
+  work by accident depending on the consuming app's DB engine).
+  **External contract unchanged** - same request/response shape, no
+  consumer needs to change anything; paths already stored keep their
+  existing casing (only ever mattered for internal comparisons, not for
+  what's persisted going forward on a fresh write).
+
+---
+
 ## [0.1.0] - 2025-11-19
 ### Added
 - Initial testing release.

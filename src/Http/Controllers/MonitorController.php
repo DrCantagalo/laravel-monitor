@@ -486,10 +486,10 @@ class MonitorController extends Controller
 
         foreach ($aggregated as $path => &$row) {
             $row['blocked'] = $blockedPaths->contains(
-                fn ($blockedPath) => $path === $blockedPath || str_ends_with($path, '/'.$blockedPath)
+                fn ($blockedPath) => $this->pathMatches($path, $blockedPath)
             );
             $row['status'] = $safePaths->contains(
-                fn ($safePath) => $path === $safePath || str_ends_with($path, '/'.$safePath)
+                fn ($safePath) => $this->pathMatches($path, $safePath)
             ) ? 'safe' : 'pending';
         }
         unset($row);
@@ -518,6 +518,46 @@ class MonitorController extends Controller
                 'last_page' => max(1, (int) ceil($total / $perPage)),
             ],
         ];
+    }
+
+    /**
+     * Normaliza um path recebido em request (flagScraperPath(s)/
+     * markPathSafe(s)/unflagPath/unmarkPathSafe): tira a barra inicial e
+     * baixa a caixa. Minúsculo por escolha deliberada, não só formatação -
+     * paths de scraper ("wp-admin/Install.php" vs "wp-admin/install.php")
+     * não têm significado semântico na caixa, e sem essa normalização
+     * `MonitorPath::updateOrCreate` grava a MESMA linha (a unique key do
+     * MySQL é case-insensitive por padrão, `utf8mb4_unicode_ci`) só que às
+     * vezes preservando uma caixa, às vezes outra, dependendo de qual
+     * chegou primeiro - e o resto do código (buildPagesResult,
+     * MonitorMethod::isPathBlocked) comparava em PHP puro, case-sensitive,
+     * contra esse valor de caixa imprevisível. Resultado visto em produção
+     * (cantagalo.it): um path flagado como trap (escrita OK, confirmada no
+     * banco) continuava aparecendo como "pending" no dashboard porque a
+     * linha salva estava numa caixa diferente da variante exibida
+     * (relatado em cantagalo.it, 2026-09-09).
+     */
+    private function normalizePathInput(string $path): string
+    {
+        return strtolower(ltrim($path, '/'));
+    }
+
+    /**
+     * Compara um path de `data.page` (chave "host/path", caixa exata da
+     * visita real) contra um path normalizado de `monitor_paths`
+     * (já minúsculo, via `normalizePathInput()`) - mesmo critério de
+     * sempre (igualdade ou sufixo "/{$needle}", pra casar independente do
+     * host), só que case-insensitive dos dois lados, pra não depender da
+     * collation do banco (MySQL é case-insensitive por padrão pra
+     * comparação SQL, mas SQLite/Postgres não são, e isto aqui é PHP puro,
+     * não SQL).
+     */
+    private function pathMatches(string $haystack, string $needle): bool
+    {
+        $haystack = strtolower($haystack);
+        $needle = strtolower($needle);
+
+        return $haystack === $needle || str_ends_with($haystack, '/'.$needle);
     }
 
     /**
@@ -1271,7 +1311,7 @@ class MonitorController extends Controller
      */
     protected function flagScraperPath(Request $request)
     {
-        $path = ltrim((string) $request->input('path', ''), '/');
+        $path = $this->normalizePathInput((string) $request->input('path', ''));
 
         if ($path === '') {
             return response()->json([
@@ -1290,12 +1330,19 @@ class MonitorController extends Controller
         // `data.page` guarda chaves "host/path" - o mesmo path pode
         // aparecer sob hosts diferentes (multi-subdomínio na mesma
         // installation), por isso o match é feito pelo sufixo "/{$path}",
-        // não por igualdade exata da chave.
+        // não por igualdade exata da chave. `pathMatches()` (não ===/
+        // str_ends_with puros): `path` já veio normalizado pra minúsculo
+        // por `normalizePathInput()`, mas as chaves de `data.page`
+        // preservam a caixa exata da visita real - sem comparar
+        // case-insensitive aqui, flagar "File.php" não bloqueava os IPs de
+        // quem visitou "file.php" (e vice-versa), mesmo as duas caindo na
+        // mesma linha de `monitor_paths` (relatado em cantagalo.it,
+        // 2026-09-09).
         Monitor::cursor()->each(function (Monitor $monitor) use ($path, &$blockedIps) {
             $pages = (array) data_get($monitor, 'data.page', []);
 
             $matches = collect(array_keys($pages))->contains(
-                fn ($key) => $key === $path || str_ends_with($key, '/'.$path)
+                fn ($key) => $this->pathMatches($key, $path)
             );
 
             if (! $matches) {
@@ -1359,7 +1406,7 @@ class MonitorController extends Controller
                 continue;
             }
 
-            $path = ltrim($path, '/');
+            $path = $this->normalizePathInput($path);
 
             if ($path === '') {
                 continue;
@@ -1382,12 +1429,14 @@ class MonitorController extends Controller
         // Mesmo match por sufixo de flagScraperPath (path pode aparecer
         // sob hosts diferentes na mesma installation) - só que checando
         // contra a lista inteira de paths do lote de uma vez, não um só.
+        // Case-insensitive pelo mesmo motivo de flagScraperPath (singular)
+        // - ver comentário lá e em `pathMatches()`.
         Monitor::cursor()->each(function (Monitor $monitor) use ($flagged, &$blockedIps) {
             $pages = array_keys((array) data_get($monitor, 'data.page', []));
 
             $matchedAny = collect($flagged)->contains(
                 fn ($path) => collect($pages)->contains(
-                    fn ($key) => $key === $path || str_ends_with($key, '/'.$path)
+                    fn ($key) => $this->pathMatches($key, $path)
                 )
             );
 
@@ -1428,7 +1477,7 @@ class MonitorController extends Controller
      */
     protected function unflagPath(Request $request)
     {
-        $path = ltrim((string) $request->input('path', ''), '/');
+        $path = $this->normalizePathInput((string) $request->input('path', ''));
 
         if ($path === '') {
             return response()->json([
@@ -1461,7 +1510,7 @@ class MonitorController extends Controller
      */
     protected function markPathSafe(Request $request)
     {
-        $path = ltrim((string) $request->input('path', ''), '/');
+        $path = $this->normalizePathInput((string) $request->input('path', ''));
 
         if ($path === '') {
             return response()->json([
@@ -1509,7 +1558,7 @@ class MonitorController extends Controller
                 continue;
             }
 
-            $path = ltrim($path, '/');
+            $path = $this->normalizePathInput($path);
 
             if ($path === '') {
                 continue;
@@ -1546,7 +1595,7 @@ class MonitorController extends Controller
      */
     protected function unmarkPathSafe(Request $request)
     {
-        $path = ltrim((string) $request->input('path', ''), '/');
+        $path = $this->normalizePathInput((string) $request->input('path', ''));
 
         if ($path === '') {
             return response()->json([
