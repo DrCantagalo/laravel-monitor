@@ -8,6 +8,7 @@ use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
+use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
 use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -129,6 +130,9 @@ class MonitorController extends Controller
 
             case 'exportDenylist':
                 return $this->exportDenylist($request);
+
+            case 'auditPaths':
+                return $this->auditPaths($request);
 
             default:
                 return response()->json([
@@ -1032,6 +1036,21 @@ class MonitorController extends Controller
         return response()->json([
             'success' => true,
             'path' => $path,
+        ]);
+    }
+
+    /**
+     * Auditoria manual/sob-demanda (nunca automática, task 102) — mesmo
+     * `PathsAuditor::audit()` do comando `monitor:audit-paths`. Report-only:
+     * não desfaz nada sozinho, a ação de corrigir continua manual via
+     * `unflagPath`/`unmarkPathSafe` (o consumidor decide olhando o
+     * relatório).
+     */
+    protected function auditPaths(Request $request)
+    {
+        return response()->json([
+            'success' => true,
+            'findings' => PathsAuditor::audit(),
         ]);
     }
 

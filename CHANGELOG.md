@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.22.0] - 2026-09-09
+### Added
+- **`monitor:audit-paths` command and `auditPaths` action**: manual,
+  on-demand audit (never automatic) of every `monitor_paths` row (`trap`
+  and `safe`) against the consuming application's real routes and
+  traffic — finds the same class of problem the `0.21.0` guard prevents
+  going forward, but retroactively, and covering a case that guard can't:
+  a real route that exists but was never actually visited leaves no
+  `Monitor` traffic to check against. Two checks, unioned:
+  1. **Route table** — the path is tested against every registered
+     route's compiled regex (`Route::getRoutes()`, dynamic parameters
+     like `users/{id}` resolved correctly since it reuses Symfony's own
+     route compiler rather than reimplementing matching). Domain is
+     deliberately ignored, mirroring `isPathBlocked()`'s host-agnostic
+     surface. Fallback routes are excluded (their regex matches
+     literally anything, which would make this check always positive).
+  2. **Traffic history** — same live-route check as the `0.21.0` guard
+     (`data.not_found` empty/false for a matching key in some
+     `Monitor` row), pre-computed once for the whole audit instead of
+     rescanning per path. Catches a resource that never goes through
+     Laravel's router (a static file, etc.) that the route table alone
+     wouldn't see.
+
+  Synchronous, no job/queue — regex matching in memory, seconds even
+  against thousands of `monitor_paths` rows (no `MonitorAiTriageRun`-style
+  polling needed; that command is async because of external API latency,
+  not volume). Shared logic lives in `Drcantagalo\LaravelMonitor\Support\
+  PathsAuditor::audit()`, used by both entry points.
+
+  Report-only — nothing is fixed automatically. Each finding is
+  `{path, status, matched_route: {uri, source: "route_table"|"traffic"},
+  severity}` — `trap` colliding is `high` severity (risk of blocking a
+  real user), `safe` colliding is `info` (an unnecessary mark; a path
+  that's a live route was never actually a threat). Undoing a finding is
+  still manual, via the existing `unflagPath`/`unmarkPathSafe`.
+
+---
+
 ## [0.21.0] - 2026-09-09
 ### Changed
 - **Breaking (behavior): `flagScraperPath`/`flagScraperPaths` and

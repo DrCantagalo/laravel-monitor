@@ -809,6 +809,65 @@ configure to run `monitor:export-denylist`/`exportDenylist` (e.g. `24` for
 the daily example above). Permanent blocks (`blocked_until = null`) are
 always included, no matter this setting.
 
+## Auditing reviewed paths (`monitor:audit-paths`)
+
+Manual, on-demand audit (never automatic) of every `monitor_paths` row
+(`trap` and `safe`) against the consuming application's real routes and
+live traffic — catches a path reviewed the wrong way even when the guard
+described above (since `0.21.0`) had nothing to check against yet, because
+the colliding route was never actually visited (no `Monitor` traffic
+exists for it at all).
+
+```
+php artisan monitor:audit-paths
+```
+
+Prints a table of findings (empty table + a confirmation message if
+nothing collides) and exits `0` either way — this command reports, it
+never fixes. Each finding: the `path`, its current `status`
+(`trap`/`safe`), the matched route (`uri` + `source`: `route_table` or
+`traffic`), and a `severity` (`high` for a colliding `trap` — risk of
+blocking a real user — `info` for a colliding `safe`, which only means
+the review was unnecessary: a path that's genuinely a live route was
+never a threat to begin with).
+
+Two checks, unioned (a row can match either, or both — `route_table` wins
+when both match, since it's the more precise signal):
+
+- **`route_table`**: the path is tested against every registered route's
+  compiled regex (`Route::getRoutes()`) — dynamic parameters (`users/
+  {id}`, custom `where()` constraints, etc.) resolve correctly since this
+  reuses Symfony's own route compiler instead of reimplementing parsing.
+  Route domain is deliberately ignored (mirrors `isPathBlocked()`'s
+  host-agnostic surface: "this route exists on whatever domain the
+  installation serves"). Fallback routes (`Route::fallback(...)`, commonly
+  registered so honeypot paths reach `MonitorMethod` at all — see the
+  `routes/web.php` note in this README) are excluded on purpose: their
+  regex matches literally any path, which would make this check always
+  positive and useless.
+- **`traffic`**: same live-route criterion as the `0.21.0` guard —
+  `data.not_found` empty/false for some `Monitor` hit whose key matches
+  the path. Catches a resource that never goes through Laravel's router
+  (a static file, etc.) that `route_table` alone wouldn't see.
+
+Synchronous, no job/queue involved — it's regex matching in memory
+against the route table plus one `Monitor` scan, order of seconds even
+against thousands of `monitor_paths` rows (confirmed: production has
+~4,900 today). No `MonitorAiTriageRun`-style async/polling needed — that
+command is async because of external AI API latency, not data volume.
+
+- **`auditPaths`** (`Authorization: Bearer <local_token>`, same auth as
+  `flagScraperPath`/`clearData` — never accepted with the ephemeral read
+  token): `POST /monitor/handler?action=auditPaths`, no body needed.
+  Response: `{"success": true, "findings": [{"path": "...", "status":
+  "trap"|"safe", "matched_route": {"uri": "...", "source":
+  "route_table"|"traffic"}, "severity": "high"|"info"}, ...]}` (empty
+  array when nothing collides).
+
+Undoing a finding is still manual — this command/action never calls
+`unflagPath`/`unmarkPathSafe` on its own, by design; whoever reviews the
+report decides.
+
 ## Scraper signal detection
 
 Every tracked request — with or without an active session — is scored

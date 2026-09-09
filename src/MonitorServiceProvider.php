@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor;
 
+use Drcantagalo\LaravelMonitor\Console\Commands\MonitorAuditPathsCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorExportDenylistCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorUpdateCommand;
@@ -61,6 +62,7 @@ class MonitorServiceProvider extends ServiceProvider
                 MonitorInstallCommand::class,
                 MonitorExportDenylistCommand::class,
                 MonitorUpdateCommand::class,
+                MonitorAuditPathsCommand::class,
             ]);
         }
 
