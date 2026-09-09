@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.21.0] - 2026-09-09
+### Changed
+- **Breaking (behavior): `flagScraperPath`/`flagScraperPaths` and
+  `markPathSafe`/`markPathsSafe` now guard against writing a review status
+  that would be wrong or pointless.** Found live on cantagalo.it while
+  investigating the `login` mix-up fixed in `0.20.3`: `monitor_paths`
+  matches by suffix host-agnostically (one review protects every
+  subdomain the installation serves), which cuts both ways - a
+  short/generic path (e.g. `login`) flagged `trap` because of a 404 on
+  one subdomain makes `MonitorMethod::isPathBlocked()` 403 that same
+  path suffix on **every** host of the installation, including a real
+  route that only happens to share the suffix (e.g. a production login
+  page). That could 403 real users on a working page silently, with
+  nobody noticing until a complaint.
+  - `flagScraperPath`/`flagScraperPaths`: before writing `status = 'trap'`
+    (and before blocking any IP), the same `Monitor::cursor()` pass used
+    to find IPs to block now also checks whether any matching key has
+    `data.not_found` empty/false in some hit - i.e. the path already
+    resolved as a real page somewhere. If so, the entry is **refused**:
+    nothing is written to `monitor_paths`, no IP is blocked, and the
+    response reports which host/path resolved live
+    (`"\"login\" also resolves as a live route at \"cantagalo.it/login\" —
+    refusing to flag it as a trap"`). The batch version partitions
+    `paths`/`rejected` instead of aborting the whole batch over one
+    problematic path.
+  - `markPathSafe`/`markPathsSafe`: symmetric guard - only writes
+    `status = 'safe'` when at least one hit with `not_found = true`
+    exists for that path in some host. Without that, a `'safe'` review
+    protects nothing; it's orphaned data from the moment it's created
+    (exactly how the `login` mix-up in `0.20.3` originated).
+  - No `force`/override in this first version - a rejected call must be
+    resolved by reviewing the actual data, not bypassed.
+  - Calls that previously succeeded can now return `422` where they
+    didn't before; check the `success`/`rejected` fields of the response
+    if you call these actions directly instead of through the dashboard.
+
+---
+
 ## [0.20.3] - 2026-09-09
 ### Added
 - `getPages`: new `filter=safe` value, returning only paths whose review

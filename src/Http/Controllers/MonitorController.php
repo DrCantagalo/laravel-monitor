@@ -1326,12 +1326,8 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
-        Cache::forget("monitor:blocked-path:{$path}");
-        $this->invalidatePagesCache();
-        $this->invalidateListingsCache();
-
-        $blockedIps = [];
+        $ipsToBlock = [];
+        $liveRouteMatch = null;
 
         // `data.page` guarda chaves "host/path" - o mesmo path pode
         // aparecer sob hosts diferentes (multi-subdomínio na mesma
@@ -1344,15 +1340,35 @@ class MonitorController extends Controller
         // quem visitou "file.php" (e vice-versa), mesmo as duas caindo na
         // mesma linha de `monitor_paths` (relatado em cantagalo.it,
         // 2026-09-09).
-        Monitor::cursor()->each(function (Monitor $monitor) use ($path, &$blockedIps) {
+        //
+        // laravel-monitor 101: mesma passada também checa se alguma chave
+        // batendo no path já resolveu como página real (data.not_found
+        // vazio/false) em algum host - se sim, o path não é um scraper
+        // trap de verdade em lugar nenhum, é uma rota real que só coincide
+        // o sufixo, e flagar isso bloquearia (403) usuário de verdade em
+        // QUALQUER host da installation (isPathBlocked é host-agnóstico
+        // por design). Side effects (grava trap, chama registerOffense)
+        // só acontecem depois do loop inteiro, uma vez confirmado que não
+        // há colisão - senão um IP já teria sido punido antes de sabermos
+        // que o path inteiro vai ser rejeitado.
+        Monitor::cursor()->each(function (Monitor $monitor) use ($path, &$ipsToBlock, &$liveRouteMatch) {
             $pages = (array) data_get($monitor, 'data.page', []);
+            $notFound = (array) data_get($monitor, 'data.not_found', []);
 
-            $matches = collect(array_keys($pages))->contains(
+            $matchedKeys = collect(array_keys($pages))->filter(
                 fn ($key) => $this->pathMatches($key, $path)
             );
 
-            if (! $matches) {
+            if ($matchedKeys->isEmpty()) {
                 return;
+            }
+
+            $liveKey = $matchedKeys->first(fn ($key) => empty($notFound[$key]));
+
+            if ($liveKey !== null) {
+                $liveRouteMatch = $liveKey;
+
+                return false;
             }
 
             foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
@@ -1360,15 +1376,33 @@ class MonitorController extends Controller
                     continue;
                 }
 
-                // laravel-monitor 96: honeypot é o sinal de maior confiança
-                // do auto-block (um hit já basta, sem contagem de sinais) -
-                // passa a seguir a mesma escada temporária/escalonada do
-                // resto do auto-block em vez de virar permanente e estático
-                // desde o primeiro hit. Ver ScraperBlocker::registerOffense.
-                (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
-                $blockedIps[$ip] = true;
+                $ipsToBlock[$ip] = true;
             }
         });
+
+        if ($liveRouteMatch !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => "\"{$path}\" also resolves as a live route at \"{$liveRouteMatch}\" — refusing to flag it as a trap",
+            ], 422);
+        }
+
+        MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
+        Cache::forget("monitor:blocked-path:{$path}");
+        $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
+
+        $blockedIps = [];
+
+        foreach (array_keys($ipsToBlock) as $ip) {
+            // laravel-monitor 96: honeypot é o sinal de maior confiança do
+            // auto-block (um hit já basta, sem contagem de sinais) - segue
+            // a mesma escada temporária/escalonada do resto do auto-block
+            // em vez de virar permanente e estático desde o primeiro hit.
+            // Ver ScraperBlocker::registerOffense.
+            (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
+            $blockedIps[$ip] = true;
+        }
 
         return response()->json([
             'success' => true,
@@ -1405,7 +1439,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $flagged = [];
+        $normalized = [];
 
         foreach ($paths as $path) {
             if (! is_string($path)) {
@@ -1418,47 +1452,97 @@ class MonitorController extends Controller
                 continue;
             }
 
-            MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
-            Cache::forget("monitor:blocked-path:{$path}");
-            $flagged[] = $path;
+            $normalized[] = $path;
         }
 
-        if (empty($flagged)) {
+        $normalized = array_values(array_unique($normalized));
+
+        if (empty($normalized)) {
             return response()->json([
                 'success' => false,
                 'message' => 'No valid paths provided',
             ], 422);
         }
 
-        $blockedIps = [];
+        $ipsToBlockByPath = array_fill_keys($normalized, []);
+        $liveRouteMatches = [];
 
         // Mesmo match por sufixo de flagScraperPath (path pode aparecer
         // sob hosts diferentes na mesma installation) - só que checando
         // contra a lista inteira de paths do lote de uma vez, não um só.
         // Case-insensitive pelo mesmo motivo de flagScraperPath (singular)
         // - ver comentário lá e em `pathMatches()`.
-        Monitor::cursor()->each(function (Monitor $monitor) use ($flagged, &$blockedIps) {
+        //
+        // laravel-monitor 101: mesma guarda contra colisão com rota real
+        // do singular, só que por path do lote - um path colidindo não
+        // aborta os outros (particiona flagged/rejected no final).
+        Monitor::cursor()->each(function (Monitor $monitor) use ($normalized, &$ipsToBlockByPath, &$liveRouteMatches) {
             $pages = array_keys((array) data_get($monitor, 'data.page', []));
+            $notFound = (array) data_get($monitor, 'data.not_found', []);
 
-            $matchedAny = collect($flagged)->contains(
-                fn ($path) => collect($pages)->contains(
-                    fn ($key) => $this->pathMatches($key, $path)
-                )
-            );
-
-            if (! $matchedAny) {
-                return;
-            }
-
-            foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
-                if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            foreach ($normalized as $path) {
+                if (isset($liveRouteMatches[$path])) {
                     continue;
                 }
 
+                $matchedKeys = collect($pages)->filter(
+                    fn ($key) => $this->pathMatches($key, $path)
+                );
+
+                if ($matchedKeys->isEmpty()) {
+                    continue;
+                }
+
+                $liveKey = $matchedKeys->first(fn ($key) => empty($notFound[$key]));
+
+                if ($liveKey !== null) {
+                    $liveRouteMatches[$path] = $liveKey;
+                    unset($ipsToBlockByPath[$path]);
+
+                    continue;
+                }
+
+                foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
+                    if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+                        continue;
+                    }
+
+                    $ipsToBlockByPath[$path][$ip] = true;
+                }
+            }
+        });
+
+        $flagged = [];
+        $rejected = [];
+        $blockedIps = [];
+
+        foreach ($normalized as $path) {
+            if (isset($liveRouteMatches[$path])) {
+                $rejected[] = [
+                    'path' => $path,
+                    'reason' => "\"{$path}\" also resolves as a live route at \"{$liveRouteMatches[$path]}\"",
+                ];
+
+                continue;
+            }
+
+            MonitorPath::updateOrCreate(['path' => $path], ['status' => 'trap']);
+            Cache::forget("monitor:blocked-path:{$path}");
+            $flagged[] = $path;
+
+            foreach (array_keys($ipsToBlockByPath[$path]) as $ip) {
                 (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
                 $blockedIps[$ip] = true;
             }
-        });
+        }
+
+        if (empty($flagged)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid paths provided',
+                'rejected' => $rejected,
+            ], 422);
+        }
 
         $this->invalidatePagesCache();
         $this->invalidateListingsCache();
@@ -1466,6 +1550,7 @@ class MonitorController extends Controller
         return response()->json([
             'success' => true,
             'paths' => $flagged,
+            'rejected' => $rejected,
             'blocked_ips' => array_keys($blockedIps),
         ]);
     }
@@ -1525,6 +1610,18 @@ class MonitorController extends Controller
             ], 422);
         }
 
+        // laravel-monitor 101: simétrico à guarda de flagScraperPath - só
+        // marca 'safe' se existir pelo menos 1 hit com not_found=true em
+        // algum host pra esse path. Sem isso, marcar 'safe' não protege
+        // nada: é dado órfão desde o início (mesma origem do "login" da
+        // task 100).
+        if (! $this->hasNotFoundEvidence($path)) {
+            return response()->json([
+                'success' => false,
+                'message' => "\"{$path}\" has no recorded 404 — marking it safe would not protect anything",
+            ], 422);
+        }
+
         MonitorPath::updateOrCreate(
             ['path' => $path],
             ['status' => 'safe', 'reviewed_at' => now()]
@@ -1537,6 +1634,30 @@ class MonitorController extends Controller
             'path' => $path,
             'status' => 'safe',
         ]);
+    }
+
+    /**
+     * Suporte de `markPathSafe()`: existe pelo menos um hit
+     * `data.not_found[$key] = true` pra alguma chave de `data.page` que
+     * bate por sufixo (`pathMatches()`) contra `$path`? `Monitor::cursor()`
+     * direto (não `->each()`) pra poder sair no primeiro achado via
+     * `return` - mesmo motivo O(1) de memória do `flagScraperPath` acima,
+     * só que aqui também O(1) melhor-caso de iterações quando a evidência
+     * está numa das primeiras linhas.
+     */
+    private function hasNotFoundEvidence(string $path): bool
+    {
+        foreach (Monitor::cursor() as $monitor) {
+            $notFound = (array) data_get($monitor, 'data.not_found', []);
+
+            foreach ($notFound as $key => $wasNotFound) {
+                if ($wasNotFound && $this->pathMatches((string) $key, $path)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1557,7 +1678,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $marked = [];
+        $normalized = [];
 
         foreach ($paths as $path) {
             if (! is_string($path)) {
@@ -1567,6 +1688,63 @@ class MonitorController extends Controller
             $path = $this->normalizePathInput($path);
 
             if ($path === '') {
+                continue;
+            }
+
+            $normalized[] = $path;
+        }
+
+        $normalized = array_values(array_unique($normalized));
+
+        if (empty($normalized)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid paths provided',
+            ], 422);
+        }
+
+        // laravel-monitor 101: mesma guarda de markPathSafe (singular),
+        // por lote - uma única passada por Monitor checando todos os
+        // paths pendentes de uma vez, saindo cedo (`return false`) assim
+        // que todos já tiverem evidência.
+        $pending = array_flip($normalized);
+        $withEvidence = [];
+
+        Monitor::cursor()->each(function (Monitor $monitor) use (&$pending, &$withEvidence) {
+            if (empty($pending)) {
+                return false;
+            }
+
+            $notFound = (array) data_get($monitor, 'data.not_found', []);
+
+            foreach (array_keys($pending) as $path) {
+                $hasEvidence = false;
+
+                foreach ($notFound as $key => $wasNotFound) {
+                    if ($wasNotFound && $this->pathMatches((string) $key, $path)) {
+                        $hasEvidence = true;
+
+                        break;
+                    }
+                }
+
+                if ($hasEvidence) {
+                    $withEvidence[$path] = true;
+                    unset($pending[$path]);
+                }
+            }
+        });
+
+        $marked = [];
+        $rejected = [];
+
+        foreach ($normalized as $path) {
+            if (! isset($withEvidence[$path])) {
+                $rejected[] = [
+                    'path' => $path,
+                    'reason' => "\"{$path}\" has no recorded 404 — marking it safe would not protect anything",
+                ];
+
                 continue;
             }
 
@@ -1582,6 +1760,7 @@ class MonitorController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'No valid paths provided',
+                'rejected' => $rejected,
             ], 422);
         }
 
@@ -1590,6 +1769,7 @@ class MonitorController extends Controller
         return response()->json([
             'success' => true,
             'paths' => $marked,
+            'rejected' => $rejected,
         ]);
     }
 

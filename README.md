@@ -414,6 +414,16 @@ only ever came from `getPages`.
   - Response: `{"success": true, "path": "...", "blocked_ips": [...]}`,
     or `{"success": false, "message": "No path provided"}` (422) if
     `path` is missing/empty.
+  - **Guard since `0.21.0`**: before either step runs, the same `Monitor`
+    scan used to find IPs to block also checks whether the path already
+    resolved as a real, non-404 page in some host (`data.not_found`
+    empty/false for a matching key). If so, the call is **refused** —
+    nothing is written to `monitor_paths`, no IP is blocked — and the
+    response is `{"success": false, "message": "\"login\" also resolves
+    as a live route at \"cantagalo.it/login\" — refusing to flag it as a
+    trap"}` (422). Because the block ignores host, flagging a path that's
+    a real route on even one host would 403 real users on every other
+    host that route shares the suffix with. No override in this version.
   - **Fixed in `0.20.1`**: the `Monitor` table scan for step 2 used to
     load every row into memory at once (`Monitor::all()`), same class of
     bug as `getData` in `0.10.0` above — confirmed exhausting PHP-FPM's
@@ -434,9 +444,15 @@ only ever came from `getPages`.
   batch, not once per path. Invalid entries (non-string, empty after
   trimming) are silently skipped rather than failing the whole batch.
   Response: `{"success": true, "paths": [...only the ones actually
-  flagged...], "blocked_ips": [...]}`, or `{"success": false, "message":
-  "No paths provided"}` / `"No valid paths provided"` (422) if `paths` is
+  flagged...], "rejected": [{"path": "...", "reason": "..."}, ...],
+  "blocked_ips": [...]}`, or `{"success": false, "message": "No paths
+  provided"}` / `"No valid paths provided"` (422) if `paths` is
   missing/empty or every entry was invalid.
+  - **Guard since `0.21.0`**: same live-route check as `flagScraperPath`,
+    applied per path — a path that resolves as a real route on some host
+    is rejected and reported under `rejected` (with why), without
+    aborting the rest of the batch. `rejected` is always present (empty
+    array when nothing was refused).
 
 - **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
   `POST /monitor/handler?action=unflagPath` with
@@ -462,6 +478,13 @@ only ever came from `getPages`.
   `{"success": true, "path": "...", "status": "safe"}`, or `{"success":
   false, "message": "No path provided"}` (422) if `path` is
   missing/empty.
+  - **Guard since `0.21.0`**: only writes `status: 'safe'` when at least
+    one hit with `data.not_found = true` exists for that path in some
+    host — otherwise the review protects nothing (it's orphaned data
+    from the start). Rejected with `{"success": false, "message":
+    "\"...\" has no recorded 404 — marking it safe would not protect
+    anything"}` (422) when there's no such evidence. No override in this
+    version.
 - **`markPathsSafe`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version of `markPathSafe` — `POST
   /monitor/handler?action=markPathsSafe` with `{"paths":
@@ -469,8 +492,13 @@ only ever came from `getPages`.
   avoids one HTTP request per path when clearing many entries from the
   `pending_review` queue at once. No blocking side effect, same as the
   singular version. Response: `{"success": true, "paths": [...only the
-  ones actually marked...]}`, or `{"success": false, "message": "No
-  paths provided"}` / `"No valid paths provided"` (422).
+  ones actually marked...], "rejected": [{"path": "...", "reason":
+  "..."}, ...]}`, or `{"success": false, "message": "No paths provided"}`
+  / `"No valid paths provided"` (422).
+  - **Guard since `0.21.0`**: same 404-evidence check as `markPathSafe`,
+    applied per path — a path with no recorded 404 anywhere is rejected
+    and reported under `rejected`, without aborting the rest of the
+    batch.
 
 - **`unmarkPathSafe`** (same auth): reverts it — `POST
   /monitor/handler?action=unmarkPathSafe` with `{"path":
