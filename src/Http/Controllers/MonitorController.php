@@ -381,7 +381,7 @@ class MonitorController extends Controller
      * `pending_review` é o default quando `filter` não é enviado (ver
      * getPages) mas também pode ser pedido explicitamente.
      */
-    protected const PAGES_FILTERS = ['all', '404', 'clean', 'blocked', 'pending_review'];
+    protected const PAGES_FILTERS = ['all', '404', 'clean', 'blocked', 'pending_review', 'safe'];
 
     /**
      * Lista paginada/filtrável de paths visitados, agregando hits/estado
@@ -488,9 +488,14 @@ class MonitorController extends Controller
             $row['blocked'] = $blockedPaths->contains(
                 fn ($blockedPath) => $this->pathMatches($path, $blockedPath)
             );
-            $row['status'] = $safePaths->contains(
+            // 'safe' só é um status válido pra um path que É 404 - o
+            // marcador em monitor_paths casa por sufixo host-agnóstico, e
+            // sem esse gate um path 'safe' num host onde é 404 vazava a
+            // etiqueta pra outro host onde o mesmo sufixo é rota real
+            // (nunca 404) - ver CHANGELOG [0.20.3].
+            $row['status'] = ($row['not_found'] && $safePaths->contains(
                 fn ($safePath) => $this->pathMatches($path, $safePath)
-            ) ? 'safe' : 'pending';
+            )) ? 'safe' : 'pending';
         }
         unset($row);
 
@@ -500,6 +505,7 @@ class MonitorController extends Controller
                 'clean' => ! $row['not_found'] && ! $row['blocked'],
                 'blocked' => $row['blocked'],
                 'pending_review' => $row['not_found'] && $row['status'] !== 'safe' && ! $row['blocked'],
+                'safe' => $row['status'] === 'safe',
                 default => true,
             };
         }));

@@ -890,7 +890,15 @@ Since `0.4.0`, each path also carries a review `status` — `pending`
 (default, never reviewed) or `safe` (marked via `markPathSafe`, see
 above) — sourced from `monitor_paths` (`status = 'safe'` rows; see "Path
 review state" above), matched by suffix the same way
-`blocked`/`monitor_paths` (`status = 'trap'`) already was:
+`blocked`/`monitor_paths` (`status = 'trap'`) already was. Since `0.20.3`,
+`status` can only be `'safe'` when the path is also `not_found: true` —
+`monitor_paths` matches by suffix regardless of host, on purpose (so one
+review protects every subdomain with the same trap), but that means a
+short/generic path (e.g. `login`) reviewed as safe on a host where it's a
+404 must never leak the `'safe'` badge to a *different* host where the
+same suffix is a real, non-404 route. A `clean` path (`not_found: false`)
+always reports `status: 'pending'`, no matter what any `monitor_paths` row
+says.
 
 - `page` (default `1`), `per_page` (default `20`, max `100`).
 - `filter`: `pending_review` (**default when `filter` is omitted**:
@@ -899,8 +907,9 @@ review state" above), matched by suffix the same way
   explicitly to get the old default-listing behavior back), `404` (path
   was ever hit while the response was a 404), `clean` (not 404, not
   blocked), `blocked` (path has `status: 'trap'` in `monitor_paths`,
-  matched by suffix the same way `flagScraperPath` does). An unknown
-  `filter` value returns `422`.
+  matched by suffix the same way `flagScraperPath` does), `safe` (since
+  `0.20.3`: path has `status: 'safe'` — see below). An unknown `filter`
+  value returns `422`.
 - `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
   accepts for a `where` comparison): filters by the **`Monitor` row's**
   `updated_at`, not a per-page-hit timestamp — the schema has no

@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.20.3] - 2026-09-09
+### Added
+- `getPages`: new `filter=safe` value, returning only paths whose review
+  `status` is `'safe'` (previously only visible mixed into `filter=all`).
+
+### Fixed
+- **A path reviewed as `safe` on one host could leak the "Safe" badge to
+  a different host where the same path suffix is a real, non-404
+  route.** `monitor_paths` matches by suffix host-agnostically, by
+  design (one review of `wp-admin/install.php` protects every
+  subdomain) - but `buildPagesResult()` computed `status: 'safe'` purely
+  from that suffix match, without checking whether the *current* path
+  was itself a 404. Found live on cantagalo.it: `login` had been marked
+  `safe` after being reviewed as a stale 404 on `monitor.cantagalo.it`
+  (`monitor_paths` id `4916`), which made the dashboard show
+  `cantagalo.it/login` - the real, working production login page - with
+  a `"Safe"` badge too, since it shares the same `/login` suffix. A
+  `clean` path (`not_found: false`) should never carry any review status
+  at all; it isn't something that was ever flagged or needed reviewing.
+  Fix: `status` can now only resolve to `'safe'` when `not_found` is also
+  `true` for that specific aggregated path - `monitor_paths` itself is
+  untouched (the safe/trap classification other hosts rely on for actual
+  404s is unaffected), only the value surfaced by `getPages` for a
+  non-404 path changes, from `'safe'` to `'pending'`.
+- Bumped `config('monitor.version')` to `0.20.3` here - the previous
+  release (`0.20.2`, `CHANGELOG` + tag `v0.20.2` already published) never
+  got this value bumped in `src/config/monitor.php` (stayed at
+  `0.20.1`), so `monitor:install` was stamping the wrong
+  `package_version`. No user-facing behavior depended on it (only
+  `monitor:install`'s bookkeeping), so no separate release was cut just
+  for that - fixed forward as part of this version bump instead.
+
+---
+
 ## [0.20.2] - 2026-09-09
 ### Fixed
 - **A path flagged as trap kept showing as "pending" in the dashboard,
