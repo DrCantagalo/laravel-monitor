@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.23.0] - 2026-09-10
+### Fixed
+- **`getPages` timing out on installations with a large `Monitor` table**:
+  `MonitorController::buildPagesResult()` used to scan and JSON-decode
+  every `Monitor` row on every cache miss to aggregate
+  `data.page`/`data.not_found` — measured at ~85s for ~35k rows in
+  production, well past the 10s timeout a typical consumer uses to call
+  this endpoint, effectively making the dashboard's "Pages" tab
+  unusable on any installation with real traffic volume. On top of that,
+  the host-agnostic suffix match against `monitor_paths` (`trap`/`safe`,
+  `0.20.0`/`0.21.0`) ran two closures per aggregated path against the
+  full `monitor_paths` table (`O(paths × monitor_paths)`), compounding
+  the cost.
+### Added
+- **`monitor_page_hits` table**: one row per `Monitor`+path
+  (`monitor_id`, `path`, `hits`, `not_found`), kept in sync automatically
+  by a `Monitor` model event on every save — works regardless of how the
+  row was written (trackers, `Monitor::create()`, `tinker`, tests), no
+  call site needed updating. `getPages` now aggregates this table with a
+  single `GROUP BY` SQL query instead of decoding JSON in PHP;
+  `date_from`/`date_to` filter via a join on `monitors.updated_at`
+  (same semantics as before, just moved from PHP to SQL). The
+  host-agnostic suffix match against `monitor_paths` is unaffected in
+  behavior but now runs as an O(1) set lookup per path-suffix instead of
+  a linear scan of `monitor_paths` per path (see `pathSuffixes()`/
+  `matchesAnySuffix()` in `MonitorController` — `pathMatches()` itself is
+  untouched and still used by the other call sites, e.g.
+  `flagScraperPath`/`markPathSafe`). Upgrading runs a one-time backfill
+  migration populating `monitor_page_hits` from any pre-existing
+  `Monitor.data`.
+
 ## [0.22.0] - 2026-09-09
 ### Added
 - **`monitor:audit-paths` command and `auditPaths` action**: manual,

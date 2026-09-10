@@ -438,46 +438,46 @@ class MonitorController extends Controller
     }
 
     /**
-     * Agrega `data.page`/`data.not_found` de todas
-     * as linhas `Monitor` (opcionalmente restritas por `updated_at`) num
-     * mapa por path, aplica `filter`, ordena por hits desc e pagina em
-     * memória — a agregação não dá pra fazer em SQL porque os dados
-     * ficam dentro de um blob JSON por linha (mesmo motivo de
-     * `flagScraperPath` iterar em PHP em vez de query direta).
+     * Agrega `data.page`/`data.not_found` via `monitor_page_hits`
+     * (laravel-monitor 103) — uma linha por (Monitor, path) mantida em
+     * sincronia a cada save (`Monitor::booted()`), em vez de escanear e
+     * decodificar o JSON de toda a tabela `Monitor` a cada `getPages`
+     * (85s medidos em produção com 35.225 linhas — ver
+     * bugs/laravel-monitor.md). `date_from`/`date_to` continuam
+     * filtrando pelo `updated_at` do `Monitor` (mesma aproximação de
+     * sempre — "atividade daquele visitante no período" — só que via
+     * JOIN em SQL em vez de carregar a linha inteira em PHP).
      */
     protected function buildPagesResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
     {
-        $query = Monitor::query();
+        $query = DB::table('monitor_page_hits');
 
-        if ($dateFrom) {
-            $query->where('updated_at', '>=', $dateFrom);
-        }
+        if ($dateFrom || $dateTo) {
+            $query->join('monitors', 'monitors.id', '=', 'monitor_page_hits.monitor_id');
 
-        if ($dateTo) {
-            $query->where('updated_at', '<=', $dateTo);
+            if ($dateFrom) {
+                $query->where('monitors.updated_at', '>=', $dateFrom);
+            }
+
+            if ($dateTo) {
+                $query->where('monitors.updated_at', '<=', $dateTo);
+            }
         }
 
         $aggregated = [];
 
-        $query->select('data')->chunk(200, function ($monitors) use (&$aggregated) {
-            foreach ($monitors as $monitor) {
-                $notFound = (array) data_get($monitor, 'data.not_found', []);
+        $rows = $query
+            ->selectRaw('monitor_page_hits.path as path, SUM(monitor_page_hits.hits) as hits, MAX(monitor_page_hits.not_found) as not_found')
+            ->groupBy('monitor_page_hits.path')
+            ->get();
 
-                foreach ((array) data_get($monitor, 'data.page', []) as $path => $hits) {
-                    $aggregated[$path] ??= [
-                        'path' => $path,
-                        'hits' => 0,
-                        'not_found' => false,
-                    ];
-
-                    $aggregated[$path]['hits'] += (int) $hits;
-
-                    if (! empty($notFound[$path])) {
-                        $aggregated[$path]['not_found'] = true;
-                    }
-                }
-            }
-        });
+        foreach ($rows as $row) {
+            $aggregated[$row->path] = [
+                'path' => $row->path,
+                'hits' => (int) $row->hits,
+                'not_found' => (bool) $row->not_found,
+            ];
+        }
 
         $blockedPaths = MonitorPath::where('status', 'trap')->pluck('path');
         // Só os paths marcados 'safe' importam pro match por sufixo (mesmo
@@ -488,18 +488,27 @@ class MonitorController extends Controller
         // markPathSafe(s) — ver comentário em flagScraperPath).
         $safePaths = MonitorPath::where('status', 'safe')->pluck('path');
 
+        // Sets (não Collection::contains por closure) — a mesma checagem
+        // de sufixo de pathMatches() reescrita como lookup O(1) por
+        // sufixo (ver pathSuffixes()), em vez de comparar cada path
+        // agregado contra as ~4.927 linhas trap+safe uma por uma
+        // (O(paths_agregados × 4.927), o segundo gargalo medido nesta
+        // rota — ver laravel-monitor 103). Resultado idêntico a
+        // pathMatches(): equivalência provada no comentário de
+        // pathSuffixes().
+        $blockedSet = array_fill_keys($blockedPaths->map(fn ($p) => strtolower($p))->all(), true);
+        $safeSet = array_fill_keys($safePaths->map(fn ($p) => strtolower($p))->all(), true);
+
         foreach ($aggregated as $path => &$row) {
-            $row['blocked'] = $blockedPaths->contains(
-                fn ($blockedPath) => $this->pathMatches($path, $blockedPath)
-            );
+            $suffixes = $this->pathSuffixes($path);
+
+            $row['blocked'] = $this->matchesAnySuffix($suffixes, $blockedSet);
             // 'safe' só é um status válido pra um path que É 404 - o
             // marcador em monitor_paths casa por sufixo host-agnóstico, e
             // sem esse gate um path 'safe' num host onde é 404 vazava a
             // etiqueta pra outro host onde o mesmo sufixo é rota real
             // (nunca 404) - ver CHANGELOG [0.20.3].
-            $row['status'] = ($row['not_found'] && $safePaths->contains(
-                fn ($safePath) => $this->pathMatches($path, $safePath)
-            )) ? 'safe' : 'pending';
+            $row['status'] = ($row['not_found'] && $this->matchesAnySuffix($suffixes, $safeSet)) ? 'safe' : 'pending';
         }
         unset($row);
 
@@ -568,6 +577,51 @@ class MonitorController extends Controller
         $needle = strtolower($needle);
 
         return $haystack === $needle || str_ends_with($haystack, '/'.$needle);
+    }
+
+    /**
+     * Usado só por `buildPagesResult()` (laravel-monitor 103) — mesmo
+     * critério de `pathMatches()` acima, reescrito pra lookup O(1) em vez
+     * de comparação por needle. Equivalência: `pathMatches($haystack,
+     * $needle)` é verdadeiro sse `$needle === $haystack` OU `$haystack`
+     * termina em `/{$needle}` — ou seja, sse `$needle` é exatamente
+     * `$haystack` OU exatamente a parte de `$haystack` depois de alguma
+     * ocorrência de `/`. Essa é, por definição, a lista de sufixos de
+     * `$haystack` cortados em cada `/` (incluindo o próprio `$haystack`,
+     * o caso de "nenhum corte"). Então "existe um needle em `$needles`
+     * que casa com `$haystack`" é idêntico a "existe um sufixo de
+     * `$haystack` que está em `$needles`" — e para path reais (poucos
+     * `/`, tipicamente <10) isso é O(1) por sufixo contra um Set, em vez
+     * de O(nº de needles) por needle contra o `$haystack` inteiro.
+     */
+    private function pathSuffixes(string $haystack): array
+    {
+        $haystack = strtolower($haystack);
+        $suffixes = [$haystack];
+        $offset = 0;
+
+        while (($slash = strpos($haystack, '/', $offset)) !== false) {
+            $offset = $slash + 1;
+            $suffixes[] = substr($haystack, $offset);
+        }
+
+        return $suffixes;
+    }
+
+    /**
+     * `$needleSet` é um Set (array_fill_keys, valores irrelevantes) de
+     * needles já em minúsculo — ver pathSuffixes() pra equivalência com
+     * pathMatches().
+     */
+    private function matchesAnySuffix(array $suffixes, array $needleSet): bool
+    {
+        foreach ($suffixes as $suffix) {
+            if (isset($needleSet[$suffix])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

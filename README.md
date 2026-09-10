@@ -1017,6 +1017,23 @@ bump it, which changes every `getPages` cache key at once — old entries
 are simply never read again and expire on their own TTL, rather than
 being individually deleted.
 
+**Since `0.23.0`**, the aggregation itself no longer scans and
+JSON-decodes every `Monitor` row on a cache miss. A `monitor_page_hits`
+table (one row per `Monitor`+path, unique on `(monitor_id, path)`) is
+kept in sync automatically whenever a `Monitor` is saved — via a model
+event, so this works no matter how the row was written (the trackers,
+`Monitor::create()` directly, `tinker`, tests) — and `getPages` now
+aggregates it with a single `GROUP BY` query (`SUM(hits)`,
+`MAX(not_found)`), joined against `monitors.updated_at` only when
+`date_from`/`date_to` are given. This fixed a real production timeout:
+with ~35k `Monitor` rows, the old PHP-side scan measured ~85s on a cache
+miss, well past the 10s timeout a typical consumer (e.g. `home-page`)
+uses to call this endpoint. Upgrading runs a one-time backfill migration
+that populates `monitor_page_hits` from whatever `Monitor.data` already
+exists — expect it to take roughly as long as the old per-request scan
+used to (a few seconds per ~1k rows), but it only runs once, at migrate
+time, not on every `getPages` call.
+
 ## Paginated visitor/blocklist listing (`getVisitorsByIp`, `getBlockedIps`, `getBlockedPaths`)
 
 Same auth as `getData`/`getPages` (permanent `local_token` **or** the
