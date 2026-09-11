@@ -2,8 +2,8 @@
 
 namespace Drcantagalo\LaravelMonitor\Support;
 
-use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
 /**
@@ -37,34 +37,39 @@ class PathsAuditor
      * router do Laravel (arquivo estático, etc.), que a route table
      * sozinha não enxergaria.
      *
+     * `MonitorPath` é processada em chunks (`chunkById`) em vez de
+     * `cursor()->each()` sobre a tabela toda de uma vez (mesmo motivo do
+     * `chunk()` usado em outros pontos do pacote: teto de memória
+     * previsível independente do tamanho de `monitor_paths`).
+     *
      * @return array<int, array{path: string, status: string, matched_route: array{uri: string, source: string}, severity: string}>
      */
     public static function audit(): array
     {
         $routes = self::compiledRoutes();
-        $liveTrafficKeys = self::liveTrafficKeys();
+        $liveTrafficSuffixes = self::liveTrafficSuffixIndex();
 
         $findings = [];
 
-        MonitorPath::whereIn('status', ['trap', 'safe'])->cursor()->each(function (MonitorPath $row) use ($routes, $liveTrafficKeys, &$findings) {
-            $subject = '/'.$row->path;
+        MonitorPath::whereIn('status', ['trap', 'safe'])->orderBy('id')->chunkById(500, function ($chunk) use ($routes, $liveTrafficSuffixes, &$findings) {
+            foreach ($chunk as $row) {
+                $subject = '/'.$row->path;
 
-            $routeMatch = $routes->first(
-                fn ($route) => @preg_match($route['regex'], $subject) === 1
-            );
+                $routeMatch = $routes->first(
+                    fn ($route) => @preg_match($route['regex'], $subject) === 1
+                );
 
-            if ($routeMatch !== null) {
-                $findings[] = self::finding($row, $routeMatch['uri'], 'route_table');
+                if ($routeMatch !== null) {
+                    $findings[] = self::finding($row, $routeMatch['uri'], 'route_table');
 
-                return;
-            }
+                    continue;
+                }
 
-            $trafficMatch = $liveTrafficKeys->first(
-                fn ($key) => self::pathMatches($key, $row->path)
-            );
+                $needle = strtolower($row->path);
 
-            if ($trafficMatch !== null) {
-                $findings[] = self::finding($row, $trafficMatch, 'traffic');
+                if (isset($liveTrafficSuffixes[$needle])) {
+                    $findings[] = self::finding($row, $liveTrafficSuffixes[$needle], 'traffic');
+                }
             }
         });
 
@@ -120,40 +125,66 @@ class PathsAuditor
     }
 
     /**
-     * Chaves "host/path" (mesmo formato de `data.page`) que já resolveram
-     * como página real (`data.not_found` vazio/false) em pelo menos um
-     * hit, em qualquer `Monitor` - mesmo critério do guard da task 101,
-     * só que pré-computado uma vez pra todas as linhas de `monitor_paths`
-     * em vez de escanear `Monitor` de novo por path.
+     * Índice sufixo -> chave "host/path" original, pra achar em O(1) se
+     * algum path de `monitor_paths` (needle, sem host) casa com alguma
+     * chave que já resolveu como página real (`not_found = false` em
+     * pelo menos um hit) - mesmo critério do guard da task 101, só que
+     * lido de `monitor_page_hits` (laravel-monitor 103, mantida em
+     * sincronia por `Monitor::booted()`) via uma única query agregada em
+     * vez de `Monitor::cursor()->each()` decodificando o JSON de toda a
+     * tabela `Monitor` (36.839 linhas em produção - cantagalo.it,
+     * installation id=3 - contra só 4.973 em `monitor_paths`: mesma
+     * classe de bug das tasks 103/104, ver laravel-monitor 131).
+     *
+     * A checagem em si (igualdade ou sufixo "/{$needle}",
+     * case-insensitive) é a mesma de sempre - só invertida: em vez de,
+     * pra cada linha de `monitor_paths`, escanear linearmente todas as
+     * chaves de tráfego atrás de uma que combine (`->first(fn...)`,
+     * O(monitor_paths × chaves_live)), pré-computamos aqui, uma vez, os
+     * sufixos de cada chave de tráfego (mesma técnica de
+     * `MonitorController::pathSuffixes()`/`matchesAnySuffix()` da task
+     * 103, só que aplicada no sentido oposto: lá o needle é curto e o
+     * haystack variável era testado contra um Set de needles; aqui o
+     * needle (`$row->path`) é que é testado contra um Set de sufixos
+     * pré-computados dos haystacks).
      */
-    private static function liveTrafficKeys()
+    private static function liveTrafficSuffixIndex(): array
     {
-        $keys = [];
+        $index = [];
 
-        Monitor::cursor()->each(function (Monitor $monitor) use (&$keys) {
-            $notFound = (array) data_get($monitor, 'data.not_found', []);
-
-            foreach (array_keys((array) data_get($monitor, 'data.page', [])) as $key) {
-                if (empty($notFound[$key])) {
-                    $keys[$key] = true;
+        DB::table('monitor_page_hits')
+            ->where('not_found', false)
+            ->distinct()
+            ->pluck('path')
+            ->each(function (string $path) use (&$index) {
+                foreach (self::pathSuffixes($path) as $suffix) {
+                    $index[$suffix] ??= $path;
                 }
-            }
-        });
+            });
 
-        return collect(array_keys($keys));
+        return $index;
     }
 
     /**
-     * Mesmo critério de `MonitorController::pathMatches()` (privado
-     * naquela classe, duplicado aqui em vez de exposto publicamente só
-     * pra esse uso): igualdade ou sufixo "/{$needle}", case-insensitive,
-     * pra casar independente do host e da caixa exata da visita real.
+     * Sufixos de `$haystack` cortados em cada `/` (incluindo o próprio
+     * `$haystack`), já em minúsculo. Equivalência com o critério antigo
+     * "`$haystack === $needle` ou `$haystack` termina em `/{$needle}`":
+     * essa condição é verdadeira sse `$needle` é exatamente algum desses
+     * sufixos - mesma prova de `MonitorController::pathSuffixes()`
+     * (duplicado aqui por ser a única classe fora do controller que
+     * precisa disso).
      */
-    private static function pathMatches(string $haystack, string $needle): bool
+    private static function pathSuffixes(string $haystack): array
     {
         $haystack = strtolower($haystack);
-        $needle = strtolower($needle);
+        $suffixes = [$haystack];
+        $offset = 0;
 
-        return $haystack === $needle || str_ends_with($haystack, '/'.$needle);
+        while (($slash = strpos($haystack, '/', $offset)) !== false) {
+            $offset = $slash + 1;
+            $suffixes[] = substr($haystack, $offset);
+        }
+
+        return $suffixes;
     }
 }

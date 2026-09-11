@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.25.0] - 2026-09-11
+### Fixed
+- **`PathsAuditor::audit()` (`auditPaths`/`monitor:audit-paths`) timing
+  out on installations with a large `Monitor` table**: same class of bug
+  as `getPages`/`getVisitorPaths` before `0.23.0`/`0.24.0` —
+  `liveTrafficKeys()` used to `Monitor::cursor()->each()` and JSON-decode
+  every `Monitor` row on every call, and the match against
+  `monitor_paths` ran a linear `->first(fn...)` scan of those keys per
+  row (`O(monitor_paths × live_traffic_keys)`). Reproduced in production
+  (cantagalo.it, installation id=3, 36,839 `Monitor` rows / 4,973
+  `monitor_paths` rows / 109 routes): `cURL error 28: Operation timed
+  out after 10001 milliseconds` on the `home-page` → `auditPaths` proxy
+  call.
+### Changed
+- `liveTrafficKeys()` now reads from `monitor_page_hits` (`0.23.0`, kept
+  in sync automatically) via a single `WHERE not_found = false` query
+  instead of decoding `Monitor.data` in PHP, and the match against
+  `monitor_paths` is now an O(1) per-suffix set lookup (same technique
+  as `MonitorController::pathSuffixes()`/`matchesAnySuffix()` from
+  `0.23.0`, applied in the opposite direction) instead of a linear scan.
+  `MonitorPath` rows are now processed via `chunkById()` instead of
+  `cursor()->each()` on the whole table at once. Measured ~14x faster
+  against a synthetic dataset matching production volume (37k `Monitor`
+  rows / 5k `monitor_paths` rows / 109 routes) in the harness: 3.6s →
+  0.26s. Report output and behavior are unchanged — see `README.md`.
+
 ## [0.24.0] - 2026-09-11
 ### Fixed
 - **`getVisitorPaths` scanning the entire `Monitor` table on every call**:

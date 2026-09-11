@@ -848,12 +848,20 @@ when both match, since it's the more precise signal):
 - **`traffic`**: same live-route criterion as the `0.21.0` guard —
   `data.not_found` empty/false for some `Monitor` hit whose key matches
   the path. Catches a resource that never goes through Laravel's router
-  (a static file, etc.) that `route_table` alone wouldn't see.
+  (a static file, etc.) that `route_table` alone wouldn't see. Since
+  `0.25.0`, this reads from `monitor_page_hits` (`0.23.0`) via one SQL
+  query plus an O(1) per-suffix set lookup, instead of decoding
+  `Monitor.data` for every row — see the `monitor_page_hits` note under
+  [Paginated page listing (`getPages`)](#paginated-page-listing-getpages)
+  below; before `0.25.0` this scanned the entire `Monitor` table in PHP on every
+  call and could exceed a typical 10s HTTP timeout on installations with
+  tens of thousands of `Monitor` rows (confirmed in production).
 
 Synchronous, no job/queue involved — it's regex matching in memory
-against the route table plus one `Monitor` scan, order of seconds even
-against thousands of `monitor_paths` rows (confirmed: production has
-~4,900 today). No `MonitorAiTriageRun`-style async/polling needed — that
+against the route table plus SQL-backed lookups against
+`monitor_page_hits`, order of seconds even against thousands of
+`monitor_paths` rows (confirmed: production has ~4,900 today, well under
+a second). No `MonitorAiTriageRun`-style async/polling needed — that
 command is async because of external AI API latency, not data volume.
 
 - **`auditPaths`** (`Authorization: Bearer <local_token>`, same auth as
