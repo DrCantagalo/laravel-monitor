@@ -769,11 +769,20 @@ class MonitorController extends Controller
      * visualmente que um IP é scraper antes de bloquear. Ao contrário de
      * `flagScraperPath` (que dado um path escaneia todos os `Monitor` e
      * casa por sufixo, já que o mesmo path pode aparecer sob hosts
-     * diferentes), aqui o match é direto (IP não tem variação de host) -
-     * é o mesmo escaneamento em chunks, só invertido: filtra por IP em vez
-     * de path, e agrega paths em vez de IPs. Sem paginação/cache: dataset
-     * pequeno por IP, chamada sob demanda ao expandir uma linha no
-     * dashboard, não em toda carga de página.
+     * diferentes), aqui o match é direto (IP não tem variação de host).
+     *
+     * Até a laravel-monitor 104 isto era um scan em chunks decodificando
+     * `data` de TODA a tabela `Monitor` a cada chamada (mesma classe de
+     * bug de `buildPagesResult()` antes da 103, ver bugs/laravel-monitor.md)
+     * — o custo de achar quais linhas tinham o IP era proporcional ao
+     * tamanho total de `Monitor`, não ao número de visitas daquele IP.
+     * Agora usa as tabelas relacionais já mantidas por `Monitor::booted()`
+     * (`monitor_visit_ips` pra achar os `monitor_id` por IP via índice,
+     * `monitor_page_hits`, da 103, pra somar hits por path só desses
+     * ids) — os dois SUMs/JOINs ficam em SQL, sem decodificar JSON em
+     * PHP. Sem paginação/cache: dataset pequeno por IP, chamada sob
+     * demanda ao expandir uma linha no dashboard, não em toda carga de
+     * página.
      */
     protected function getVisitorPaths(Request $request)
     {
@@ -786,30 +795,23 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $aggregated = [];
+        $monitorIds = DB::table('monitor_visit_ips')->where('ip', $ip)->pluck('monitor_id');
 
-        Monitor::query()->select('data')->chunk(200, function ($monitors) use ($ip, &$aggregated) {
-            foreach ($monitors as $monitor) {
-                $ips = (array) data_get($monitor, 'data.ips', []);
-
-                if (! in_array($ip, $ips, true)) {
-                    continue;
-                }
-
-                foreach ((array) data_get($monitor, 'data.page', []) as $path => $hits) {
-                    $aggregated[$path] = ($aggregated[$path] ?? 0) + (int) $hits;
-                }
-            }
-        });
-
-        arsort($aggregated);
+        $paths = $monitorIds->isEmpty()
+            ? collect()
+            : DB::table('monitor_page_hits')
+                ->whereIn('monitor_id', $monitorIds)
+                ->selectRaw('path, SUM(hits) as hits')
+                ->groupBy('path')
+                ->orderByDesc('hits')
+                ->get()
+                ->map(fn ($row) => ['path' => $row->path, 'hits' => (int) $row->hits])
+                ->values();
 
         return response()->json([
             'success' => true,
             'ip' => $ip,
-            'paths' => collect($aggregated)
-                ->map(fn ($hits, $path) => ['path' => $path, 'hits' => $hits])
-                ->values(),
+            'paths' => $paths,
         ]);
     }
 

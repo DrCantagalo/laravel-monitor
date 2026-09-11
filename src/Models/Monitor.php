@@ -32,10 +32,12 @@ class Monitor extends Model
     {
         static::saved(function (self $monitor) {
             $monitor->syncPageHits();
+            $monitor->syncVisitIps();
         });
 
         static::deleted(function (self $monitor) {
             DB::table('monitor_page_hits')->where('monitor_id', $monitor->id)->delete();
+            DB::table('monitor_visit_ips')->where('monitor_id', $monitor->id)->delete();
         });
     }
 
@@ -87,6 +89,43 @@ class Monitor extends Model
             );
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] tabela monitor_page_hits não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * Mesmo padrão de `syncPageHits()`, só que pra `data.ips` em vez de
+     * `data.page` — mantém `monitor_visit_ips` (uma linha por IP por
+     * Monitor, ver migration `create_monitor_visit_ips_table`) em
+     * sincronia, pra `MonitorController::getVisitorPaths()` (laravel-monitor
+     * 104) achar por índice quais Monitor viram um IP, em vez de escanear
+     * `data` de toda a tabela. `insertOrIgnore` em vez de `upsert`: ao
+     * contrário de `data.page` (hits pode mudar de valor pro mesmo path),
+     * um par (monitor_id, ip) não tem coluna própria pra atualizar — só
+     * existe ou não existe, então não faz sentido "atualizar", só evitar
+     * duplicata (a unique key já garante isso, `insertOrIgnore` só evita o
+     * erro de constraint quando o par já foi inserido num save anterior).
+     */
+    protected function syncVisitIps(): void
+    {
+        $ips = array_unique((array) data_get($this->data, 'ips', []));
+
+        if (empty($ips)) {
+            return;
+        }
+
+        $now = now();
+
+        $rows = array_map(fn ($ip) => [
+            'monitor_id' => $this->id,
+            'ip' => (string) $ip,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ], $ips);
+
+        try {
+            DB::table('monitor_visit_ips')->insertOrIgnore($rows);
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_visit_ips não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
         }
     }
 

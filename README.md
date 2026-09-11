@@ -1068,14 +1068,23 @@ ephemeral read token from `issueReadToken`).
     `filter=blocked`, as before.
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
-  missing/invalid), scans every `Monitor` whose `data.ips` contains that
-  IP and aggregates the paths (`data.page`) it's been seen on — lets you
+  missing/invalid), finds every `Monitor` that's ever seen that IP and
+  aggregates the paths (`data.page`) it's been seen on — lets you
   confirm visually that an IP is a scraper before blocking it. No
   pagination/caching: the result set per IP is small and this is a
   lookup triggered on demand (e.g. expanding a row in the dashboard), not
   loaded on every page view. Response: `{"success": true, "ip": "1.2.3.4",
   "paths": [{"path": "example.com/wp-admin/install.php", "hits": 3},
   ...]}`, sorted by hits descending.
+  - **Since `0.24.0`**: no longer scans and JSON-decodes every `Monitor`
+    row to find which ones contain the IP (same bug class fixed for
+    `getPages` in `0.23.0` — the cost used to be proportional to the size
+    of `Monitor`, not to that IP's activity). A `monitor_visit_ips` table
+    (one row per `Monitor`+ip, kept in sync by the same model event as
+    `monitor_page_hits`) is looked up by `ip` via an index to get the
+    relevant `monitor_id`s, then `monitor_page_hits` sums hits per path
+    for just those ids — both steps in SQL. Upgrading runs a one-time
+    backfill migration populating `monitor_visit_ips`.
 - **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
   `monitor_paths` rows with `status: 'trap'` (`{"path", "created_at"}`,

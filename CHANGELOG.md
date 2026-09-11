@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.24.0] - 2026-09-11
+### Fixed
+- **`getVisitorPaths` scanning the entire `Monitor` table on every call**:
+  same class of bug as `buildPagesResult()` before `0.23.0` — the action
+  used to `chunk(200)` and JSON-decode every `Monitor` row to find which
+  ones contained a given IP, so its cost was proportional to the total
+  size of `Monitor`, not to the number of visits from that IP. Not
+  reported as a timeout yet only because it runs less often (on-demand,
+  expanding a row in the dashboard's "Visitors" tab) than `getPages`
+  (every dashboard load), but it had the same failure mode on any
+  installation with real traffic volume.
+### Added
+- **`monitor_visit_ips` table**: one row per `Monitor`+ip (`monitor_id`,
+  `ip`), kept in sync automatically by the same `Monitor` model event as
+  `monitor_page_hits` (`0.23.0`). `getVisitorPaths` now looks up
+  `monitor_id`s by `ip` via an indexed query, then sums hits per path
+  from `monitor_page_hits` for just those ids — both steps in SQL, no
+  JSON decoding in PHP. Upgrading runs a one-time backfill migration
+  populating `monitor_visit_ips` from any pre-existing `Monitor.data`.
+
 ## [0.23.0] - 2026-09-10
 ### Fixed
 - **`getPages` timing out on installations with a large `Monitor` table**:
