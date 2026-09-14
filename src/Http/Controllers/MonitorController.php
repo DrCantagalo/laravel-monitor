@@ -625,6 +625,179 @@ class MonitorController extends Controller
     }
 
     /**
+     * laravel-monitor 132: índice sufixo -> UMA chave "host/path" de
+     * `monitor_page_hits` que casa (a primeira encontrada, `??=` —
+     * suficiente pra checagem de existência via `isset()`, o valor em si
+     * só serve de exemplo numa mensagem de erro). Mesma técnica de
+     * `PathsAuditor::liveTrafficSuffixIndex()` (duplicada aqui por ser a
+     * única classe fora de `PathsAuditor` que precisa disso), lida de
+     * `monitor_page_hits` (mantida em sincronia por `Monitor::booted()`)
+     * via uma única query agregada — nunca `Monitor::cursor()->each()`
+     * decodificando o JSON de `data` de toda a tabela `Monitor`.
+     *
+     * Usado por `hasNotFoundEvidence()` (`$notFound = true` — evidência de
+     * 404 pra `markPathSafe(s)`) e pelo guard de colisão com rota real de
+     * `resolveScraperPathTargets()` (`$notFound = false` — path já
+     * resolveu como página real em algum host).
+     */
+    private function pageHitsSuffixIndex(bool $notFound): array
+    {
+        $index = [];
+
+        DB::table('monitor_page_hits')
+            ->where('not_found', $notFound)
+            ->distinct()
+            ->pluck('path')
+            ->each(function (string $path) use (&$index) {
+                foreach ($this->pathSuffixes($path) as $suffix) {
+                    $index[$suffix] ??= $path;
+                }
+            });
+
+        return $index;
+    }
+
+    /**
+     * Mesma ideia de `pageHitsSuffixIndex()`, mas guardando TODAS as
+     * chaves que casam por sufixo (não só a primeira) — necessário quando,
+     * ao contrário de uma checagem booleana, é preciso depois achar TODOS
+     * os `monitor_id`s que geraram aquele hit (ver
+     * `resolveScraperPathTargets()`, que usa isto com `$notFound = true`
+     * pra achar os visitantes de um path flagado como trap).
+     *
+     * @return array<string, array<int, string>>
+     */
+    private function pageHitsSuffixIndexAll(bool $notFound): array
+    {
+        $index = [];
+
+        DB::table('monitor_page_hits')
+            ->where('not_found', $notFound)
+            ->distinct()
+            ->pluck('path')
+            ->each(function (string $path) use (&$index) {
+                foreach ($this->pathSuffixes($path) as $suffix) {
+                    $index[$suffix][] = $path;
+                }
+            });
+
+        return $index;
+    }
+
+    /**
+     * Núcleo compartilhado de `flagScraperPath`/`flagScraperPaths`
+     * (laravel-monitor 132): dado um lote de paths já normalizados,
+     * devolve (a) quais têm colisão com rota real (mesmo guard da task
+     * 101, `$path => $liveKey` que casou) e (b) pra cada path SEM colisão,
+     * o Set de IPs que já visitaram esse path como 404 (`$path => [$ip =>
+     * true]`), pra bloquear.
+     *
+     * Até esta task, tanto o singular quanto o lote faziam
+     * `Monitor::cursor()->each()` decodificando `data.page`/`data.not_found`/
+     * `data.ips` de TODA a tabela `Monitor` a cada chamada — mesma classe
+     * de bug já eliminada do lado de leitura nas tasks 103/104/131, só que
+     * nunca aplicada aqui. Agora: (1) o guard de colisão reusa
+     * `pageHitsSuffixIndex(false)` (path já resolveu como página real em
+     * algum host, mesmo índice que `PathsAuditor` já constrói pro check
+     * "traffic"); (2) os paths SEM colisão são casados contra
+     * `pageHitsSuffixIndexAll(true)` pra achar TODAS as chaves "host/path"
+     * com evidência de 404; (3) só os `monitor_id`s donos dessas chaves
+     * específicas (`monitor_page_hits`, indexado) são buscados — nunca a
+     * tabela inteira; (4) só ENTÃO `Monitor::whereIn('id', $ids)` (um
+     * SELECT pequeno, filtrado por PK) é lido, via `chunkById`, só pra
+     * extrair `data.ips` desses hits específicos (`monitor_page_hits` não
+     * guarda IP — ver migration `create_monitor_page_hits_table`).
+     *
+     * @param  array<int, string>  $paths  já normalizados (normalizePathInput)
+     * @return array{0: array<string, string>, 1: array<string, array<string, bool>>}
+     */
+    private function resolveScraperPathTargets(array $paths): array
+    {
+        $liveIndex = $this->pageHitsSuffixIndex(false);
+        $notFoundIndex = $this->pageHitsSuffixIndexAll(true);
+
+        $liveRouteMatches = [];
+        $matchedKeysByPath = [];
+
+        foreach ($paths as $path) {
+            if (isset($liveIndex[$path])) {
+                $liveRouteMatches[$path] = $liveIndex[$path];
+
+                continue;
+            }
+
+            $matchedKeysByPath[$path] = $notFoundIndex[$path] ?? [];
+        }
+
+        $allMatchedKeys = array_values(array_unique(array_merge([], ...array_values($matchedKeysByPath))));
+
+        // path (chave "host/path") -> lista de monitor_id que geraram um
+        // hit 404 nela. Uma query só, filtrada pelas chaves específicas já
+        // encontradas acima (normalmente um punhado) — não um scan da
+        // tabela inteira.
+        $keyToMonitorIds = [];
+
+        if (! empty($allMatchedKeys)) {
+            DB::table('monitor_page_hits')
+                ->whereIn('path', $allMatchedKeys)
+                ->where('not_found', true)
+                ->select('path', 'monitor_id')
+                ->orderBy('monitor_id')
+                ->chunk(1000, function ($rows) use (&$keyToMonitorIds) {
+                    foreach ($rows as $row) {
+                        $keyToMonitorIds[$row->path][] = $row->monitor_id;
+                    }
+                });
+        }
+
+        $monitorIdsNeeded = [];
+
+        foreach ($matchedKeysByPath as $keys) {
+            foreach ($keys as $key) {
+                foreach ($keyToMonitorIds[$key] ?? [] as $id) {
+                    $monitorIdsNeeded[$id] = true;
+                }
+            }
+        }
+
+        // monitor_id -> Set de IPs (data.ips) — só das linhas Monitor
+        // realmente relevantes (achadas acima), via chunkById (mesmo teto
+        // de memória previsível de pruneMonitors()), nunca ::all()/cursor()
+        // sobre a tabela toda.
+        $monitorIps = [];
+
+        if (! empty($monitorIdsNeeded)) {
+            Monitor::whereIn('id', array_keys($monitorIdsNeeded))
+                ->select('id', 'data')
+                ->chunkById(500, function ($monitors) use (&$monitorIps) {
+                    foreach ($monitors as $monitor) {
+                        foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
+                            if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP)) {
+                                $monitorIps[$monitor->id][$ip] = true;
+                            }
+                        }
+                    }
+                });
+        }
+
+        $ipsByPath = [];
+
+        foreach ($matchedKeysByPath as $path => $keys) {
+            $ips = [];
+
+            foreach ($keys as $key) {
+                foreach ($keyToMonitorIds[$key] ?? [] as $id) {
+                    $ips += $monitorIps[$id] ?? [];
+                }
+            }
+
+            $ipsByPath[$path] = $ips;
+        }
+
+        return [$liveRouteMatches, $ipsByPath];
+    }
+
+    /**
      * Incrementa o contador de versão lido por getPages — mutações
      * (flagScraperPath/unflagPath) invalidam todas as combinações de
      * parâmetros cacheadas de uma vez, já que os drivers array/file não
@@ -1375,20 +1548,17 @@ class MonitorController extends Controller
      * `data.page` dos registros de Monitor) são bloqueados em
      * `monitor_blocked_ips`, mesmo mecanismo de `updateBlockedIps`.
      *
-     * `Monitor::cursor()`, não `::all()`: mesmo memory exhaustion do task
-     * 88 (`getData`, ver comentário acima em `visitsTotal()`), só que
-     * nunca corrigido aqui porque a varredura por path precisa mesmo de
-     * ler `data.page`/`data.ips` linha a linha em PHP (não dá pra virar
-     * uma agregação SQL simples feito visitsTotal - o match é por sufixo
-     * de string contra as CHAVES do JSON). `cursor()` hidrata um Monitor
-     * por vez via generator em vez da collection inteira de uma vez,
-     * então o custo de memória fica O(1) em vez de O(linhas da tabela) -
-     * confirmado em produção (cantagalo.it, auto-monitorado, 31.7k linhas
-     * em `monitors`): `Monitor::all()` estourava os 128MB de
-     * `memory_limit` do PHP-FPM e devolvia um 500 sem corpo pro chamador,
-     * silenciosamente (só virou visível depois de instrumentar o lado
-     * chamador - home-page `TriageMonitorPathsJob` - com log da resposta
-     * completa, não só da exceção).
+     * Até a laravel-monitor 132 isto era `Monitor::cursor()->each()`
+     * decodificando `data.page`/`data.not_found`/`data.ips` de TODA a
+     * tabela `Monitor` a cada chamada — mesmo memory exhaustion do task 88
+     * (`getData`) evitado via `cursor()` em vez de `::all()`, mas ainda
+     * O(linhas de `Monitor`) em tempo, não em memória (confirmado
+     * estourando o timeout de 30s do home-page em produção — cantagalo.it,
+     * installation id=3, 41.452 linhas em `monitors`, ver
+     * `historico/laravel-monitor.md`). Agora delega pra
+     * `resolveScraperPathTargets()` (guard de colisão + IPs a bloquear via
+     * `monitor_page_hits`, sem decodificar JSON de `Monitor` fora dos
+     * `monitor_id`s realmente envolvidos).
      */
     protected function flagScraperPath(Request $request)
     {
@@ -1401,64 +1571,12 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $ipsToBlock = [];
-        $liveRouteMatch = null;
+        [$liveRouteMatches, $ipsByPath] = $this->resolveScraperPathTargets([$path]);
 
-        // `data.page` guarda chaves "host/path" - o mesmo path pode
-        // aparecer sob hosts diferentes (multi-subdomínio na mesma
-        // installation), por isso o match é feito pelo sufixo "/{$path}",
-        // não por igualdade exata da chave. `pathMatches()` (não ===/
-        // str_ends_with puros): `path` já veio normalizado pra minúsculo
-        // por `normalizePathInput()`, mas as chaves de `data.page`
-        // preservam a caixa exata da visita real - sem comparar
-        // case-insensitive aqui, flagar "File.php" não bloqueava os IPs de
-        // quem visitou "file.php" (e vice-versa), mesmo as duas caindo na
-        // mesma linha de `monitor_paths` (relatado em cantagalo.it,
-        // 2026-09-09).
-        //
-        // laravel-monitor 101: mesma passada também checa se alguma chave
-        // batendo no path já resolveu como página real (data.not_found
-        // vazio/false) em algum host - se sim, o path não é um scraper
-        // trap de verdade em lugar nenhum, é uma rota real que só coincide
-        // o sufixo, e flagar isso bloquearia (403) usuário de verdade em
-        // QUALQUER host da installation (isPathBlocked é host-agnóstico
-        // por design). Side effects (grava trap, chama registerOffense)
-        // só acontecem depois do loop inteiro, uma vez confirmado que não
-        // há colisão - senão um IP já teria sido punido antes de sabermos
-        // que o path inteiro vai ser rejeitado.
-        Monitor::cursor()->each(function (Monitor $monitor) use ($path, &$ipsToBlock, &$liveRouteMatch) {
-            $pages = (array) data_get($monitor, 'data.page', []);
-            $notFound = (array) data_get($monitor, 'data.not_found', []);
-
-            $matchedKeys = collect(array_keys($pages))->filter(
-                fn ($key) => $this->pathMatches($key, $path)
-            );
-
-            if ($matchedKeys->isEmpty()) {
-                return;
-            }
-
-            $liveKey = $matchedKeys->first(fn ($key) => empty($notFound[$key]));
-
-            if ($liveKey !== null) {
-                $liveRouteMatch = $liveKey;
-
-                return false;
-            }
-
-            foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
-                if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
-                    continue;
-                }
-
-                $ipsToBlock[$ip] = true;
-            }
-        });
-
-        if ($liveRouteMatch !== null) {
+        if (isset($liveRouteMatches[$path])) {
             return response()->json([
                 'success' => false,
-                'message' => "\"{$path}\" also resolves as a live route at \"{$liveRouteMatch}\" — refusing to flag it as a trap",
+                'message' => "\"{$path}\" also resolves as a live route at \"{$liveRouteMatches[$path]}\" — refusing to flag it as a trap",
             ], 422);
         }
 
@@ -1469,7 +1587,7 @@ class MonitorController extends Controller
 
         $blockedIps = [];
 
-        foreach (array_keys($ipsToBlock) as $ip) {
+        foreach (array_keys($ipsByPath[$path] ?? []) as $ip) {
             // laravel-monitor 96: honeypot é o sinal de maior confiança do
             // auto-block (um hit já basta, sem contagem de sinais) - segue
             // a mesma escada temporária/escalonada do resto do auto-block
@@ -1497,11 +1615,16 @@ class MonitorController extends Controller
      * `flagScraperPath` singular, uma chamada por path, é ruim pro
      * servidor do lado de cá (rate limit/WAF genérico) sem ganho nenhum.
      * Diferença de eficiência real vs. chamar o singular em loop: a
-     * varredura de `Monitor` pra achar IPs que visitaram os paths
-     * acontece UMA VEZ pra todo o lote aqui, não uma vez por path.
+     * varredura pra achar IPs que visitaram os paths acontece UMA VEZ pra
+     * todo o lote aqui, não uma vez por path.
      *
-     * `Monitor::cursor()`, não `::all()` - mesmo motivo do comentário em
-     * `flagScraperPath()` (singular) acima.
+     * Até a laravel-monitor 132 isto era `Monitor::cursor()->each()` sobre
+     * toda a tabela `Monitor` a cada chamada (mesmo motivo do comentário
+     * em `flagScraperPath()` (singular), só que aqui o lote (dezenas/
+     * centenas de paths do botão "Flag selected as trap" ou do
+     * `TriageMonitorPathsJob`) tornava o custo ainda mais crítico. Agora
+     * delega pra `resolveScraperPathTargets()`, chamada uma vez só com o
+     * lote inteiro (não um loop chamando-a por path).
      */
     protected function flagScraperPaths(Request $request)
     {
@@ -1539,53 +1662,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $ipsToBlockByPath = array_fill_keys($normalized, []);
-        $liveRouteMatches = [];
-
-        // Mesmo match por sufixo de flagScraperPath (path pode aparecer
-        // sob hosts diferentes na mesma installation) - só que checando
-        // contra a lista inteira de paths do lote de uma vez, não um só.
-        // Case-insensitive pelo mesmo motivo de flagScraperPath (singular)
-        // - ver comentário lá e em `pathMatches()`.
-        //
-        // laravel-monitor 101: mesma guarda contra colisão com rota real
-        // do singular, só que por path do lote - um path colidindo não
-        // aborta os outros (particiona flagged/rejected no final).
-        Monitor::cursor()->each(function (Monitor $monitor) use ($normalized, &$ipsToBlockByPath, &$liveRouteMatches) {
-            $pages = array_keys((array) data_get($monitor, 'data.page', []));
-            $notFound = (array) data_get($monitor, 'data.not_found', []);
-
-            foreach ($normalized as $path) {
-                if (isset($liveRouteMatches[$path])) {
-                    continue;
-                }
-
-                $matchedKeys = collect($pages)->filter(
-                    fn ($key) => $this->pathMatches($key, $path)
-                );
-
-                if ($matchedKeys->isEmpty()) {
-                    continue;
-                }
-
-                $liveKey = $matchedKeys->first(fn ($key) => empty($notFound[$key]));
-
-                if ($liveKey !== null) {
-                    $liveRouteMatches[$path] = $liveKey;
-                    unset($ipsToBlockByPath[$path]);
-
-                    continue;
-                }
-
-                foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
-                    if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
-                        continue;
-                    }
-
-                    $ipsToBlockByPath[$path][$ip] = true;
-                }
-            }
-        });
+        [$liveRouteMatches, $ipsByPath] = $this->resolveScraperPathTargets($normalized);
 
         $flagged = [];
         $rejected = [];
@@ -1605,7 +1682,7 @@ class MonitorController extends Controller
             Cache::forget("monitor:blocked-path:{$path}");
             $flagged[] = $path;
 
-            foreach (array_keys($ipsToBlockByPath[$path]) as $ip) {
+            foreach (array_keys($ipsByPath[$path] ?? []) as $ip) {
                 (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
                 $blockedIps[$ip] = true;
             }
@@ -1712,27 +1789,22 @@ class MonitorController extends Controller
     }
 
     /**
-     * Suporte de `markPathSafe()`: existe pelo menos um hit
-     * `data.not_found[$key] = true` pra alguma chave de `data.page` que
-     * bate por sufixo (`pathMatches()`) contra `$path`? `Monitor::cursor()`
-     * direto (não `->each()`) pra poder sair no primeiro achado via
-     * `return` - mesmo motivo O(1) de memória do `flagScraperPath` acima,
-     * só que aqui também O(1) melhor-caso de iterações quando a evidência
-     * está numa das primeiras linhas.
+     * Suporte de `markPathSafe()`: existe pelo menos um hit 404 registrado
+     * (`monitor_page_hits.not_found = true`) pra alguma chave "host/path"
+     * que bate por sufixo (`pathMatches()`) contra `$path`?
+     *
+     * Até a laravel-monitor 132 isto era `Monitor::cursor()` decodificando
+     * `data.not_found` de TODA a tabela `Monitor` a cada chamada — mesma
+     * classe de bug do lado de escrita já corrigida do lado de leitura nas
+     * tasks 103/104/131 (confirmado estourando o timeout de 30s do
+     * home-page em produção — cantagalo.it, installation id=3, 41.452
+     * linhas em `monitors`). Agora lê de `monitor_page_hits` (mantida em
+     * sincronia por `Monitor::booted()`) via `pageHitsSuffixIndex(true)` —
+     * mesma técnica de `PathsAuditor::liveTrafficSuffixIndex()`.
      */
     private function hasNotFoundEvidence(string $path): bool
     {
-        foreach (Monitor::cursor() as $monitor) {
-            $notFound = (array) data_get($monitor, 'data.not_found', []);
-
-            foreach ($notFound as $key => $wasNotFound) {
-                if ($wasNotFound && $this->pathMatches((string) $key, $path)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return isset($this->pageHitsSuffixIndex(true)[$path]);
     }
 
     /**
@@ -1741,6 +1813,15 @@ class MonitorController extends Controller
      * de bloqueio) - usada pelo botão "Mark selected as safe" (que hoje
      * fazia uma chamada por path via `Promise.all` no JS do dashboard) e
      * por `TriageMonitorPathsJob`.
+     *
+     * Até a laravel-monitor 132 a guarda por lote fazia uma única passada
+     * por `Monitor::cursor()` checando todos os paths pendentes de uma vez
+     * (saindo cedo só quando TODOS já tinham evidência) — ainda assim
+     * O(linhas de `Monitor`) no pior caso (lote grande, evidência só
+     * aparecendo nas últimas linhas), mesma classe de bug do singular.
+     * Agora reusa `pageHitsSuffixIndex(true)` (uma query agregada, não por
+     * path do lote) do mesmo jeito que `hasNotFoundEvidence()` usa pro
+     * singular.
      */
     protected function markPathsSafe(Request $request)
     {
@@ -1778,37 +1859,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        // laravel-monitor 101: mesma guarda de markPathSafe (singular),
-        // por lote - uma única passada por Monitor checando todos os
-        // paths pendentes de uma vez, saindo cedo (`return false`) assim
-        // que todos já tiverem evidência.
-        $pending = array_flip($normalized);
-        $withEvidence = [];
-
-        Monitor::cursor()->each(function (Monitor $monitor) use (&$pending, &$withEvidence) {
-            if (empty($pending)) {
-                return false;
-            }
-
-            $notFound = (array) data_get($monitor, 'data.not_found', []);
-
-            foreach (array_keys($pending) as $path) {
-                $hasEvidence = false;
-
-                foreach ($notFound as $key => $wasNotFound) {
-                    if ($wasNotFound && $this->pathMatches((string) $key, $path)) {
-                        $hasEvidence = true;
-
-                        break;
-                    }
-                }
-
-                if ($hasEvidence) {
-                    $withEvidence[$path] = true;
-                    unset($pending[$path]);
-                }
-            }
-        });
+        $withEvidence = $this->pageHitsSuffixIndex(true);
 
         $marked = [];
         $rejected = [];

@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.26.0] - 2026-09-14
+### Fixed
+- **`flagScraperPath(s)`/`markPathSafe(s)` timing out on installations
+  with a large `Monitor` table**: same class of bug as
+  `getPages`/`getVisitorPaths`/`PathsAuditor::audit()` before
+  `0.23.0`-`0.25.0`, now on the write side. Reproduced in production
+  (cantagalo.it, installation id=3, 41,452 `Monitor` rows) via a real
+  "Triagem IA" run: 15 paths correctly flagged as trap via
+  `flagScraperPaths`, but all 31 `markPathsSafe` paths in the same batch
+  failed with `cURL error 28: Operation timed out after 30033
+  milliseconds`. `markPathSafe`/`markPathsSafe` (via
+  `hasNotFoundEvidence()`) and `flagScraperPath`/`flagScraperPaths` (both
+  the live-route collision guard from `0.21.0` and the IP-collection
+  scan) still did `Monitor::cursor()->each()` decoding `data` for the
+  *entire* `monitors` table on every call.
+### Changed
+- `hasNotFoundEvidence()` (`markPathSafe`/`markPathsSafe`) now checks a
+  suffix index built from `monitor_page_hits` (`WHERE not_found = true`,
+  same technique as `PathsAuditor::liveTrafficSuffixIndex()`) instead of
+  scanning `Monitor.data.not_found` row by row.
+- `flagScraperPath`/`flagScraperPaths`' live-route collision guard now
+  reuses the same suffix-index technique against
+  `monitor_page_hits WHERE not_found = false`. IP collection (which
+  `monitor_page_hits` cannot answer on its own — it doesn't store IPs)
+  now resolves the small set of `monitor_page_hits` rows matching the
+  flagged path(s) first, then reads `Monitor.data.ips` only for the
+  `monitor_id`s those specific rows point to, via `chunkById` — never a
+  scan of the whole table. Report/behavior/response shape are unchanged,
+  only the query cost changes: from `O(monitors rows)` to `O(matching
+  monitor_page_hits rows)`. See `README.md` for the technique.
+
 ## [0.25.0] - 2026-09-11
 ### Fixed
 - **`PathsAuditor::audit()` (`auditPaths`/`monitor:audit-paths`) timing

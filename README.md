@@ -430,6 +430,19 @@ only ever came from `getPages`.
     `memory_limit` in production at ~31.7k rows, returning a bare 500
     with no body. Now uses `Monitor::cursor()` (one row hydrated at a
     time), same matching logic, no response shape change.
+  - **Fixed in `0.26.0`**: `Monitor::cursor()` still meant the guard and
+    the IP scan cost time proportional to the whole `monitors` table on
+    every call (same bug class fixed for `getPages`/`getVisitorPaths`/
+    `PathsAuditor::audit()` in `0.23.0`-`0.25.0`, now on the write side —
+    confirmed timing out in production at ~41k `Monitor` rows). Both the
+    live-route guard and the IP lookup now read from `monitor_page_hits`
+    (`0.23.0`): the guard is a suffix-index lookup against
+    `WHERE not_found = false` (same technique as
+    `PathsAuditor::liveTrafficSuffixIndex()`), and the IP scan resolves
+    the small set of matching `monitor_page_hits` rows
+    (`WHERE not_found = true`) first, then reads `Monitor.data.ips` only
+    for those specific `monitor_id`s. Same matching logic, no response
+    shape change.
 
 - **`flagScraperPaths`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version — `POST /monitor/handler?action=flagScraperPaths` with
@@ -453,6 +466,12 @@ only ever came from `getPages`.
     is rejected and reported under `rejected` (with why), without
     aborting the rest of the batch. `rejected` is always present (empty
     array when nothing was refused).
+  - **Fixed in `0.26.0`**: same fix as `flagScraperPath` above, but it
+    matters even more here — the whole-table scan used to happen once per
+    batch (still `O(monitors rows)`, not `O(paths in the batch)`), so a
+    large batch (e.g. `TriageMonitorPathsJob`) made the fixed per-call
+    cost of the old scan land on every triage run. Same `resolveScraperPathTargets()`
+    helper as the singular version, called once for the whole batch.
 
 - **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
   `POST /monitor/handler?action=unflagPath` with
@@ -485,6 +504,13 @@ only ever came from `getPages`.
     "\"...\" has no recorded 404 — marking it safe would not protect
     anything"}` (422) when there's no such evidence. No override in this
     version.
+  - **Fixed in `0.26.0`**: the guard used to scan and JSON-decode
+    `Monitor.data.not_found` row by row (`Monitor::cursor()`) — same bug
+    class fixed for `getPages`/`getVisitorPaths`/`PathsAuditor::audit()`
+    in `0.23.0`-`0.25.0`, now on the write side. Now a suffix-index
+    lookup against `monitor_page_hits WHERE not_found = true` (same
+    technique as `PathsAuditor::liveTrafficSuffixIndex()`), no `Monitor`
+    scan at all. Same guard behavior, no response shape change.
 - **`markPathsSafe`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version of `markPathSafe` — `POST
   /monitor/handler?action=markPathsSafe` with `{"paths":
@@ -498,6 +524,11 @@ only ever came from `getPages`.
   - **Guard since `0.21.0`**: same 404-evidence check as `markPathSafe`,
     applied per path — a path with no recorded 404 anywhere is rejected
     and reported under `rejected`, without aborting the rest of the
+    batch.
+  - **Fixed in `0.26.0`**: same fix as `markPathSafe` above — the
+    per-batch `Monitor` scan (still `O(monitors rows)` even though it
+    checked every path in the batch in one pass) is now a single suffix-
+    index lookup against `monitor_page_hits`, built once for the whole
     batch.
 
 - **`unmarkPathSafe`** (same auth): reverts it — `POST
