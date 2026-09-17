@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.29.0] - 2026-09-17
+### Removed
+- **Breaking: IP `safe` status removed** (`monitor_ip_stats.safe`,
+  `markIpSafe`/`unmarkIpSafe` actions) — IP is not a stable enough
+  identity (dynamic pools, CGNAT, recycled IPs) to justify a permanent
+  whitelist based on it alone, unlike blocking (reversible via
+  `unblockIp`). Automatic blocking already covers the high-confidence
+  case on its own (`auto_block_signal_threshold`); anyone reviewing other
+  candidates uses the `flagged` filter (unchanged) and blocks manually if
+  they judge it a scraper — there is no more "discard"/"not a scraper"
+  action for that tab. Path `safe` (`monitor_paths`/`markPathSafe`) is
+  **unaffected** — a path is a stable identity, unlike an IP. Migration
+  drops the `safe` column from `monitor_ip_stats`.
+### Changed
+- **`updateBlockedIps` (manual IP blocking) is now escalating, not
+  always-permanent**: it now goes through the same mechanism as
+  automatic blocking (`ScraperBlocker::registerOffense`, `source:
+  'manual'`) instead of creating a permanent `BlockedIp` row directly on
+  the first block. This unifies manual and automatic reputation into a
+  single escalation ladder — recidivism from either source accumulates
+  toward the same `lifetime_offense_count`, until it becomes permanent
+  (`auto_block_permanent_after_lifetime_offenses`, default 10, shared
+  config with the automatic path). `unblockIp` is unchanged: it still
+  deletes the `monitor_blocked_ips` row outright (full reset), since a
+  manual unblock means "this should never have been blocked".
+
 ## [0.28.0] - 2026-09-17
 ### Fixed
 - **"Visits" counter overcounted repeat page views within the same

@@ -581,37 +581,52 @@ that weren't (or don't need to be) tied to a specific path.
   `ips` is missing/empty/not an array; `{"success": false, "message": "No valid IPs provided"}`
   (422) when every entry failed validation.
 - Persisted in `monitor_blocked_ips` with `source: 'manual'` (vs.
-  `source: 'scraper-path'` for IPs blocked automatically by
-  `flagScraperPath`) — same table, so both paths compose: an IP blocked
-  manually stays blocked even if later also matched by a path flag, and
-  vice versa. The per-IP block-check cache
-  (`config('monitor.blocked_ip_cache_ttl')`, default 60s) is invalidated
-  immediately for every IP in the request, so the block takes effect on
-  the very next request instead of waiting out the cache TTL.
+  `source: 'scraper-path'`/`'auto-signal'`/etc. for IPs blocked
+  automatically) — same table, same mechanism (`ScraperBlocker::registerOffense`,
+  see below), so every source composes into one reputation history per IP.
+  The per-IP block-check cache (`config('monitor.blocked_ip_cache_ttl')`,
+  default 60s) is invalidated immediately for every IP in the request, so
+  the block takes effect on the very next request instead of waiting out
+  the cache TTL.
 
 - **`unblockIp`** (same auth as `updateBlockedIps`): reverts it (and any
-  `flagScraperPath` block on that IP) — `POST /monitor/handler?action=unblockIp`
+  automatic block on that IP) — `POST /monitor/handler?action=unblockIp`
   with `{"ip": "203.0.113.7"}` removes the IP from `monitor_blocked_ips`
   (whatever its `source`) and clears the block-check cache immediately.
   Response: `{"success": true, "ip": "...", "was_blocked": true|false}`
   (`false` when the IP wasn't blocked to begin with — not an error), or
   `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
-  is missing/invalid.
+  is missing/invalid. Unlike `updateBlockedIps`, `unblockIp` does **not**
+  go through `ScraperBlocker` — it deletes the `monitor_blocked_ips` row
+  outright, resetting `strike_count`/`lifetime_offense_count` completely.
+  A manual unblock normally means "this should never have been blocked"
+  (an internal test IP, a false positive), so resetting the history is
+  the right behavior — different from letting a temporary block expire
+  on its own.
 
-**Note**: `updateBlockedIps`/`unblockIp` never touch `blocked_until`/
-`strike_count`/`lifetime_offense_count`/`last_offense_at` — those columns
-only exist for the automatic path below. A manually blocked IP stays
-permanent exactly as before, with no expiration and no escalation.
+**Since `0.29.0`**: `updateBlockedIps` goes through the same escalating
+mechanism as automatic blocking (see below) instead of creating a
+permanent `BlockedIp` directly — see "Temporary, escalating IP blocking"
+for what that means for a manually blocked IP (it now expires and can
+become permanent through repeated offenses, same as an automatically
+blocked one). `unblockIp` is unchanged (see above).
 
 ## Temporary, escalating IP blocking (`ScraperBlocker`)
 
 Since `0.15.0`, `monitor_blocked_ips` supports **temporary, escalating**
 blocks (`ScraperBlocker::registerOffense(string $ip, string $source)`),
-modeled after fail2ban/CrowdSec rather than a static blocklist. This is the
-mechanism behind *automatic* blocking (honeypot hits, scraper-signal
+modeled after fail2ban/CrowdSec rather than a static blocklist. Originally
+only the *automatic* path used this (honeypot hits, scraper-signal
 thresholds — see the changelog entries for the versions that wire each
-trigger up); manual blocking via `updateBlockedIps`/`blockIps` is
-unaffected and stays permanent (see note above).
+trigger up); **since `0.29.0`, manual blocking via `updateBlockedIps` uses
+the exact same mechanism** (`source: 'manual'`) — unifying manual and
+automatic reputation into a single escalation ladder: recidivism from
+either source (an IP re-blocked manually after a previous block expired,
+or re-flagged automatically) accumulates toward the same
+`lifetime_offense_count`, eventually becoming permanent
+(`auto_block_permanent_after_lifetime_offenses`, default 10) regardless of
+which path triggered each individual offense. `unblockIp` stays outside
+this ladder — see above.
 
 Why temporary: IPs get reused over time (CGNAT, dynamic residential IPs,
 elastic cloud IPs), so a permanent block from one bad actor can end up
@@ -980,40 +995,21 @@ no existing row and both try to `create()`, and the second one violated
 the `ip` unique constraint and threw an uncaught `QueryException` (a real
 500 for the visitor/bot making the request). `first_seen`/`created_at`
 are only ever written on insert (never touched by the update clause, so
-they survive every later visit); `safe` is left out of the upsert
-entirely, same as before — only `markIpSafe`/`unmarkIpSafe` set it.
+they survive every later visit).
 
-Since `0.8.0`, the table also carries a `safe` column (boolean, default
-`false`) — a persisted, human-reviewed verdict on that IP, set/cleared
-via `markIpSafe`/`unmarkIpSafe` (see below) and **never** touched by
-`IpStat::recordVisit()`. This matters because `flagged`/`flagged_signals`
-are not cumulative (see above) — a bot-like burst from an IP a human
-already reviewed and marked safe can still flip `flagged` back to `true`
-on a later request. `safe` is what actually survives that: it's the
-field `getVisitorsByIp`'s review queue (`filter=flagged` and its default
-ordering) respects, not the raw `flagged` column.
-
-- **`markIpSafe`** (`Authorization: Bearer <local_token>`, same auth as
-  `markPathSafe`/`flagScraperPath` — never accepted with the ephemeral
-  read token): `POST /monitor/handler?action=markIpSafe` with
-  `{"ip": "203.0.113.7"}` sets `safe = true` on the matching
-  `monitor_ip_stats` row (`IpStat::updateOrCreate`, so it also works for
-  an IP with no tracked visits yet — e.g. pre-registering a known
-  partner IP). Doesn't block or unblock anything; purely a review-state
-  flag. Response: `{"success": true, "ip": "...", "safe": true}`, or
-  `{"success": false, "message": "No valid IP provided"}` (422) if `ip`
-  is missing/invalid.
-- **`unmarkIpSafe`** (same auth): reverts it — `POST
-  /monitor/handler?action=unmarkIpSafe` with `{"ip": "203.0.113.7"}` sets
-  `safe = false` on the matching row (the row itself is never deleted —
-  unlike `unmarkPathSafe`, `monitor_ip_stats` rows carry real visit
-  history, not just a review flag). Response: `{"success": true, "ip":
-  "...", "was_safe": true|false}` (`false` when the IP wasn't marked
-  safe to begin with — not an error).
+**Removed in `0.29.0`**: the table carried a `safe` column (boolean, a
+persisted human-reviewed verdict on an IP, set/cleared via `markIpSafe`/
+`unmarkIpSafe`) between `0.8.0` and `0.28.x`. Dropped as a design
+decision — IP is not a stable enough identity (dynamic pools, CGNAT,
+recycled IPs) to justify a permanent whitelist based on it alone,
+unlike `monitor_paths`' `safe` status (see "Path review state" above),
+which is unaffected. There is no replacement action: someone reviewing
+the `flagged` queue in `getVisitorsByIp` and deciding an IP isn't a
+scraper simply moves on — there's no dedicated "discard" action anymore,
+just block (via `updateBlockedIps`) if it is one.
 
 See "Paginated visitor/blocklist listing" below for the read/pagination
-action on top of this table (`getVisitorsByIp`), including how `safe`
-affects its `flagged` filter and default ordering.
+action on top of this table (`getVisitorsByIp`).
 
 ## Paginated page listing (`getPages`)
 
@@ -1106,17 +1102,16 @@ ephemeral read token from `issueReadToken`).
   approximation as `getPages`). Response: `{"success": true, "data":
   [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
   "last_seen": "...", "flagged": false, "flagged_signals": null,
-  "safe": false, "blocked": false}, ...], "meta": {"page", "per_page",
+  "blocked": false}, ...], "meta": {"page", "per_page",
   "total", "last_page"}}`.
-  - Since `0.8.0`: `filter=flagged` now additionally excludes IPs marked
-    `safe` (`where('flagged', true)->where('safe', false)`) — an IP a
-    human already reviewed and marked safe via `markIpSafe` no longer
-    reappears in this queue, even if a later request from it flips the
-    (non-cumulative) `flagged` column back to `true`. Regardless of which
-    `filter` is requested, results are also always ordered with
-    `flagged = true AND safe = false` rows first (the actual "needs
-    review" work queue), falling back to the existing `visit_count desc`
-    ordering within each group.
+  - Regardless of which `filter` is requested, results are always
+    ordered with `flagged = true` rows first (the "possible scraper"
+    work queue), falling back to the existing `visit_count desc`
+    ordering within each group. **Removed in `0.29.0`**: between `0.8.0`
+    and `0.28.x`, this also excluded/deprioritized IPs marked `safe` —
+    there is no `safe` status for IPs anymore (see "Per-IP stats"
+    above), so `filter=flagged` and the default ordering now depend only
+    on `flagged`.
   - Since `0.12.0`: `filter=flagged` also excludes IPs already present in
     `monitor_blocked_ips` — an IP that's already been blocked has already
     been confirmed as a scraper, so it no longer needs to show up in the

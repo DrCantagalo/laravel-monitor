@@ -100,12 +100,6 @@ class MonitorController extends Controller
             case 'unblockIp':
                 return $this->unblockIp($request);
 
-            case 'markIpSafe':
-                return $this->markIpSafe($request);
-
-            case 'unmarkIpSafe':
-                return $this->unmarkIpSafe($request);
-
             case 'flagScraperPath':
                 return $this->flagScraperPath($request);
 
@@ -867,14 +861,14 @@ class MonitorController extends Controller
      * Desde a task 80: `flagged`/`flagged_signals` continuam refletindo só
      * o request mais recente daquele IP (ver IpStat::recordVisit) — não
      * cumulativo, pode voltar a `true` no próximo request mesmo depois de
-     * um humano revisar o IP. `safe` (setado via markIpSafe, nunca tocado
-     * por recordVisit) é quem manda na fila de revisão: `filter=flagged`
-     * exclui IPs já marcados `safe`, e a ordenação sempre prioriza
-     * `flagged = true AND safe = false` (a fila de trabalho de verdade)
-     * antes de cair no desempate por `visit_count`, não importa o filtro
-     * pedido. Desde a task 91: `filter=flagged` também exclui IPs já em
-     * `monitor_blocked_ips` — um IP bloqueado já foi confirmado como
-     * scraper, não precisa reaparecer na fila de "possível".
+     * um humano revisar o IP. Desde a task 91: `filter=flagged` também
+     * exclui IPs já em `monitor_blocked_ips` — um IP bloqueado já foi
+     * confirmado como scraper, não precisa reaparecer na fila de
+     * "possível". Desde a task 136: não existe mais `safe` de IP (era uma
+     * whitelist permanente baseada só num IP — identidade instável demais
+     * pra isso, ver CHANGELOG `[0.29.0]`) — quem quiser descartar um
+     * candidato da fila de revisão simplesmente ignora, sem ação
+     * dedicada; `flagged` continua existindo pra quem quiser garimpar.
      */
     protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
     {
@@ -891,28 +885,24 @@ class MonitorController extends Controller
         $blockedIps = BlockedIp::pluck('ip');
 
         match ($filter) {
-            // safe = false: um IP marcado safe já foi revisado por um
-            // humano — não deve reaparecer na fila de "flagged" só porque
-            // a heurística automática disparou de novo num request
-            // seguinte (ver IpStat::recordVisit). whereNotIn($blockedIps):
-            // um IP já bloqueado já foi confirmado como scraper, não deve
-            // reaparecer na fila de "possível" (task 91).
-            'flagged' => $query->where('flagged', true)->where('safe', false)->whereNotIn('ip', $blockedIps),
+            // whereNotIn($blockedIps): um IP já bloqueado já foi
+            // confirmado como scraper, não deve reaparecer na fila de
+            // "possível" (task 91).
+            'flagged' => $query->where('flagged', true)->whereNotIn('ip', $blockedIps),
             'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
             'blocked' => $query->whereIn('ip', $blockedIps),
             default => null,
         };
 
         $paginator = $query
-            // flagged=true AND safe=false primeiro (fila de revisão real),
-            // resto depois — dentro de cada grupo, desempata por
-            // visit_count desc, igual antes da task 80. CASE WHEN em vez
-            // de orderByRaw por coluna booleana composta: nem MySQL nem
-            // SQLite deixam ordenar direto por uma expressão booleana
-            // combinada sem isso.
-            ->orderByRaw('CASE WHEN flagged = 1 AND safe = 0 THEN 0 ELSE 1 END')
+            // flagged=true primeiro (fila de revisão real), resto depois
+            // — dentro de cada grupo, desempata por visit_count desc,
+            // igual antes da task 80. CASE WHEN em vez de orderByRaw por
+            // coluna booleana: nem MySQL nem SQLite deixam ordenar direto
+            // por uma expressão booleana sem isso.
+            ->orderByRaw('CASE WHEN flagged = 1 THEN 0 ELSE 1 END')
             ->orderByDesc('visit_count')
-            ->paginate($perPage, ['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals', 'safe'], 'page', $page);
+            ->paginate($perPage, ['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'], 'page', $page);
 
         $items = collect($paginator->items())->map(function (IpStat $stat) use ($blockedIps) {
             return [
@@ -922,7 +912,6 @@ class MonitorController extends Controller
                 'last_seen' => optional($stat->last_seen)->toIso8601String(),
                 'flagged' => $stat->flagged,
                 'flagged_signals' => $stat->flagged_signals,
-                'safe' => $stat->safe,
                 'blocked' => $blockedIps->contains($stat->ip),
             ];
         })->values();
@@ -1334,10 +1323,16 @@ class MonitorController extends Controller
     }
 
     /**
-     * Bloqueia uma lista de IPs (persistidos em `monitor_blocked_ips`,
-     * checados em `MonitorMethod` antes do resto do tracking). Fonte fixa
-     * em 'manual' por enquanto — schema já preparado pra outras origens
-     * (blacklist coletiva, feed externo de reputação) no futuro.
+     * Bloqueia uma lista de IPs. Desde a task 136: passa pelo MESMO
+     * mecanismo escalonado do bloqueio automático
+     * (`ScraperBlocker::registerOffense`, source `'manual'`) em vez de
+     * criar um `BlockedIp` permanente direto — unifica reputação manual +
+     * automática numa escada só: reincidência (automática OU manual,
+     * depois de um bloqueio anterior expirado) soma pro mesmo
+     * `lifetime_offense_count`, até virar permanente
+     * (`auto_block_permanent_after_lifetime_offenses`). `registerOffense`
+     * já cuida de invalidar o cache de bloqueio (`Cache::forget`) e o
+     * `ListingsCache` por IP, então não precisa repetir aqui.
      */
     protected function updateBlockedIps(Request $request)
     {
@@ -1351,14 +1346,14 @@ class MonitorController extends Controller
         }
 
         $blocked = [];
+        $scraperBlocker = new ScraperBlocker;
 
         foreach ($ips as $ip) {
             if (! is_string($ip) || ! filter_var($ip, FILTER_VALIDATE_IP)) {
                 continue;
             }
 
-            BlockedIp::firstOrCreate(['ip' => $ip], ['source' => 'manual']);
-            Cache::forget("monitor:blocked-ip:{$ip}");
+            $scraperBlocker->registerOffense($ip, 'manual');
             $blocked[] = $ip;
         }
 
@@ -1368,8 +1363,6 @@ class MonitorController extends Controller
                 'message' => 'No valid IPs provided',
             ], 422);
         }
-
-        $this->invalidateListingsCache();
 
         return response()->json([
             'success' => true,
@@ -1401,80 +1394,6 @@ class MonitorController extends Controller
             'success' => true,
             'ip' => $ip,
             'was_blocked' => $removed,
-        ]);
-    }
-
-    /**
-     * Marca um IP como `safe` em `monitor_ip_stats`, tirando-o da fila de
-     * revisão de `getVisitorsByIp` (`filter=flagged`/ordenação por
-     * prioridade) mesmo que `IpStat::recordVisit` volte a marcar
-     * `flagged = true` num request seguinte daquele IP — `flagged`/
-     * `flagged_signals` continuam refletindo só o último request (não
-     * cumulativo, ver IpStat::recordVisit), mas `safe` nunca é tocado por
-     * lá, só por esta action/`unmarkIpSafe`. Não tem nenhum efeito de
-     * bloqueio (diferente de updateBlockedIps/flagScraperPath); é só o
-     * status de revisão exposto por getVisitorsByIp/buildVisitorsResult -
-     * mesma relação que markPathSafe tem com flagScraperPath.
-     *
-     * `updateOrCreate` em vez do padrão manual de recordVisit
-     * (first()+save()/create()): um IP pode ser marcado safe antes de
-     * qualquer visita registrada (ex: IP de um parceiro conhecido,
-     * cadastrado preventivamente) — quando a linha ainda não existe, os
-     * demais campos (`visit_count`, `flagged`, `first_seen`, `last_seen`)
-     * ficam com o default da migration; quando já existe, só `safe` é
-     * sobrescrito, preservando o histórico de visitas dessa linha.
-     */
-    protected function markIpSafe(Request $request)
-    {
-        $ip = (string) $request->input('ip', '');
-
-        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No valid IP provided',
-            ], 422);
-        }
-
-        IpStat::updateOrCreate(['ip' => $ip], ['safe' => true]);
-
-        $this->invalidateListingsCache();
-
-        return response()->json([
-            'success' => true,
-            'ip' => $ip,
-            'safe' => true,
-        ]);
-    }
-
-    /**
-     * Reverte markIpSafe: volta `safe` pra `false` na linha de
-     * `monitor_ip_stats` correspondente (não apaga a linha — ao contrário
-     * de unmarkPathSafe/monitor_path_reviews, aqui `safe` é só mais uma
-     * coluna de uma linha que já carrega histórico de visitas real, não
-     * um registro dedicado só pra existir/não-existir). Sem efeito se o
-     * IP não tiver linha em `monitor_ip_stats` ainda.
-     */
-    protected function unmarkIpSafe(Request $request)
-    {
-        $ip = (string) $request->input('ip', '');
-
-        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No valid IP provided',
-            ], 422);
-        }
-
-        $wasSafe = IpStat::where('ip', $ip)->where('safe', true)->exists();
-
-        IpStat::where('ip', $ip)->update(['safe' => false]);
-
-        $this->invalidateListingsCache();
-
-        return response()->json([
-            'success' => true,
-            'ip' => $ip,
-            'was_safe' => $wasSafe,
         ]);
     }
 

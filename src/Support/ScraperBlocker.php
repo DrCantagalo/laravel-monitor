@@ -9,10 +9,13 @@ use Illuminate\Support\Facades\Cache;
 /**
  * Bloqueio temporário e escalonado (laravel-monitor 95), inspirado em
  * fail2ban/CrowdSec: cada ofensa aumenta a duração do bloqueio
- * exponencialmente, e um período sem ofensas decai o contador de volta. Só
- * usado pelo caminho automático (honeypot, sinais de scraper — tasks
- * 96/97); o bloqueio manual (`updateBlockedIps`/`blockIps`) continua
- * permanente e não passa por aqui, ver README "Manual IP blocking".
+ * exponencialmente, e um período sem ofensas decai o contador de volta.
+ * Usado tanto pelo caminho automático (honeypot, sinais de scraper —
+ * tasks 96/97) quanto, desde a task 136, pelo bloqueio manual via
+ * dashboard (`updateBlockedIps`, source `'manual'`) — unifica reputação
+ * manual + automática numa escada só: reincidência de qualquer origem
+ * soma pro mesmo `lifetime_offense_count`, até virar permanente. Ver
+ * README "Manual IP blocking".
  *
  * Duas contagens separadas de propósito, não uma só — achado discutindo
  * o desenho depois do primeiro rascunho: com uma contagem só que decai E

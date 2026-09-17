@@ -10,7 +10,7 @@ class IpStat extends Model
     protected $table = 'monitor_ip_stats';
 
     protected $fillable = [
-        'ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals', 'safe',
+        'ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals',
     ];
 
     protected $casts = [
@@ -18,7 +18,6 @@ class IpStat extends Model
         'last_seen' => 'datetime',
         'flagged' => 'boolean',
         'flagged_signals' => 'array',
-        'safe' => 'boolean',
     ];
 
     /**
@@ -28,11 +27,7 @@ class IpStat extends Model
      * `ScraperSignalDetector` pra gravar em `data.flags.*` no `Monitor`.
      * `flagged`/`flagged_signals` refletem sempre o request mais recente
      * desse IP, não um OR acumulado — mesma semântica de
-     * `data.flags.scraper` no Monitor. `safe` nunca é tocado aqui (só por
-     * markIpSafe/unmarkIpSafe no MonitorController) - continua valendo
-     * mesmo que o request mais recente desse IP tenha voltado a marcar
-     * `flagged = true` (ver buildVisitorsResult, que é quem de fato
-     * respeita `safe` ao decidir o que expor como fila de revisão).
+     * `data.flags.scraper` no Monitor.
      *
      * Task 90: até a 0.10.0 este método fazia `where('ip',
      * $ip)->first()` seguido de `create()`/`save()` — não-atômico. Duas
@@ -46,13 +41,10 @@ class IpStat extends Model
      * DUPLICATE KEY UPDATE` no MySQL, `ON CONFLICT` no SQLite/Postgres) —
      * mesmo padrão já usado por `MonitorMethod::recordBlockedAttempt()`
      * pra `monitor_block_results`. `first_seen`/`created_at` só entram no
-     * array de insert (nunca no de update), preservando o valor original
-     * em conflitos; `safe` fica de fora dos dois arrays de propósito —
-     * usa o default `false` da coluna no insert, e nunca é tocado num
-     * conflito (só markIpSafe/unmarkIpSafe mexem nele). Bypassa os casts
-     * do Eloquent (upsert() é query builder puro), por isso o
-     * `json_encode` manual de `flagged_signals` e o cast de `$flagged`
-     * pra int abaixo.
+     * array de insert (nunca no de update), preservando o valor
+     * original em conflitos. Bypassa os casts do Eloquent (upsert() é
+     * query builder puro), por isso o `json_encode` manual de
+     * `flagged_signals` e o cast de `$flagged` pra int abaixo.
      */
     public static function recordVisit(string $ip, bool $flagged, array $signals): void
     {
