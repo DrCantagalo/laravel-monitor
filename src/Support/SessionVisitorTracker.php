@@ -106,13 +106,6 @@ class SessionVisitorTracker
                 $data['page'] = $data['page'] ?? [];
                 $data['page'][$path] = ($data['page'][$path] ?? 0) + 1;
                 $data['ua'] = $userAgent;
-                // Todo request rastreado conta como uma visita, igual aos
-                // dois caminhos de reconexão via remember-me acima
-                // (Monitor::newVisit) — sem isso, `data.visits` nunca
-                // avançava no caminho mais comum (sessão já rastreada),
-                // deixando o contador de "Visits" por usuário do dashboard
-                // sempre travado em 1 (task 92).
-                $data['visits'] = ($data['visits'] ?? 0) + 1;
 
                 if ($notFound) {
                     $data['not_found'] = $data['not_found'] ?? [];
@@ -152,6 +145,7 @@ class SessionVisitorTracker
             'ips' => [$ip],
             'ua' => $userAgent,
             'id-token' => $rememberToken,
+            'visits' => 1,
             'flags' => [
                 'scraper' => $isScraper,
                 'scraper_signals' => $signals,

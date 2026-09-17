@@ -90,7 +90,13 @@ loading a full `Monitor` row into PHP:
   device/browser (see "Remember-me" above).
 - **`visits_total`**: `SUM` of `data.visits` across every row, computed in
   SQL directly on the JSON column (`JSON_EXTRACT`/`json_extract`
-  depending on the driver) — never loads a row into PHP.
+  depending on the driver) — never loads a row into PHP. `data.visits`
+  counts one visit per **new PHP session** for that visitor, not per page
+  view — a visitor browsing multiple pages in the same session only
+  counts as one visit (since `0.28.0`; before that, every request within
+  an already-tracked session incorrectly incremented `data.visits`, see
+  CHANGELOG `[0.28.0]` and `monitor:recalculate-visits` below for the
+  backfill).
 - **`sessions_total`**: `SUM` of the length of `data.sessions` per row
   (`JSON_LENGTH`/`json_array_length`), also computed in SQL. This is a
   count of recorded sessions, **not** a cross-row deduplicated count —
@@ -1216,6 +1222,26 @@ delete for it), so running it often is cheap and keeps the delay between
 a block and purging that IP's history low. The command alone does
 nothing unless something actually schedules it — it's not automatic on
 its own.
+
+### `monitor:recalculate-visits` (since `0.28.0`)
+
+One-time backfill for installations updating from before `0.28.0`, when
+`data.visits` counted every page view within an already-tracked session
+instead of only new sessions (see CHANGELOG `[0.28.0]`) — existing
+`Monitor` rows carry an inflated `visits` value from that bug.
+`data.sessions` was always deduplicated correctly (not affected by the
+bug), so `count(data.sessions)` is already the correct `visits` value for
+any existing row:
+
+```
+php artisan monitor:recalculate-visits
+```
+
+Walks the `Monitor` table in chunks (never `::all()`/`cursor()` over the
+whole table, same strategy as `monitor:prune`) and sets `data.visits =
+count(data.sessions)` on every row where it doesn't already match. **Run
+this once, manually, after `composer update` to `0.28.0` or later** —
+same treatment as a new migration.
 
 ## Advanced usage
 

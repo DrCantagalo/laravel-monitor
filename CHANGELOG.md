@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.28.0] - 2026-09-17
+### Fixed
+- **"Visits" counter overcounted repeat page views within the same
+  session as separate visits** instead of counting one visit per new PHP
+  session, as documented — a visitor with a single PHP session could
+  rack up dozens of "visits" just by browsing multiple pages.
+  `SessionVisitorTracker::track()`'s "already-tracked session" branch (the
+  most common path — every subsequent request from the same visitor) was
+  incrementing `data.visits` on every request instead of only on a
+  genuinely new session; `Monitor::newVisit()` (used by the remember-me
+  reconnection paths) had the same issue, incrementing `data.visits`
+  unconditionally even when the session id was already recorded in
+  `data.sessions`. Fixed both to only increment on a session id not yet
+  present in `data.sessions`, and initialized `data.visits = 1` when a
+  new `Monitor` row is created (previously implicit until the next,
+  now-removed, per-request increment).
+### Added
+- **`monitor:recalculate-visits` artisan command**: backfill for
+  installations updating from before this fix — `data.sessions` was
+  always deduplicated correctly (not affected by the bug above), so
+  `count(data.sessions)` is already the correct `visits` value for any
+  existing `Monitor` row. Recalculates in chunks (never
+  `::all()`/`cursor()` over the whole table). **Must be run once,
+  manually, after `composer update` to this version** — see README.
+
 ## [0.27.0] - 2026-09-17
 ### Added
 - **`monitor:prune` artisan command**: equivalent of the existing

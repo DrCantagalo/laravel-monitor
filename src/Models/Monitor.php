@@ -169,14 +169,13 @@ class Monitor extends Model
         $sessions_array = $this->data['sessions'] ?? [];
         if (!in_array($session_id, $sessions_array)) {
             $this->data['sessions'][] = $session_id;
+            $this->data['visits'] = ($this->data['visits'] ?? 0) + 1;
         }
 
         $ips_array = $this->data['ips'] ?? [];
         if (!in_array($ip, $ips_array)) {
             $this->data['ips'][] = $ip;
         }
-
-        $this->data['visits'] = ($this->data['visits'] ?? 0) + 1;
 
         $this->save();
     }
