@@ -8,6 +8,7 @@ use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
+use Drcantagalo\LaravelMonitor\Support\ListingsCache;
 use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
 use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
@@ -1217,24 +1218,21 @@ class MonitorController extends Controller
      */
     protected function listingsCacheKey(string $prefix, array $params): string
     {
-        $version = Cache::get('monitor:listings:version', 1);
-
-        return "monitor:listings:{$prefix}:v{$version}:".md5(json_encode($params));
+        return ListingsCache::key($prefix, $params);
     }
 
     /**
      * Incrementa o contador de versão lido por getVisitorsByIp/
      * getBlockedIps/getBlockedPaths — chamado por updateBlockedIps/
-     * unblockIp/flagScraperPath/unflagPath, já que todas mudam o estado
-     * de bloqueio refletido nessas listagens.
+     * unblockIp/flagScraperPath/unflagPath (e, desde a task 133, por
+     * ScraperBlocker::registerOffense no caminho automático), já que
+     * todas mudam o estado de bloqueio refletido nessas listagens.
+     * Delega pra Support\ListingsCache (task 133) - extraído pra lá pra
+     * ficar acessível fora do controller.
      */
     protected function invalidateListingsCache(): void
     {
-        if (! Cache::has('monitor:listings:version')) {
-            Cache::forever('monitor:listings:version', 1);
-        }
-
-        Cache::increment('monitor:listings:version');
+        ListingsCache::invalidate();
     }
 
     /**

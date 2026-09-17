@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.26.1] - 2026-09-17
+### Fixed
+- **`monitor_ip_stats.flagged` stuck `true` forever after an IP is
+  auto-blocked**: `ScraperBlocker::registerOffense()` (called by both
+  trackers' auto-signal path and by `flagScraperPath`/`flagScraperPaths`
+  via the honeypot) never touched `flagged` — once a request from that
+  IP got 403'd by `MonitorMethod`, it never reached the trackers again to
+  recalculate the flag, so the dashboard showed the same IP as "possible
+  scraper" (flagged) **and** "blocked" at once in the `all`/`blocked`
+  filters of `getVisitorsByIp` (the `flagged` filter itself already
+  excluded blocked IPs since task 91 — only the raw column stayed stale).
+  `registerOffense()` now clears `monitor_ip_stats.flagged` for that IP
+  right after saving the block (`flagged_signals` is left untouched, it's
+  the historical record of why the IP was blocked) and invalidates the
+  listings cache, same as the manual block/unblock/flag actions already
+  did — previously `ScraperBlocker` had no access to the controller's
+  protected `invalidateListingsCache()`, so the automatic path never
+  invalidated it.
+### Added
+- `Support\ListingsCache`: the versioned cache key/invalidation logic
+  behind `getVisitorsByIp`/`getBlockedIps`/`getBlockedPaths`, extracted
+  out of `MonitorController::listingsCacheKey()`/`invalidateListingsCache()`
+  so it's reachable from `Support\ScraperBlocker` too.
+
 ## [0.26.0] - 2026-09-14
 ### Fixed
 - **`flagScraperPath(s)`/`markPathSafe(s)` timing out on installations

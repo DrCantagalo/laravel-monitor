@@ -664,6 +664,17 @@ blocked — the existing `blocked_ip_cache_ttl` cache (default 60s) already
 guarantees an expired block disappears from the application within that
 window, no separate job/cron needed.
 
+**Clears `monitor_ip_stats.flagged` on block (since `0.26.1`)**: right
+after saving the block, `registerOffense()` also sets
+`monitor_ip_stats.flagged = false` for that IP and invalidates the
+dashboard listings cache (same mechanism as the manual block/unblock/flag
+actions). Without this, an IP that gets auto-blocked never goes through
+the trackers again to recalculate `flagged` (`MonitorMethod` rejects the
+request with 403 before tracking runs), so it stayed shown as "possible
+scraper" forever even after being blocked. `flagged_signals` is left
+untouched — it's the historical record of what tripped the block, not a
+live status.
+
 ### Automatic triggers (since `0.16.0`)
 
 Two triggers call `ScraperBlocker::registerOffense()` automatically — no

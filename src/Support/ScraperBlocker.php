@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Illuminate\Support\Facades\Cache;
 
 /**
@@ -78,6 +79,22 @@ class ScraperBlocker
         // partir do tráfego real antes da task 96 existir (a 95 só testava
         // a classe isolada).
         Cache::forget("monitor:blocked-ip:{$ip}");
+
+        // Task 133: um IP bloqueado nunca mais passa pelos trackers pra
+        // recalcular `flagged` (MonitorMethod corta a request com 403
+        // antes de chegar no tracking), então sem isso o dashboard
+        // continuava mostrando o mesmo IP como "possible scraper" E
+        // "blocked" ao mesmo tempo pra sempre. Update simples - se a
+        // linha não existir ainda em monitor_ip_stats, não faz nada
+        // (nunca foi flagada mesmo). Não mexe em flagged_signals, mantém
+        // o histórico de por que foi bloqueado.
+        IpStat::where('ip', $ip)->update(['flagged' => false]);
+
+        // Mesmo mecanismo usado por updateBlockedIps/unblockIp/
+        // flagScraperPath/unflagPath no controller - sem isso o dashboard
+        // serviria `flagged: true` obsoleto por até listings_cache_ttl_minutes
+        // depois do bloqueio automático.
+        ListingsCache::invalidate();
 
         return $blockedIp;
     }
