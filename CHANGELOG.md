@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.27.0] - 2026-09-17
+### Added
+- **`monitor:prune` artisan command**: equivalent of the existing
+  `pruneData` HTTP route, meant to run from the consuming app's own
+  cron/scheduler instead of requiring a manual request. Same options
+  (`--only-blocked`, `--older-than-days=`) and same safe chunked/indexed
+  deletion strategy — never `::all()`/`cursor()` over the whole `Monitor`
+  table. Recommended production usage: `monitor:prune --only-blocked
+  --older-than-days=0` running frequently (e.g. hourly) — an already
+  purged IP never reappears under that filter, so this keeps the delay
+  between a block and purging that IP's tracking history low. The prune
+  logic itself (previously only inside
+  `MonitorController::pruneData()`/`pruneMonitors()`) was extracted into
+  `Support\DataPruner`, shared by both the command and the existing HTTP
+  route (its behavior/response are unchanged). The command invalidates
+  the pages/listings cache the same way `pruneData()` already did when
+  something gets deleted.
+
 ## [0.26.1] - 2026-09-17
 ### Fixed
 - **`monitor_ip_stats.flagged` stuck `true` forever after an IP is

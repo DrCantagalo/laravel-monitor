@@ -1188,6 +1188,35 @@ Bumps the `getPages`/`getVisitorsByIp` listing cache version counters
 was actually deleted from the corresponding table, same mechanism as
 `flagScraperPath`/`updateBlockedIps` etc.
 
+### `monitor:prune` (since `0.27.0`)
+
+Artisan equivalent of `pruneData` above — same options, same underlying
+`Support\DataPruner` (chunked/indexed, never `::all()`/`cursor()` over the
+whole `Monitor` table), same cache invalidation — meant to run from the
+consuming app's own scheduler instead of a manual HTTP request:
+
+```
+php artisan monitor:prune --only-blocked --older-than-days=0
+```
+
+- `--older-than-days=` (required, non-negative integer — command fails
+  with a non-zero exit code if missing or invalid): same cutoff semantics
+  as `pruneData`'s `older_than_days`.
+- `--only-blocked` (optional flag, default off): same semantics as
+  `pruneData`'s `only_blocked` — restrict the delete to rows belonging to
+  a confirmed/blocked IP (`monitor_blocked_ips`).
+
+**Recommended production usage**: schedule `monitor:prune --only-blocked
+--older-than-days=0` to run frequently (e.g. `hourly()` via
+`Schedule::command(...)` in the consuming app) — this purges the
+tracking history (`Monitor`/`monitor_ip_stats`) of an IP as soon as it's
+confirmed/blocked, instead of only ever cleaning up by age. An IP already
+purged under this filter never reappears in it (there's nothing left to
+delete for it), so running it often is cheap and keeps the delay between
+a block and purging that IP's history low. The command alone does
+nothing unless something actually schedules it — it's not automatic on
+its own.
+
 ## Advanced usage
 
 ### Skipping tracking for a request

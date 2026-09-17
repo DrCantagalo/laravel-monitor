@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.26.1',
+    'version' => '0.27.0',
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não

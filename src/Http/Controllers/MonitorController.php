@@ -7,6 +7,7 @@ use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
+use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
 use Drcantagalo\LaravelMonitor\Support\ListingsCache;
 use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
@@ -1306,6 +1307,10 @@ class MonitorController extends Controller
      * usuário), evitando deleção de dado em cima de um falso positivo não
      * revisado. Parâmetro renomeado de `only_scraper_flagged` pra
      * `only_blocked` (reflete a nova semântica).
+     *
+     * Lógica de fato (chunked/indexado, invalidação de cache) delegada a
+     * `Support\DataPruner` (task 134) — reusada também pelo comando
+     * `monitor:prune`, sem mudar comportamento/response desta rota.
      */
     protected function pruneData(Request $request)
     {
@@ -1319,73 +1324,13 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $cutoff = now()->subDays((int) $olderThanDays);
-
-        $monitorsDeleted = $this->pruneMonitors($cutoff, $onlyBlocked);
-
-        $ipStatQuery = IpStat::where('last_seen', '<', $cutoff);
-        if ($onlyBlocked) {
-            $ipStatQuery->whereIn('ip', BlockedIp::pluck('ip'));
-        }
-        $ipStatsDeleted = $ipStatQuery->delete();
-
-        if ($monitorsDeleted > 0) {
-            $this->invalidatePagesCache();
-        }
-
-        if ($ipStatsDeleted > 0) {
-            $this->invalidateListingsCache();
-        }
+        $result = DataPruner::prune((int) $olderThanDays, $onlyBlocked);
 
         return response()->json([
             'success' => true,
-            'monitors_deleted' => $monitorsDeleted,
-            'ip_stats_deleted' => $ipStatsDeleted,
+            'monitors_deleted' => $result['monitors_deleted'],
+            'ip_stats_deleted' => $result['ip_stats_deleted'],
         ]);
-    }
-
-    /**
-     * Sem `only_blocked`, o delete é direto em SQL (bulk, sem carregar
-     * nada em PHP). Com `only_blocked=true`, precisa do mesmo contorno de
-     * `buildPagesResult`: `data.ips` mora dentro do blob JSON de
-     * `Monitor.data`, sem coluna própria pra filtrar de forma portável
-     * entre sqlite/mysql/pgsql — então junta os ids em PHP via chunk e só
-     * deleta ao final (nunca durante o chunk). Match por IP confirmado-
-     * bloqueado (mesmo estilo de `flagScraperPath`/`buildVisitorsResult`,
-     * que já resolvem `monitor_blocked_ips` numa query só e testam contra
-     * ela em vez de um JOIN de verdade).
-     */
-    protected function pruneMonitors($cutoff, bool $onlyBlocked): int
-    {
-        if (! $onlyBlocked) {
-            return Monitor::where('updated_at', '<', $cutoff)->delete();
-        }
-
-        $blockedIps = BlockedIp::pluck('ip')->all();
-
-        if (empty($blockedIps)) {
-            return 0;
-        }
-
-        $ids = [];
-
-        Monitor::where('updated_at', '<', $cutoff)
-            ->select('id', 'data')
-            ->chunkById(200, function ($monitors) use ($blockedIps, &$ids) {
-                foreach ($monitors as $monitor) {
-                    $ips = (array) data_get($monitor, 'data.ips', []);
-
-                    if (array_intersect($ips, $blockedIps)) {
-                        $ids[] = $monitor->id;
-                    }
-                }
-            });
-
-        if (empty($ids)) {
-            return 0;
-        }
-
-        return Monitor::whereIn('id', $ids)->delete();
     }
 
     /**
