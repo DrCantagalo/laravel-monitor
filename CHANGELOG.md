@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.34.0] - 2026-09-18
+### Added
+- **New scraper signal `high_cumulative_visits`** in `ScraperSignalDetector::detect`
+  — catches a "patient" scraper that spreads a high volume of requests
+  over a long time and never bursts (motivated by a real production case:
+  an IP with 38,000 visits over 27 days, ~1/minute, never tripping
+  `high_frequency`'s short window). Fires when the IP's total visit count
+  (`monitor_ip_stats.visit_count`, including the current request) reaches
+  the new `config('monitor.scraper_cumulative_visits_threshold')` (default
+  `5000`). Like every other signal, it doesn't block anything by itself —
+  it only adds to `scraper_signal_threshold`/`auto_block_signal_threshold`,
+  which is what keeps a legitimate high-volume IP (shared/NAT, no other
+  weak signal present) from being auto-blocked off this signal alone.
+  `detect()`'s signature gains a 4th `int $visitCount = 0` parameter;
+  `AnonymousVisitorTracker`/`SessionVisitorTracker` now call the new
+  `IpStat::visitCount($ip)` (indexed lookup by the unique `ip` column)
+  before `detect()`/`recordVisit()` to pass it in, since `recordVisit()`'s
+  `upsert()` doesn't return the row it just wrote.
+
 ## [0.33.0] - 2026-09-18
 ### Fixed
 - **`getVisitorsByIp` with `filter=blocked` could silently go empty even

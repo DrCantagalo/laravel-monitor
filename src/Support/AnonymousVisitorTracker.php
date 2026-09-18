@@ -48,7 +48,8 @@ class AnonymousVisitorTracker
      */
     public function track(Request $request, string $path, ?string $userAgent, string $ip, bool $notFound = false): void
     {
-        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
+        $visitCount = IpStat::visitCount($ip) + 1;
+        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent, $visitCount);
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);

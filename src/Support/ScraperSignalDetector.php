@@ -15,9 +15,16 @@ class ScraperSignalDetector
      * retornada, e quem decide o que fazer com isso (marcar, bloquear,
      * etc.) é o chamador — aqui só detectamos.
      *
+     * `$visitCount` é o total acumulado de visitas desse IP incluindo a
+     * request atual (`IpStat::visitCount($ip) + 1`, calculado pelo
+     * chamador antes de `IpStat::recordVisit()` gravar o incremento -
+     * ver laravel-monitor 143) - default `0` só pra manter chamadas
+     * antigas/testes que não passam esse argumento funcionando sem
+     * disparar o sinal novo indevidamente.
+     *
      * @return string[] lista dos sinais disparados
      */
-    public function detect(Request $request, string $ip, ?string $userAgent): array
+    public function detect(Request $request, string $ip, ?string $userAgent, int $visitCount = 0): array
     {
         $signals = [];
 
@@ -56,6 +63,20 @@ class ScraperSignalDetector
 
         if ($missing >= 2) {
             $signals[] = 'missing_browser_headers';
+        }
+
+        // Sinal 4: volume alto sustentado ao longo do tempo, sem nunca
+        // disparar rajada (scraper "paciente" - caso real em produção:
+        // IP com 38 mil visitas em 27 dias, ~1/min, nunca cruzou o sinal
+        // 1 acima). Não bloqueia sozinho (mesma mecânica dos outros 3):
+        // um IP de volume alto legítimo (NAT/rede compartilhada), sem
+        // user-agent de bot nem headers faltando, fica com só este sinal
+        // e nunca cruza scraper_signal_threshold/auto_block_signal_threshold
+        // sozinho por causa disso.
+        $cumulativeThreshold = (int) config('monitor.scraper_cumulative_visits_threshold', 5000);
+
+        if ($visitCount >= $cumulativeThreshold) {
+            $signals[] = 'high_cumulative_visits';
         }
 
         return $signals;

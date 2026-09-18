@@ -1001,6 +1001,14 @@ Signals checked by `ScraperSignalDetector::detect`:
   `Accept-Language`, `Accept-Encoding` are absent — real browsers always
   send all three, most scripted HTTP clients don't set any of them by
   default.
+- **`high_cumulative_visits`**: the IP's total visit count (`monitor_ip_stats.visit_count`,
+  including the current request) reaches
+  `config('monitor.scraper_cumulative_visits_threshold')` (default
+  `5000`). Independent of and complementary to `high_frequency` above —
+  that one catches a burst in a short window, this one catches a
+  "patient" scraper that spreads a high volume over a long time and never
+  bursts (e.g. one request per minute for weeks), which never trips
+  `high_frequency` no matter how long it keeps going.
 
 Every signal that fires is appended to `data.flags.scraper_signals`
 (array of strings, e.g. `["empty_user_agent", "missing_browser_headers"]`)

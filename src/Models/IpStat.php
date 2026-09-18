@@ -46,6 +46,20 @@ class IpStat extends Model
      * query builder puro), por isso o `json_encode` manual de
      * `flagged_signals` e o cast de `$flagged` pra int abaixo.
      */
+    /**
+     * Visitas acumuladas desse IP até agora (antes da request atual),
+     * `0` se o IP ainda não tem linha. Leitura indexada por `ip`
+     * (coluna `unique()`, mesma chave de conflito do upsert acima) - usada
+     * pelos trackers pra alimentar `ScraperSignalDetector::detect()` com
+     * o volume histórico antes de decidir os sinais da request atual
+     * (laravel-monitor 143), sem precisar que `recordVisit()` devolva
+     * nada (upsert() do query builder não retorna a linha afetada).
+     */
+    public static function visitCount(string $ip): int
+    {
+        return (int) (DB::table('monitor_ip_stats')->where('ip', $ip)->value('visit_count') ?? 0);
+    }
+
     public static function recordVisit(string $ip, bool $flagged, array $signals): void
     {
         $now = now();

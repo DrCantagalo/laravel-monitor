@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.33.0',
+    'version' => '0.34.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -72,6 +72,18 @@ return [
 
     // Quantos sinais disparados são necessários pra marcar data.flags.scraper.
     'scraper_signal_threshold' => 2,
+
+    // A partir de quantas visitas acumuladas (IpStat::visitCount, incluindo
+    // a request atual) um IP dispara o sinal high_cumulative_visits —
+    // scraper "paciente" que nunca cruza scraper_frequency_threshold
+    // (volume alto mas sustentado ao longo do tempo, sem rajada, ex: caso
+    // real de produção com 38 mil visitas em 27 dias, ~1/min). Como os
+    // outros sinais, não bloqueia sozinho. Trade-off do valor: baixo
+    // demais pega tráfego humano legítimo de IP compartilhado/NAT de alto
+    // volume (que normalmente não tem outro sinal fraco concordando); alto
+    // demais deixa scrapers pacientes de verdade passarem sem marcar por
+    // muito tempo. 5000 é ponto de partida (task 143), não valor final.
+    'scraper_cumulative_visits_threshold' => 5000,
 
     // TTL (segundos) do cache de lookup de IP/path bloqueado
     // (MonitorMethod::isBlocked/isPathBlocked), pra evitar uma query em
