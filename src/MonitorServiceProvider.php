@@ -57,7 +57,15 @@ class MonitorServiceProvider extends ServiceProvider
 
         $this->loadMigrationsFrom(__DIR__.'/database/migrations');
 
-        $this->loadRoutesFrom(__DIR__.'/routes/api.php');
+        // A rota pública (`/monitor/handler`) só existe pra alimentar o
+        // dashboard SaaS hospedado (monitor.cantagalo.it) - cliente que
+        // desligou isso no `monitor:install` (task 138) não precisa dela
+        // exposta. Default `true` (config ausente = instalação anterior a
+        // essa opção, nunca rodou `monitor:install` de novo) preserva o
+        // comportamento de sempre.
+        if (config('monitor.dashboard.enabled', true)) {
+            $this->loadRoutesFrom(__DIR__.'/routes/api.php');
+        }
 
         if ($this->app->runningInConsole()) {
             $this->commands([

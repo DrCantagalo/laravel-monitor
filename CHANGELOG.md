@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.31.0] - 2026-09-18
+### Added
+- **Dashboard/interface now optional at install** (`config('monitor.dashboard.enabled')`,
+  default `true`): `monitor:install` asks upfront whether to use the
+  hosted dashboard (monitor.cantagalo.it) before asking for the site URL.
+  Answering no skips the URL question and the remote registration
+  entirely (no `local_token` generated), and persists
+  `dashboard.enabled = false` in the published `config/monitor.php`.
+  `MonitorServiceProvider::boot()` only registers the package's public
+  route (`/monitor/handler`) when `dashboard.enabled` is `true` — a
+  client that only wants local tracking (the `Monitor` model, artisan
+  commands) no longer needs that route exposed at all. Default `true`
+  keeps existing installations working without rerunning
+  `monitor:install`; `monitor:update` adds the new `dashboard` config key
+  (defaulting to `true`) to already-published configs missing it, same
+  mechanism used for every other new key.
+
 ## [0.30.0] - 2026-09-18
 ### Changed
 - **`MonitorMethod::isBlocked()`/`isPathBlocked()` fail-safe against cache

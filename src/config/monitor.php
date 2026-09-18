@@ -2,7 +2,21 @@
 
 return [
 
-    'version' => '0.30.0',
+    'version' => '0.31.0',
+
+    // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
+    // `true`, registra a rota pública do pacote (`/monitor/handler`,
+    // consumida pelo dashboard) e `monitor:install` pergunta a URL do site
+    // e faz o registro remoto (gera/persiste `local_token`). Desligar
+    // (`false`) quando o cliente só quer o rastreamento local (model
+    // `Monitor`, comandos artisan) sem nada indo pro SaaS - `monitor:install`
+    // pergunta isso antes de pedir a URL e já grava o valor certo aqui.
+    // Default `true` pra não quebrar instalações existentes que nunca vão
+    // rodar `monitor:install` de novo (`monitor:update` também garante essa
+    // chave como `true` se estiver ausente na config publicada do cliente).
+    'dashboard' => [
+        'enabled' => true,
+    ],
 
     // Nome da chave de sessão usada por `Monitor::skipTracking()` (Facade
     // em src/Facades/Monitor.php) pra marcar a request atual como "não

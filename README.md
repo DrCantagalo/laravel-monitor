@@ -13,6 +13,18 @@ config/migrations, migrate, register the installation). `monitor:install`
 is **not** meant to run again on every update — running it a second time
 would re-ask every prompt for a project that's already set up.
 
+**Dashboard is optional (since `0.31.0`)**: right before asking for the
+site URL, `monitor:install` asks whether you want to use the hosted
+dashboard/interface (monitor.cantagalo.it). Answering no skips the URL
+question and the remote registration entirely — no `local_token` is
+generated, and the package's public route (`/monitor/handler`) is never
+registered (`config('monitor.dashboard.enabled', true)`, checked in
+`MonitorServiceProvider::boot()`). You still get local tracking (the
+`Monitor` model, `monitor:audit-paths`, `monitor:export-denylist`, etc) —
+just nothing sent to or exposed for the SaaS dashboard. Default is `true`
+(yes), so existing installations that never rerun `monitor:install` keep
+working exactly as before.
+
 After a plain `composer update drcantagalo/laravel-monitor` (bumping to a
 new version of an already-installed project), run:
 

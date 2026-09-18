@@ -20,6 +20,7 @@ class MonitorInstallCommand extends Command
             'pub_config' => "Can we publish the package configuration archive? (If not, you will need to publish it manually later).",
             'pub_migration' => "Can we publish the package migration archive? (If not, you will need to publish it manually later).",
             'migrate' => "Can we migrate the package's Eloquent model to your database? (If not, you will need to migrate it manually later).",
+            'use_dashboard' => "Do you want to use the hosted dashboard/interface (monitor.cantagalo.it)? (If not, the package still tracks locally, but its public route/registration are skipped).",
             'ask_url' => "Enter your site URL (e.g., https://example.com)",
             'hash_found' => "Existing installation configuration found.",
             'hash_created' => "New installation configuration created.",
@@ -36,6 +37,7 @@ class MonitorInstallCommand extends Command
             'pub_config' => "Possiamo pubblicare l'archivio di configurazione del pacchetto? (In caso contrario, sarà necessario pubblicarlo manualmente in seguito).",
             'pub_migration' => "Possiamo pubblicare l'archivio di migrazione del pacchetto? (In caso contrario, sarà necessario pubblicarlo manualmente in seguito).",
             'migrate' => "Possiamo migrare il modello Eloquent del pacchetto nel tuo database? (In caso contrario, dovrai migrarlo manualmente in seguito).",
+            'use_dashboard' => "Vuoi usare la dashboard/interfaccia ospitata (monitor.cantagalo.it)? (In caso contrario, il pacchetto continua a tracciare localmente, ma la rotta pubblica/registrazione vengono saltate).",
             'ask_url' => "Inserisci l'URL del tuo sito (es: https://example.com)",
             'hash_found' => "Trovata configurazione di installazione esistente.",
             'hash_created' => "Nuova configurazione di installazione creata.",
@@ -52,6 +54,7 @@ class MonitorInstallCommand extends Command
             'pub_config' => "Podemos publicar o arquivo de configuração do pacote? (Caso contrário, você precisará publicá-lo manualmente mais tarde).",
             'pub_migration' => "Podemos publicar o arquivo de migração do pacote? (Caso contrário, você precisará publicá-lo manualmente mais tarde).",
             'migrate' => "Podemos migrar o modelo Eloquent do pacote para o seu banco de dados? (Caso contrário, você precisará migrá-lo manualmente mais tarde).",
+            'use_dashboard' => "Você quer usar a interface/dashboard hospedado (monitor.cantagalo.it)? (Caso contrário, o pacote continua rastreando localmente, mas a rota pública e o registro são pulados).",
             'ask_url' => "Informe a URL pública do seu site (ex: https://meusite.com)",
             'hash_found' => "Configuração de instalação existente encontrada.",
             'hash_created' => "Nova configuração de instalação criada.",
@@ -98,6 +101,14 @@ class MonitorInstallCommand extends Command
             $this->call('migrate');
         }
 
+        $useDashboard = $this->confirm($t('use_dashboard'), true);
+
+        $this->persistDashboardEnabled($useDashboard);
+
+        if (! $useDashboard) {
+            return 0;
+        }
+
         $siteUrl = $this->ask($t('ask_url'));
 
         $storagePath = storage_path('monitor');
@@ -142,7 +153,7 @@ class MonitorInstallCommand extends Command
         }
 
         $this->info($t('checking'));
-        
+
         $response = Http::post('https://monitor.cantagalo.it/api/registerinstallation', [
             'lang' => $this->lang,
             'installation_hash' => $installationHash,
@@ -169,5 +180,38 @@ class MonitorInstallCommand extends Command
         }
 
         return 0;
+    }
+
+    /**
+     * Grava `dashboard.enabled` no config/monitor.php publicado
+     * (`vendor:publish --tag=monitor-config`, cópia estática no projeto
+     * host - ver `pub_config` acima). Regex escopado ao bloco
+     * `'dashboard' => [...]` especificamente (não ao primeiro `'enabled'`
+     * que aparecer no arquivo) - se o usuário recusou publicar a config
+     * (arquivo ainda não existe), não há o que gravar aqui; o default do
+     * template (`true`) e o merge em runtime (`MonitorServiceProvider::
+     * register()`) cobrem esse caso até a config ser publicada manualmente.
+     */
+    protected function persistDashboardEnabled(bool $enabled): void
+    {
+        $configPath = config_path('monitor.php');
+
+        if (! File::exists($configPath)) {
+            return;
+        }
+
+        $value = $enabled ? 'true' : 'false';
+
+        $updated = preg_replace(
+            "/('dashboard'\s*=>\s*\[\s*'enabled'\s*=>\s*)(?:true|false)(,)/",
+            '${1}'.$value.'${2}',
+            File::get($configPath),
+            1,
+            $count
+        );
+
+        if ($count > 0) {
+            File::put($configPath, $updated);
+        }
     }
 }
