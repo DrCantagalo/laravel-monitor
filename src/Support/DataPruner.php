@@ -7,6 +7,7 @@ use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Cleanup parcial de dados de tracking (`Monitor`/`monitor_ip_stats`) mais
@@ -25,6 +26,37 @@ use Illuminate\Support\Facades\Cache;
  */
 class DataPruner
 {
+    protected const CACHE_KEY = 'monitor:data-prune:last-run';
+
+    /**
+     * Gatilho automático (laravel-monitor 141), sem depender de cron do
+     * consumidor: `monitor:prune` só limpava se alguém configurasse
+     * `Schedule::command(...)->hourly()` por conta própria — opt-in,
+     * documentado no README mas a maioria nunca faz, então o tracking de
+     * IPs já bloqueados crescia pra sempre em silêncio. Mesmo padrão
+     * determinístico (timestamp em cache, não probabilístico) já usado por
+     * `BlockedIpCleaner::maybeCleanup()` (task 97) — chamado a cada
+     * request rastreada pelos dois trackers, só executa de fato se já
+     * passou `config('monitor.data_prune_interval_hours')` desde a última
+     * vez. Cache key própria, não reusa a do `BlockedIpCleaner` (intervalos
+     * configuráveis independentemente). A query agora é indexada
+     * (`pruneMonitors()` via `monitor_visit_ips`, ver acima), então rodar
+     * isso inline no caminho de request é seguro, sem precisar de queue.
+     */
+    public static function maybeCleanup(): void
+    {
+        $intervalHours = (int) config('monitor.data_prune_interval_hours', 1);
+        $lastRunAt = Cache::get(self::CACHE_KEY);
+
+        if ($lastRunAt !== null && (time() - $lastRunAt) < $intervalHours * 3600) {
+            return;
+        }
+
+        self::prune(0, true);
+
+        Cache::forever(self::CACHE_KEY, time());
+    }
+
     public static function prune(int $olderThanDays, bool $onlyBlocked): array
     {
         $cutoff = now()->subDays($olderThanDays);
@@ -55,14 +87,15 @@ class DataPruner
 
     /**
      * Sem `only_blocked`, o delete é direto em SQL (bulk, sem carregar
-     * nada em PHP). Com `only_blocked=true`, precisa do mesmo contorno de
-     * `buildPagesResult`: `data.ips` mora dentro do blob JSON de
-     * `Monitor.data`, sem coluna própria pra filtrar de forma portável
-     * entre sqlite/mysql/pgsql — então junta os ids em PHP via chunk e só
-     * deleta ao final (nunca durante o chunk). Match por IP confirmado-
-     * bloqueado (mesmo estilo de `flagScraperPath`/`buildVisitorsResult`,
-     * que já resolvem `monitor_blocked_ips` numa query só e testam contra
-     * ela em vez de um JOIN de verdade).
+     * nada em PHP). Com `only_blocked=true` (laravel-monitor 141): antes
+     * fazia o mesmo contorno de `buildPagesResult` pré-103 — abria
+     * `data.ips` (blob JSON) em chunks de 200 pra achar interseção com IP
+     * bloqueado em PHP, sem índice. `monitor_visit_ips` (task 104, já
+     * mantida em sincronia a cada save de `Monitor`) resolve o mesmo
+     * mapeamento IP->Monitor via índice em `ip`, então o join agora é uma
+     * query indexada só — ainda respeitando o cutoff, não muda o
+     * comportamento de `--older-than-days`, só fica mais rápido por
+     * dentro.
      */
     public static function pruneMonitors(Carbon $cutoff, bool $onlyBlocked): int
     {
@@ -70,31 +103,22 @@ class DataPruner
             return Monitor::where('updated_at', '<', $cutoff)->delete();
         }
 
-        $blockedIps = BlockedIp::pluck('ip')->all();
+        $blockedIps = BlockedIp::pluck('ip');
 
-        if (empty($blockedIps)) {
+        if ($blockedIps->isEmpty()) {
             return 0;
         }
 
-        $ids = [];
+        $ids = DB::table('monitor_visit_ips')
+            ->whereIn('ip', $blockedIps)
+            ->distinct()
+            ->pluck('monitor_id');
 
-        Monitor::where('updated_at', '<', $cutoff)
-            ->select('id', 'data')
-            ->chunkById(200, function ($monitors) use ($blockedIps, &$ids) {
-                foreach ($monitors as $monitor) {
-                    $ips = (array) data_get($monitor, 'data.ips', []);
-
-                    if (array_intersect($ips, $blockedIps)) {
-                        $ids[] = $monitor->id;
-                    }
-                }
-            });
-
-        if (empty($ids)) {
+        if ($ids->isEmpty()) {
             return 0;
         }
 
-        return Monitor::whereIn('id', $ids)->delete();
+        return Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete();
     }
 
     /**

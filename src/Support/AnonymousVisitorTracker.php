@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor\Support;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class AnonymousVisitorTracker
 {
@@ -52,8 +53,16 @@ class AnonymousVisitorTracker
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);
         $this->blockedIpCleaner->maybeCleanup();
+        DataPruner::maybeCleanup();
 
-        $user = Monitor::where('data->ips', 'like', "%{$ip}%")->first();
+        // laravel-monitor 141: era `Monitor::where('data->ips', 'like',
+        // "%{$ip}%")->first()` — scan não-indexado na coluna JSON a cada
+        // request anônima, o caminho mais quente do pacote. `monitor_visit_ips`
+        // (task 104, mantida em sincronia por Monitor::booted()::syncVisitIps()
+        // a cada save, incluindo os que este método faz abaixo) já é o
+        // mesmo mapeamento IP->Monitor indexado, sem escrita extra necessária.
+        $monitorId = DB::table('monitor_visit_ips')->where('ip', $ip)->value('monitor_id');
+        $user = $monitorId ? Monitor::find($monitorId) : null;
 
         if ($user) {
             $data = $user->data;

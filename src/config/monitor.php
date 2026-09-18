@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.31.0',
+    'version' => '0.32.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -113,6 +113,17 @@ return [
     // como a GC de sessão do Laravel - sem exigir cron externo do
     // consumidor do pacote.
     'blocked_ips_cleanup_interval_hours' => 1,
+
+    // De quantas em quantas horas `Support/DataPruner::maybeCleanup()`
+    // (chamado a cada request rastreada, task 141) roda `prune(0, true)`
+    // sozinho — purga tracking de IP já confirmado-bloqueado sem depender
+    // do consumidor do pacote configurar `Schedule::command('monitor:prune
+    // ...')->hourly()` por conta própria (opt-in, a maioria nunca faz).
+    // Mesmo princípio determinístico via cache de
+    // `blocked_ips_cleanup_interval_hours` acima, cache key própria. O
+    // comando `monitor:prune` continua existindo pra uso manual/
+    // administrativo (ex: `--older-than-days` maior que 0).
+    'data_prune_interval_hours' => 1,
 
     // Intervalo (horas) do cron que o consumidor do pacote configura pra
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa

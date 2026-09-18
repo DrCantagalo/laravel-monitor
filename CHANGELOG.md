@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.32.0] - 2026-09-18
+### Changed
+- **`AnonymousVisitorTracker::track()` no longer scans `data->ips` with an
+  unindexed `LIKE`** on every anonymous-visitor request (the package's
+  hottest code path). It now looks up the Monitor via `monitor_visit_ips`
+  (the indexed IP→Monitor mapping table added in `0.24.0`, already kept
+  in sync on every `Monitor` save) — no new migration or backfill needed,
+  no behavior change other than speed.
+- **`Support\DataPruner::pruneMonitors(..., onlyBlocked: true)`** replaced
+  its chunked PHP-side scan of `data.ips` with an indexed join against
+  `monitor_visit_ips`, same cutoff semantics as before. `DataPruner::prune()`'s
+  public signature/return and `monitor:prune`/`pruneData` behavior are
+  unchanged, only faster internally.
+### Added
+- **`monitor:prune --only-blocked --older-than-days=0` now runs
+  automatically**, no consumer-side `Schedule::command(...)` needed:
+  `Support\DataPruner::maybeCleanup()` (new config key
+  `data_prune_interval_hours`, default `1`) is called from both trackers
+  on every tracked request, on the same deterministic cache-timer pattern
+  as `Support\BlockedIpCleaner::maybeCleanup()` (`0.17.0`). A manually
+  scheduled `monitor:prune` call is now optional/redundant for this use
+  case; the command itself still exists for manual/administrative pruning
+  by age.
+
 ## [0.31.0] - 2026-09-18
 ### Added
 - **Dashboard/interface now optional at install** (`config('monitor.dashboard.enabled')`,

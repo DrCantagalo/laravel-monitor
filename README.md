@@ -1244,16 +1244,19 @@ php artisan monitor:prune --only-blocked --older-than-days=0
   `pruneData`'s `only_blocked` — restrict the delete to rows belonging to
   a confirmed/blocked IP (`monitor_blocked_ips`).
 
-**Recommended production usage**: schedule `monitor:prune --only-blocked
---older-than-days=0` to run frequently (e.g. `hourly()` via
-`Schedule::command(...)` in the consuming app) — this purges the
-tracking history (`Monitor`/`monitor_ip_stats`) of an IP as soon as it's
-confirmed/blocked, instead of only ever cleaning up by age. An IP already
-purged under this filter never reappears in it (there's nothing left to
-delete for it), so running it often is cheap and keeps the delay between
-a block and purging that IP's history low. The command alone does
-nothing unless something actually schedules it — it's not automatic on
-its own.
+**Automatic since `0.32.0`** — you no longer need to schedule anything
+for this: `Support\DataPruner::maybeCleanup()` runs `prune(0, true)`
+(purge tracking data for confirmed-blocked IPs) by itself, on a
+deterministic cache-backed timer (`monitor.data_prune_interval_hours`,
+default `1`), checked on every tracked request — same mechanism as
+`Support\BlockedIpCleaner::maybeCleanup()`. An IP already purged under
+this filter never reappears in it, so this stays cheap even checked on
+every request. Manually scheduling `monitor:prune --only-blocked
+--older-than-days=0` (e.g. via `Schedule::command(...)->hourly()` in the
+consuming app) is now **optional/redundant** — the command itself still
+exists for manual/administrative use (e.g. `--older-than-days` greater
+than `0`, to prune by age without the blocked-IP filter, which is only
+useful on demand).
 
 ### `monitor:recalculate-visits` (since `0.28.0`)
 

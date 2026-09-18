@@ -124,6 +124,7 @@ class SessionVisitorTracker
                 IpStat::recordVisit($ip, $isScraper, $signals);
                 $this->maybeAutoBlock($ip, $signals);
                 $this->blockedIpCleaner->maybeCleanup();
+                DataPruner::maybeCleanup();
 
                 $user->data = $data;
                 $user->save();
@@ -138,6 +139,7 @@ class SessionVisitorTracker
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);
         $this->blockedIpCleaner->maybeCleanup();
+        DataPruner::maybeCleanup();
 
         $data = [
             'page' => [$path => 1],
