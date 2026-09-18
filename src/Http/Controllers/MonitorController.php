@@ -869,9 +869,15 @@ class MonitorController extends Controller
      * pra isso, ver CHANGELOG `[0.29.0]`) — quem quiser descartar um
      * candidato da fila de revisão simplesmente ignora, sem ação
      * dedicada; `flagged` continua existindo pra quem quiser garimpar.
+     * Desde a task 142: `filter=blocked` não parte mais de `IpStat`, ver
+     * `buildBlockedVisitorsResult()`.
      */
     protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
     {
+        if ($filter === 'blocked') {
+            return $this->buildBlockedVisitorsResult($page, $perPage, $dateFrom, $dateTo);
+        }
+
         $query = IpStat::query();
 
         if ($dateFrom) {
@@ -890,7 +896,6 @@ class MonitorController extends Controller
             // "possível" (task 91).
             'flagged' => $query->where('flagged', true)->whereNotIn('ip', $blockedIps),
             'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
-            'blocked' => $query->whereIn('ip', $blockedIps),
             default => null,
         };
 
@@ -913,6 +918,80 @@ class MonitorController extends Controller
                 'flagged' => $stat->flagged,
                 'flagged_signals' => $stat->flagged_signals,
                 'blocked' => $blockedIps->contains($stat->ip),
+            ];
+        })->values();
+
+        return [
+            'data' => $items,
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    /**
+     * laravel-monitor 142: `filter=blocked` costumava partir de
+     * `IpStat::whereIn('ip', $blockedIps)` — bug real em produção
+     * (`cantagalo.it`, achado em conversa): desde que a task home-page 186
+     * passou a rodar `monitor:prune --only-blocked --older-than-days=0` de
+     * hora em hora, a linha de `monitor_ip_stats` de um IP recém-bloqueado
+     * é apagada dentro de ~1h (exatamente o que o prune foi desenhado pra
+     * fazer), então a aba "Blocked" esvaziava sozinha mesmo com o bloqueio
+     * em si continuando efetivo (`MonitorMethod::isBlocked()` sempre leu
+     * `monitor_blocked_ips` direto, nunca dependeu de `monitor_ip_stats`).
+     *
+     * Fix: `monitor_blocked_ips` (`BlockedIp`) é a fonte de verdade daqui
+     * pra baixo — um IP bloqueado aparece na lista mesmo sem linha em
+     * `monitor_ip_stats`. `visit_count`/`first_seen`/`last_seen`/
+     * `flagged`/`flagged_signals` são só um complemento opcional via
+     * lookup em `IpStat` quando essa linha ainda existir — `null`/`false`
+     * quando não (nunca esconde o IP da lista por causa disso). Mantém o
+     * mesmo shape `data`/`meta` que o frontend (`monitorVisitorsTab()`)
+     * já espera das outras abas, com os campos extras de `BlockedIp`
+     * (`blocked_until`, `strike_count`, `lifetime_offense_count`,
+     * `last_offense_at`, `source`) só somados, nunca substituindo nada.
+     */
+    protected function buildBlockedVisitorsResult(int $page, int $perPage, ?string $dateFrom, ?string $dateTo): array
+    {
+        $query = BlockedIp::query();
+
+        if ($dateFrom) {
+            $query->where('last_offense_at', '>=', $dateFrom);
+        }
+
+        if ($dateTo) {
+            $query->where('last_offense_at', '<=', $dateTo);
+        }
+
+        $paginator = $query
+            ->orderByDesc('last_offense_at')
+            ->paginate($perPage, ['ip', 'blocked_until', 'strike_count', 'lifetime_offense_count', 'last_offense_at', 'source'], 'page', $page);
+
+        $ips = collect($paginator->items())->pluck('ip');
+
+        $ipStats = $ips->isEmpty()
+            ? collect()
+            : IpStat::whereIn('ip', $ips)->get(['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'])->keyBy('ip');
+
+        $items = collect($paginator->items())->map(function (BlockedIp $blocked) use ($ipStats) {
+            $stat = $ipStats->get($blocked->ip);
+
+            return [
+                'ip' => $blocked->ip,
+                'visit_count' => $stat?->visit_count,
+                'first_seen' => optional($stat?->first_seen)->toIso8601String(),
+                'last_seen' => optional($stat?->last_seen)->toIso8601String(),
+                'flagged' => $stat?->flagged ?? false,
+                'flagged_signals' => $stat?->flagged_signals,
+                'blocked' => true,
+                'blocked_until' => optional($blocked->blocked_until)->toIso8601String(),
+                'strike_count' => $blocked->strike_count,
+                'lifetime_offense_count' => $blocked->lifetime_offense_count,
+                'last_offense_at' => optional($blocked->last_offense_at)->toIso8601String(),
+                'source' => $blocked->source,
             ];
         })->values();
 

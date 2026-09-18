@@ -1154,6 +1154,23 @@ ephemeral read token from `issueReadToken`).
     been confirmed as a scraper, so it no longer needs to show up in the
     "possible scraper" queue too. It still shows up under
     `filter=blocked`, as before.
+  - **Since `0.33.0`**: `filter=blocked` no longer starts from
+    `monitor_ip_stats` — it queries `monitor_blocked_ips` directly (the
+    actual source of truth for whether an IP is blocked, same table
+    `MonitorMethod::isBlocked()` reads) and only *optionally* enriches
+    each row with `visit_count`/`first_seen`/`last_seen`/`flagged`/
+    `flagged_signals` from `monitor_ip_stats` when that row still exists
+    (`null`/`false` when it doesn't — the IP still shows up either way).
+    Fixes a real bug: `monitor:prune --only-blocked --older-than-days=0`
+    running hourly (see below) deletes a blocked IP's `monitor_ip_stats`
+    row within about an hour of the block, which used to make the IP
+    silently disappear from this listing even though it was still
+    actually blocked. `date_from`/`date_to` now filter by
+    `monitor_blocked_ips.last_offense_at` instead of `last_seen` under
+    this filter, and the response for each row also gains
+    `blocked_until`, `strike_count`, `lifetime_offense_count`,
+    `last_offense_at` and `source` (all from `monitor_blocked_ips`) — the
+    existing fields keep their shape, nothing is removed.
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
   missing/invalid), finds every `Monitor` that's ever seen that IP and

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.33.0] - 2026-09-18
+### Fixed
+- **`getVisitorsByIp` with `filter=blocked` could silently go empty even
+  with active blocks**: it queried `monitor_ip_stats` (`IpStat`), whose
+  rows for a blocked IP get deleted by `monitor:prune --only-blocked
+  --older-than-days=0` within about an hour of the block (working as
+  designed for pruning, not for this listing) — the block itself stayed
+  fully in effect (`MonitorMethod::isBlocked()` never depended on
+  `monitor_ip_stats`), only this listing went stale. Now queries
+  `monitor_blocked_ips` directly as the source of truth, with
+  `monitor_ip_stats` as an optional enrichment (`visit_count`,
+  `first_seen`, `last_seen`, `flagged`, `flagged_signals` — `null`/
+  `false` when that row is gone, never hiding the IP). Response rows
+  also gain `blocked_until`, `strike_count`, `lifetime_offense_count`,
+  `last_offense_at` and `source`; `date_from`/`date_to` under this
+  filter now apply to `last_offense_at` instead of `last_seen`.
+
 ## [0.32.0] - 2026-09-18
 ### Changed
 - **`AnonymousVisitorTracker::track()` no longer scans `data->ips` with an
