@@ -1,6 +1,6 @@
 {
     "name": "drcantagalo/laravel-monitor",
-    "description": "A lightweight Laravel package providing CRM tools, access monitoring, and anti-scraper protection.",
+    "description": "A lightweight Laravel package providing CRM tools, access monitoring, and anti-scraper protection. Requires Laravel's Cache facade (any driver).",
     "type": "library",
     "license": "MIT",
     "authors": [

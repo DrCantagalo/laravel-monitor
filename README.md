@@ -5,6 +5,17 @@
 > ⚠️ **This is an early testing release.**  
 > API and config shape may still change between minor versions. See `CHANGELOG.md` for what each release actually added/fixed.
 
+## Requirements
+
+The package depends on Laravel's [Cache](https://laravel.com/docs/cache)
+facade — any configured cache driver works, including the framework
+defaults `file` and `database` (no external service required). Redis and
+Memcached are supported as well. Since `0.30.0`, a failure of the cache
+store itself (Redis/Memcached down, etc) no longer takes the blocking
+checks down with it: `isBlocked()`/`isPathBlocked()` fall back to
+querying the database directly instead of assuming a request is not
+blocked — see "Fail-safe against cache store outages" below.
+
 ## Updating
 
 First-time setup is `composer require drcantagalo/laravel-monitor` followed
