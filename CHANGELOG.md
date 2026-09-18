@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.30.0] - 2026-09-18
+### Changed
+- **`MonitorMethod::isBlocked()`/`isPathBlocked()` fail-safe against cache
+  store outages**: previously, only `QueryException` (table not yet
+  migrated) was handled, falling back to `false`. Now a broader
+  `\Throwable` catch covers cache store failures (Redis/Memcached down,
+  etc) specifically — instead of assuming `false` (which would let a
+  blocked IP/path through during the instability window), it runs the
+  same query directly against the database, bypassing the cache, and
+  logs a warning. `QueryException` keeps its original behavior (assumes
+  `false`, unchanged) since it means the migration genuinely hasn't run
+  yet. Scoped to these two methods only — dashboard-only caches
+  (`ListingsCache`, `getPages`, `block-results`) are unaffected.
+
 ## [0.29.0] - 2026-09-17
 ### Removed
 - **Breaking: IP `safe` status removed** (`monitor_ip_stats.safe`,

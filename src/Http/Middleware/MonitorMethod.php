@@ -99,12 +99,27 @@ class MonitorMethod
     protected function isPathBlocked(string $path): bool
     {
         $path = strtolower($path);
+        $query = fn () => MonitorPath::where('path', $path)->where('status', 'trap')->exists();
 
-        return Cache::remember(
-            "monitor:blocked-path:{$path}",
-            (int) config('monitor.blocked_ip_cache_ttl', 60),
-            fn () => MonitorPath::where('path', $path)->where('status', 'trap')->exists()
-        );
+        try {
+            return Cache::remember(
+                "monitor:blocked-path:{$path}",
+                (int) config('monitor.blocked_ip_cache_ttl', 60),
+                $query
+            );
+        } catch (QueryException $e) {
+            // Tabela ainda não migrada: deixa subir pro catch(QueryException)
+            // de handle(), que já trata esse caso assumindo `false`.
+            throw $e;
+        } catch (\Throwable $e) {
+            // Cache store fora do ar (Redis/Memcached indisponível, etc):
+            // NÃO assume `false` aqui — deixaria passar um path que devia
+            // continuar bloqueado bem na janela de instabilidade. Em vez
+            // disso, consulta o banco direto, sem cache, só logando o aviso.
+            Log::warning('[laravel-monitor] cache store indisponível ao checar bloqueio de path — consultando banco diretamente. Erro original: '.$e->getMessage());
+
+            return $query();
+        }
     }
 
     /**
@@ -122,13 +137,29 @@ class MonitorMethod
      */
     protected function isBlocked(string $ip): bool
     {
-        return Cache::remember(
-            "monitor:blocked-ip:{$ip}",
-            (int) config('monitor.blocked_ip_cache_ttl', 60),
-            fn () => BlockedIp::where('ip', $ip)
-                ->where(fn ($q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>', now()))
-                ->exists()
-        );
+        $query = fn () => BlockedIp::where('ip', $ip)
+            ->where(fn ($q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>', now()))
+            ->exists();
+
+        try {
+            return Cache::remember(
+                "monitor:blocked-ip:{$ip}",
+                (int) config('monitor.blocked_ip_cache_ttl', 60),
+                $query
+            );
+        } catch (QueryException $e) {
+            // Tabela ainda não migrada: deixa subir pro catch(QueryException)
+            // de handle(), que já trata esse caso assumindo `false`.
+            throw $e;
+        } catch (\Throwable $e) {
+            // Cache store fora do ar (Redis/Memcached indisponível, etc):
+            // NÃO assume `false` aqui — deixaria passar um IP que devia
+            // continuar bloqueado bem na janela de instabilidade. Em vez
+            // disso, consulta o banco direto, sem cache, só logando o aviso.
+            Log::warning('[laravel-monitor] cache store indisponível ao checar bloqueio de IP — consultando banco diretamente. Erro original: '.$e->getMessage());
+
+            return $query();
+        }
     }
 
     /**

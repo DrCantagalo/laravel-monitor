@@ -685,6 +685,20 @@ blocked — the existing `blocked_ip_cache_ttl` cache (default 60s) already
 guarantees an expired block disappears from the application within that
 window, no separate job/cron needed.
 
+**Fail-safe against cache store outages (since `0.30.0`)**:
+`isBlocked()`/`isPathBlocked()` catch `\Throwable` around the
+`Cache::remember` call, separately from the existing
+`catch (QueryException)` (table not migrated yet, unchanged, still
+assumes `false`). If the cache store itself is unavailable (Redis/Memcached
+down, etc), it does **not** assume `false` — that would let a blocked
+IP/path through for the whole outage window — it runs the same query
+directly against the database instead, bypassing the cache, and logs a
+warning. Scoped to just these two methods, since they run on every
+request to the protected site; the dashboard-only caches (`getPages`,
+`getVisitorsByIp`/listings, `block_results`) don't need this — a
+temporary dashboard error is a much smaller cost than letting a scraper
+through.
+
 **Clears `monitor_ip_stats.flagged` on block (since `0.26.1`)**: right
 after saving the block, `registerOffense()` also sets
 `monitor_ip_stats.flagged = false` for that IP and invalidates the
