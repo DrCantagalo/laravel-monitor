@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.35.0] - 2026-09-19
+### Fixed
+- **`monitor:install` declining the dashboard could silently no-op**
+  (task 144, found in direct code review — `MonitorInstallCommand::
+  persistDashboardEnabled(false)` did nothing when `config/monitor.php`
+  hadn't been published yet, or when it was published by a version older
+  than `0.31.0` and had no `dashboard` key at all; in both cases the
+  provider's default (`config('monitor.dashboard.enabled', true)`) kept
+  the public route (`/monitor/handler`) loaded even though the user
+  answered no). Now: if the config file doesn't exist, `monitor:install`
+  publishes it itself before writing `dashboard.enabled = false`; if it
+  exists but is missing the `dashboard` key, the block is inserted
+  instead of relying only on the regex; if neither manages to persist the
+  value, the command warns explicitly (en/it/pt) instead of finishing
+  silently, with instructions to disable the route by hand.
+  `persistDashboardEnabled()` now returns `bool` reflecting whether the
+  value was actually persisted.
+
 ## [0.34.0] - 2026-09-18
 ### Added
 - **New scraper signal `high_cumulative_visits`** in `ScraperSignalDetector::detect`

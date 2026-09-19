@@ -36,6 +36,20 @@ just nothing sent to or exposed for the SaaS dashboard. Default is `true`
 (yes), so existing installations that never rerun `monitor:install` keep
 working exactly as before.
 
+Declining is guaranteed to take effect (since `0.35.0`): if
+`config/monitor.php` hasn't been published yet (you answered no to the
+config-publish prompt above), `monitor:install` publishes it itself before
+writing `dashboard.enabled = false`, so the route really is skipped instead
+of silently falling back to the `true` default. If the published file is
+from a version older than `0.31.0` and doesn't have the `dashboard` key at
+all, the command inserts the block instead of relying on the regex used
+for normal updates. In the rare case none of that manages to persist the
+value (e.g. `config/monitor.php` isn't writable), the command warns you
+explicitly instead of finishing silently, and tells you how to disable the
+route by hand (`'dashboard' => ['enabled' => false]` +
+`php artisan config:clear`, and `php artisan route:clear` too if routes
+are cached).
+
 After a plain `composer update drcantagalo/laravel-monitor` (bumping to a
 new version of an already-installed project), run:
 

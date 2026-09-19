@@ -27,7 +27,8 @@ class MonitorInstallCommand extends Command
             'gitignore' => "Would you like to add storage/monitor/installation.json to your .gitignore?",
             'checking' => "🔍 Checking domain...",
             'error' => "❌ Error: There was a problem registering the package.",
-            'installation_code' => "Installation completed successfully. Here is your installation code; you will need it to create your account at https://monitor.cantagalo.it: "
+            'installation_code' => "Installation completed successfully. Here is your installation code; you will need it to create your account at https://monitor.cantagalo.it: ",
+            'dashboard_not_persisted' => "⚠️ Could not persist your choice in config/monitor.php (the file could not be published or written to). The package will keep using the default and load its public route (/monitor/handler) until you manually set 'dashboard' => ['enabled' => false] in config/monitor.php and run `php artisan config:clear` (and `php artisan route:clear` if routes are cached)."
         ],
         'it' => [
             'start' => "🚀 Avvio dell'installazione di Laravel Monitor...",
@@ -44,7 +45,8 @@ class MonitorInstallCommand extends Command
             'gitignore' => "Vuoi aggiungere storage/monitor/installation.json al tuo file .gitignore?",
             'checking' => "🔍 Verifica del dominio...",
             'error' => "❌ Errore: si è verificato un problema durante la registrazione del pacchetto.",
-            'installation_code' => "Installazione completata con successo. Ecco il tuo codice di installazione; ti servirà per creare il tuo account su https://monitor.cantagalo.it: "
+            'installation_code' => "Installazione completata con successo. Ecco il tuo codice di installazione; ti servirà per creare il tuo account su https://monitor.cantagalo.it: ",
+            'dashboard_not_persisted' => "⚠️ Non è stato possibile salvare la tua scelta in config/monitor.php (il file non è stato pubblicato o non è scrivibile). Il pacchetto continuerà a usare il valore predefinito e caricherà la sua rotta pubblica (/monitor/handler) finché non imposti manualmente 'dashboard' => ['enabled' => false] in config/monitor.php ed esegui `php artisan config:clear` (e `php artisan route:clear` se le rotte sono in cache)."
         ],
         'pt' => [
             'start' => "🚀 Iniciando instalação do Laravel Monitor...",
@@ -61,7 +63,8 @@ class MonitorInstallCommand extends Command
             'gitignore' => "Deseja adicionar o arquivo storage/monitor/installation.json ao seu .gitignore?",
             'checking' => "🔍 Verificando domínio...",
             'error' => "❌ Erro: Ocorreu um problema ao registrar o pacote.",
-            'installation_code' => "Instalação concluída com sucesso. Aqui está o seu código de instalação; você precisará dele para criar sua conta em https://monitor.cantagalo.it: "
+            'installation_code' => "Instalação concluída com sucesso. Aqui está o seu código de instalação; você precisará dele para criar sua conta em https://monitor.cantagalo.it: ",
+            'dashboard_not_persisted' => "⚠️ Não foi possível gravar sua escolha em config/monitor.php (o arquivo não pôde ser publicado ou não é gravável). O pacote continuará usando o valor padrão e carregando sua rota pública (/monitor/handler) até você definir manualmente 'dashboard' => ['enabled' => false] em config/monitor.php e rodar `php artisan config:clear` (e `php artisan route:clear` se as rotas estiverem em cache)."
         ],
     ];
 
@@ -103,7 +106,9 @@ class MonitorInstallCommand extends Command
 
         $useDashboard = $this->confirm($t('use_dashboard'), true);
 
-        $this->persistDashboardEnabled($useDashboard);
+        if (! $this->persistDashboardEnabled($useDashboard) && ! $useDashboard) {
+            $this->warn($t('dashboard_not_persisted'));
+        }
 
         if (! $useDashboard) {
             return 0;
@@ -187,31 +192,64 @@ class MonitorInstallCommand extends Command
      * (`vendor:publish --tag=monitor-config`, cópia estática no projeto
      * host - ver `pub_config` acima). Regex escopado ao bloco
      * `'dashboard' => [...]` especificamente (não ao primeiro `'enabled'`
-     * que aparecer no arquivo) - se o usuário recusou publicar a config
-     * (arquivo ainda não existe), não há o que gravar aqui; o default do
-     * template (`true`) e o merge em runtime (`MonitorServiceProvider::
-     * register()`) cobrem esse caso até a config ser publicada manualmente.
+     * que aparecer no arquivo).
+     *
+     * Ao contrário da versão anterior (task 138), NÃO é um no-op silencioso
+     * quando a config ainda não foi publicada ou é de uma versão antiga sem
+     * a chave `'dashboard'`: nesses casos o default do provider
+     * (`config('monitor.dashboard.enabled', true)`) manteria a rota pública
+     * carregada mesmo com o usuário recusando a interface (task 144). Se o
+     * arquivo não existe, publica a config antes de gravar (garante o
+     * efeito real, não só um aviso); se existe mas falta a chave, insere o
+     * bloco em vez de depender só do regex. Retorna `false` só quando
+     * nenhuma dessas estratégias conseguiu persistir o valor - aí quem
+     * chama decide se avisa o usuário (só importa de fato quando
+     * `$enabled` é `false`: o default do template já é `true`).
      */
-    protected function persistDashboardEnabled(bool $enabled): void
+    protected function persistDashboardEnabled(bool $enabled): bool
     {
         $configPath = config_path('monitor.php');
 
         if (! File::exists($configPath)) {
-            return;
+            if ($enabled) {
+                // Default do template (ainda não publicado) já é `true`.
+                return true;
+            }
+
+            $this->call('vendor:publish', ['--tag' => 'monitor-config']);
         }
 
+        if (! File::exists($configPath)) {
+            return false;
+        }
+
+        $contents = File::get($configPath);
         $value = $enabled ? 'true' : 'false';
 
         $updated = preg_replace(
-            "/('dashboard'\s*=>\s*\[\s*'enabled'\s*=>\s*)(?:true|false)(,)/",
+            "/('dashboard'\s*=>\s*\[\s*'enabled'\s*=>\s*)(?:true|false)(\s*,)/",
             '${1}'.$value.'${2}',
-            File::get($configPath),
+            $contents,
             1,
             $count
         );
 
-        if ($count > 0) {
-            File::put($configPath, $updated);
+        if ($count === 0) {
+            $updated = preg_replace(
+                '/return\s*\[\s*\n/',
+                "return [\n\n    'dashboard' => [\n        'enabled' => {$value},\n    ],\n",
+                $contents,
+                1,
+                $count
+            );
         }
+
+        if ($count === 0) {
+            return false;
+        }
+
+        File::put($configPath, $updated);
+
+        return true;
     }
 }
