@@ -1297,6 +1297,30 @@ exists for manual/administrative use (e.g. `--older-than-days` greater
 than `0`, to prune by age without the blocked-IP filter, which is only
 useful on demand).
 
+**Concurrency-safe and capped since `0.36.0`** — because the automatic
+trigger runs inline in a visitor's own request (no queue), two safeguards
+protect it from running away on a busy site:
+
+- **Lock**: `maybeCleanup()` takes an atomic `Cache::add` lock before
+  pruning and releases it in a `finally` block. If two requests race past
+  the interval check at the same time, only one actually prunes; the other
+  is a no-op. A short, non-configurable safety TTL (`60s`) on the lock
+  itself guards against a process dying before it can release it (e.g. an
+  OOM kill) — it's not meant to bound how long a normal run takes.
+- **Row cap**: `monitor.data_prune_max_rows_per_run` (default `1000`)
+  caps how many `Monitor` rows a single automatic run deletes. If the
+  backlog is larger than the cap, the run deletes one capped batch and
+  **does not** advance the "last run" timestamp — the very next tracked
+  request picks up where it left off (the query is re-run from scratch
+  each time, not a frozen list, so nothing about a since-unblocked IP can
+  go stale). `monitor_ip_stats` isn't capped — it's bounded by the size of
+  `monitor_blocked_ips` itself, not by the tracking backlog, so it stays
+  cheap without chunking.
+
+This only affects the automatic trigger. `monitor:prune` and `pruneData`
+(manual/administrative use) are always uncapped and delete everything
+matching the filter in one go, exactly as before.
+
 ### `monitor:recalculate-visits` (since `0.28.0`)
 
 One-time backfill for installations updating from before `0.28.0`, when

@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.36.0] - 2026-09-20
+### Fixed
+- **`DataPruner::maybeCleanup()` (task 141) wasn't safe against
+  concurrency or backlog** (task 145, found in direct review — not
+  reproduced in production, backlog measured ~zero at the time). Because
+  the auto-prune trigger runs inline in a visitor's own request, two
+  concurrent requests with an expired cache timer could both run
+  `prune()` in parallel (the "last run" timestamp was only written
+  *after* pruning finished); and `pruneMonitors(only_blocked: true)`
+  plucked every matching `monitor_id` into PHP and issued a single
+  unbounded `whereIn(...)->delete()` — safe at the backlog sizes measured
+  so far, but a guardrail was missing for a burst of blocks or a first run
+  after backlog accumulates. Fixed with: an atomic `Cache::add` lock
+  around `maybeCleanup()` (released in `finally`, `60s` safety TTL for a
+  process that dies mid-run); and a configurable row cap
+  (`monitor.data_prune_max_rows_per_run`, default `1000`) on
+  `pruneMonitors()`'s automatic path only — `pruneMonitors()`/`prune()`
+  gain an optional `$maxRows` parameter and now return a `done` flag,
+  used by `maybeCleanup()` to skip advancing the "last run" timestamp
+  when the cap was hit, so the next tracked request continues draining
+  the backlog (re-querying from scratch each time, no frozen list). The
+  manual `monitor:prune` command and the `pruneData` HTTP action are
+  unaffected — they never pass `$maxRows` and keep deleting everything
+  matching the filter in one go, exactly as before.
+
+### Added
+- **New config `data_prune_max_rows_per_run`** (default `1000`) — see
+  "Fixed" above.
+
 ## [0.35.0] - 2026-09-19
 ### Fixed
 - **`monitor:install` declining the dashboard could silently no-op**

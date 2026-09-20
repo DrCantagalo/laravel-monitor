@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.35.0',
+    'version' => '0.36.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -136,6 +136,21 @@ return [
     // comando `monitor:prune` continua existindo pra uso manual/
     // administrativo (ex: `--older-than-days` maior que 0).
     'data_prune_interval_hours' => 1,
+
+    // Teto de linhas de `Monitor` apagadas por execução do gatilho
+    // automático acima (`Support/DataPruner::pruneMonitors()`, task 145) —
+    // guardrail preventivo contra um backlog grande (ou rajada de
+    // bloqueios) cair inteiro numa única request de visitante; NÃO se
+    // aplica ao comando `monitor:prune` nem à rota HTTP `pruneData`
+    // (uso manual/administrativo, sempre apaga tudo de uma vez, como
+    // sempre fez). Quando o teto é atingido numa execução, o timestamp de
+    // "último run" não avança e a próxima request rastreada continua
+    // drenando o backlog a partir daí (sem lista congelada — cada
+    // execução reconsulta do zero). Regime estacionário medido em
+    // produção (2026-09-20, cantagalo.it) é ~zero (poucas dezenas de
+    // linhas, não milhares), então 1000 raramente é atingido na prática —
+    // é rede de segurança, não um valor ajustado por volume esperado.
+    'data_prune_max_rows_per_run' => 1000,
 
     // Intervalo (horas) do cron que o consumidor do pacote configura pra
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa

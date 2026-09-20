@@ -29,6 +29,18 @@ class DataPruner
     protected const CACHE_KEY = 'monitor:data-prune:last-run';
 
     /**
+     * Lock de execução do gatilho automático (task 145) — chave própria,
+     * não reusa `CACHE_KEY` (o timestamp precisa continuar existindo depois
+     * que o lock já foi liberado). TTL curto (não configurável, é só uma
+     * rede de segurança contra um processo morto sem passar pelo `finally`
+     * — ex: OOM kill) evita que um lock travado bloqueie o prune pra
+     * sempre.
+     */
+    protected const LOCK_KEY = 'monitor:data-prune:lock';
+
+    protected const LOCK_TTL_SECONDS = 60;
+
+    /**
      * Gatilho automático (laravel-monitor 141), sem depender de cron do
      * consumidor: `monitor:prune` só limpava se alguém configurasse
      * `Schedule::command(...)->hourly()` por conta própria — opt-in,
@@ -42,6 +54,18 @@ class DataPruner
      * configuráveis independentemente). A query agora é indexada
      * (`pruneMonitors()` via `monitor_visit_ips`, ver acima), então rodar
      * isso inline no caminho de request é seguro, sem precisar de queue.
+     *
+     * Task 145 — duas fragilidades corrigidas aqui: (a) concorrência —
+     * como o timestamp só era gravado DEPOIS do prune, duas requests
+     * simultâneas com o cache vencido rodavam o prune em paralelo;
+     * resolvido com um lock atômico (`Cache::add`) logo no início, liberado
+     * em `finally` — quem não obtém o lock apenas retorna, a próxima
+     * request tentada de novo. (b) backlog sem teto — ver
+     * `pruneMonitors()`. Quando o teto é atingido (`done === false`), o
+     * timestamp NÃO é gravado, então a próxima request rastreada considera
+     * o prune ainda devido e retoma de onde a query (reconsultada do zero,
+     * sem lista congelada) parou — mesmo efeito prático de continuação sem
+     * precisar de estado extra além do lock.
      */
     public static function maybeCleanup(): void
     {
@@ -52,16 +76,36 @@ class DataPruner
             return;
         }
 
-        self::prune(0, true);
+        if (! Cache::add(self::LOCK_KEY, true, self::LOCK_TTL_SECONDS)) {
+            return;
+        }
 
-        Cache::forever(self::CACHE_KEY, time());
+        try {
+            $maxRows = (int) config('monitor.data_prune_max_rows_per_run', 1000);
+
+            $result = self::prune(0, true, $maxRows);
+
+            if ($result['done']) {
+                Cache::forever(self::CACHE_KEY, time());
+            }
+        } finally {
+            Cache::forget(self::LOCK_KEY);
+        }
     }
 
-    public static function prune(int $olderThanDays, bool $onlyBlocked): array
+    /**
+     * `$maxRows` é só pro caminho automático (`maybeCleanup()` passa
+     * `data_prune_max_rows_per_run`) — o comando `monitor:prune` e a rota
+     * HTTP `pruneData` continuam chamando sem esse argumento (`null`),
+     * apagando tudo de uma vez como sempre fizeram; são invocações
+     * manuais/administrativas, não algo que roda sozinho dentro de toda
+     * request de visitante.
+     */
+    public static function prune(int $olderThanDays, bool $onlyBlocked, ?int $maxRows = null): array
     {
         $cutoff = now()->subDays($olderThanDays);
 
-        $monitorsDeleted = self::pruneMonitors($cutoff, $onlyBlocked);
+        $monitors = self::pruneMonitors($cutoff, $onlyBlocked, $maxRows);
 
         $ipStatQuery = IpStat::where('last_seen', '<', $cutoff);
 
@@ -71,7 +115,7 @@ class DataPruner
 
         $ipStatsDeleted = $ipStatQuery->delete();
 
-        if ($monitorsDeleted > 0) {
+        if ($monitors['deleted'] > 0) {
             self::invalidatePagesCache();
         }
 
@@ -80,45 +124,90 @@ class DataPruner
         }
 
         return [
-            'monitors_deleted' => $monitorsDeleted,
+            'monitors_deleted' => $monitors['deleted'],
             'ip_stats_deleted' => $ipStatsDeleted,
+            'done' => $monitors['done'],
         ];
     }
 
     /**
      * Sem `only_blocked`, o delete é direto em SQL (bulk, sem carregar
-     * nada em PHP). Com `only_blocked=true` (laravel-monitor 141): antes
-     * fazia o mesmo contorno de `buildPagesResult` pré-103 — abria
-     * `data.ips` (blob JSON) em chunks de 200 pra achar interseção com IP
-     * bloqueado em PHP, sem índice. `monitor_visit_ips` (task 104, já
-     * mantida em sincronia a cada save de `Monitor`) resolve o mesmo
-     * mapeamento IP->Monitor via índice em `ip`, então o join agora é uma
-     * query indexada só — ainda respeitando o cutoff, não muda o
-     * comportamento de `--older-than-days`, só fica mais rápido por
-     * dentro.
+     * nada em PHP) — inalcançável a partir de `maybeCleanup()` (sempre
+     * chama com `only_blocked=true`), então `$maxRows` não se aplica a
+     * esse ramo.
+     *
+     * Com `only_blocked=true` (laravel-monitor 141): antes fazia o mesmo
+     * contorno de `buildPagesResult` pré-103 — abria `data.ips` (blob
+     * JSON) em chunks de 200 pra achar interseção com IP bloqueado em PHP,
+     * sem índice. `monitor_visit_ips` (task 104, já mantida em sincronia a
+     * cada save de `Monitor`) resolve o mesmo mapeamento IP->Monitor via
+     * índice em `ip`, então o join agora é uma query indexada só.
+     *
+     * Task 145 — teto de linhas por execução (`$maxRows`, só setado pelo
+     * caminho automático): em vez de `pluck()` de todos os IDs elegíveis
+     * pra PHP sem limite, busca no máximo `$maxRows + 1` (a linha extra
+     * só serve pra detectar se sobrou mais sem precisar contar o total) e
+     * apaga só os primeiros `$maxRows`, ordenado por `monitor_id` pra cada
+     * chamada avançar num pedaço diferente do backlog em vez de reprocessar
+     * sempre o mesmo topo indefinido. `done=false` quando a linha extra
+     * apareceu (sobrou backlog); `maybeCleanup()` usa isso pra não gravar o
+     * timestamp de "último run" e deixar a próxima request continuar dessa
+     * mesma query (sem estado extra — não há lista congelada, então não há
+     * risco de dado desatualizado, só custo de requery, aceitável dado que
+     * o backlog em regime estacionário é ~zero, ver task 145).
+     *
+     * `monitor_ip_stats` (em `prune()`) NÃO usa o mesmo teto: a lista de
+     * IPs bloqueados que restringe aquele delete (`BlockedIp::pluck('ip')`)
+     * é limitada ao tamanho de `monitor_blocked_ips` (181 linhas medidas em
+     * produção — cresce devagar, é a MESMA lista que já paginava sem teto
+     * em `BlockedIpCleaner`), não ao volume de tracking acumulado que
+     * motivou este teto; comprovadamente leve o bastante pra não precisar
+     * de chunk.
      */
-    public static function pruneMonitors(Carbon $cutoff, bool $onlyBlocked): int
+    public static function pruneMonitors(Carbon $cutoff, bool $onlyBlocked, ?int $maxRows = null): array
     {
         if (! $onlyBlocked) {
-            return Monitor::where('updated_at', '<', $cutoff)->delete();
+            return [
+                'deleted' => Monitor::where('updated_at', '<', $cutoff)->delete(),
+                'done' => true,
+            ];
         }
 
         $blockedIps = BlockedIp::pluck('ip');
 
         if ($blockedIps->isEmpty()) {
-            return 0;
+            return ['deleted' => 0, 'done' => true];
         }
 
-        $ids = DB::table('monitor_visit_ips')
+        $query = DB::table('monitor_visit_ips')
             ->whereIn('ip', $blockedIps)
-            ->distinct()
-            ->pluck('monitor_id');
+            ->distinct();
+
+        if ($maxRows === null) {
+            $ids = $query->pluck('monitor_id');
+
+            if ($ids->isEmpty()) {
+                return ['deleted' => 0, 'done' => true];
+            }
+
+            return [
+                'deleted' => Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete(),
+                'done' => true,
+            ];
+        }
+
+        $ids = $query->orderBy('monitor_id')->limit($maxRows + 1)->pluck('monitor_id');
+        $done = $ids->count() <= $maxRows;
+        $ids = $ids->take($maxRows);
 
         if ($ids->isEmpty()) {
-            return 0;
+            return ['deleted' => 0, 'done' => $done];
         }
 
-        return Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete();
+        return [
+            'deleted' => Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete(),
+            'done' => $done,
+        ];
     }
 
     /**
