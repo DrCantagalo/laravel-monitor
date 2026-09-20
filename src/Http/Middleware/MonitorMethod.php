@@ -6,6 +6,7 @@ use Closure;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Support\AnonymousVisitorTracker;
+use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Drcantagalo\LaravelMonitor\Support\SessionVisitorTracker;
 use Exception;
 use Illuminate\Database\QueryException;
@@ -52,14 +53,44 @@ class MonitorMethod
         // feito mas migrations ainda não rodaram), essa query não pode
         // derrubar o site inteiro do cliente. abort(403) fica FORA do try
         // pra não ser engolido pelo catch.
+        //
+        // As duas checagens ficam separadas (em vez de um único OR) porque
+        // precisamos saber qual delas disparou: um IP que bate num path
+        // honeypot precisa entrar em `monitor_blocked_ips` (task 146) — mas
+        // só na primeira vez, antes de já estar bloqueado por IP. O `&&`
+        // com `! $ipBlocked` preserva o short-circuit que o `||` original já
+        // dava (IP já bloqueado nunca chega a consultar `isPathBlocked`),
+        // então esse ramo continua sem custo extra no caminho quente comum.
         try {
-            $blocked = $this->isBlocked($ip) || $this->isPathBlocked($pathOnly);
+            $ipBlocked = $this->isBlocked($ip);
+            $pathBlocked = ! $ipBlocked && $this->isPathBlocked($pathOnly);
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] tabela monitor_blocked_ips ou monitor_paths não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
-            $blocked = false;
+            $ipBlocked = false;
+            $pathBlocked = false;
         }
 
-        if ($blocked) {
+        if ($ipBlocked || $pathBlocked) {
+            if ($pathBlocked) {
+                // Honeypot = sinal de maior confiança (README "Honeypot
+                // hits"): um hit já basta pra registrar a ofensa e entrar
+                // pra `monitor_blocked_ips`, mesma escada temporária/
+                // escalonada do resto do auto-block. `$pathBlocked` só é
+                // true quando `$ipBlocked` ainda é false, então isso roda
+                // no máximo uma vez por ciclo de bloqueio — a partir do 2º
+                // hit `isBlocked($ip)` já responde antes de chegar aqui, sem
+                // incrementar `strike_count`/`lifetime_offense_count` de
+                // novo (ver ScraperBlocker::registerOffense). Try/catch:
+                // falha ao registrar (banco fora, tabela ausente) não pode
+                // impedir o abort(403) abaixo nem virar 500 — mesmo
+                // fail-open do resto do método.
+                try {
+                    (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
+                } catch (\Throwable $e) {
+                    Log::warning('[laravel-monitor] falha ao registrar ofensa automática de honeypot — Erro original: '.$e->getMessage());
+                }
+            }
+
             $this->recordBlockedAttempt($ip);
             abort(403);
         }

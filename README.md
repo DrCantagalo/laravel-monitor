@@ -763,17 +763,31 @@ human reviewing the flagged-IP queue required:
   trackers wire this up, not just the session one — real scrapers
   typically don't carry a session, so covering only
   `SessionVisitorTracker` would miss the common case.
-- **Honeypot hits** (`flagScraperPath`): any IP seen hitting a path
-  flagged as a honeypot registers an offense immediately — a single hit
-  is enough, no signal count needed, since a path nobody legitimate would
-  ever request is already the highest-confidence signal available.
-  Before `0.16.0` this called `BlockedIp::firstOrCreate()` directly
-  (permanent, static block from the first hit); it now goes through the
-  same escalating/expiring mechanism as every other automatic block.
+- **Honeypot hits**: any IP seen hitting a path flagged as a honeypot
+  registers an offense immediately — a single hit is enough, no signal
+  count needed, since a path nobody legitimate would ever request is
+  already the highest-confidence signal available. This holds both at the
+  moment a path is flagged (`flagScraperPath`/`flagScraperPaths`, sweeping
+  every IP that already visited it) and for any hit that happens
+  afterwards (`MonitorMethod`, since `0.37.0`): the first request from an
+  IP that isn't already blocked registers the offense and blocks it before
+  the request is denied; once blocked, later hits from the same IP just
+  take the 403 like any other blocked IP — one offense per block cycle,
+  not one per request, so a bot hammering the honeypot doesn't escalate to
+  a permanent block by itself. Before `0.16.0` this called
+  `BlockedIp::firstOrCreate()` directly (permanent, static block from the
+  first hit); it now goes through the same escalating/expiring mechanism
+  as every other automatic block.
 
 Curating which paths count as a honeypot stays 100% manual (a human still
 decides which routes nobody legitimate would ever hit) — only what
-happens when one is hit follows the escalation system above.
+happens when one is hit follows the escalation system above. Two things
+keep a honeypot path from tripping up legitimate traffic: list it as
+`Disallow` in `robots.txt` (well-behaved bots won't request it) and never
+link it anywhere in your own HTML (avoids prefetchers/link checkers
+triggering a false positive). A shared IP behind CGNAT still pays the
+first strike's 2h block if it does get hit — that's an accepted cost of
+the honeypot being cheap to operate.
 
 ### Periodic cleanup (since `0.17.0`)
 

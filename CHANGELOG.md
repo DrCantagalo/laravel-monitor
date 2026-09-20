@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.37.0] - 2026-09-20
+### Fixed
+- **Honeypot hits after the initial flag never blocked the IP** (task
+  146, found in direct review — code read, not reproduced in production).
+  `ScraperBlocker::registerOffense($ip, 'scraper-path')` was only called
+  from `flagScraperPath()`/`flagScraperPaths()` — the moment a human flags
+  a path, and only for IPs that had already visited it by then. After
+  that, `MonitorMethod::handle()` treated a honeypot hit the same as any
+  other blocked request: `recordBlockedAttempt()` + `abort(403)`, with no
+  write to `monitor_blocked_ips` — the IP stayed free to hit every other
+  path. `MonitorMethod::handle()` now distinguishes the two block reasons:
+  an IP already in `monitor_blocked_ips` keeps the plain `403` as before;
+  an IP only caught by `isPathBlocked()` (not yet blocked) now calls
+  `registerOffense($ip, 'scraper-path')` before the `403`, same as the
+  flag-time sweep. `registerOffense()` is only reached while the IP isn't
+  already blocked, so a bot hammering the honeypot registers exactly one
+  offense per block cycle, not one per request — from the second hit
+  onward `isBlocked($ip)` already short-circuits before `isPathBlocked()`
+  is even evaluated (same short-circuit the previous single `||`
+  expression had). Wrapped in its own `try`/`catch` so a failure to write
+  the offense (DB down, table missing) still falls through to `abort(403)`
+  instead of a `500`, matching the fail-open behavior of the rest of the
+  middleware.
+
 ## [0.36.0] - 2026-09-20
 ### Fixed
 - **`DataPruner::maybeCleanup()` (task 141) wasn't safe against
