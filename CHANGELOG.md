@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.38.0] - 2026-09-20
+### Fixed
+- **`DataPruner`'s `only_blocked` filter counted an expired temporary
+  block as still "blocked"** (task 147, found in direct review — code
+  read, not reproduced in production). `DataPruner::pruneMonitors()` and
+  the `monitor_ip_stats` delete in `prune()` both matched against
+  `BlockedIp::pluck('ip')` — every row in `monitor_blocked_ips`,
+  including one whose `blocked_until` had already passed. That row is
+  kept on purpose after expiry (it feeds the escalating block duration on
+  the IP's *next* offense), but for pruning purposes it made an IP that
+  had served its temporary block and gone back to normal browsing have
+  its tracking wiped on every automatic cleanup cycle
+  (`DataPruner::maybeCleanup()`, task 141), losing legitimate `IpStat`/
+  `Monitor` history for a visitor no longer being blocked. New
+  `BlockedIp::active()` scope (currently-blocked: permanent, or temporary
+  and not yet expired — the same predicate `MonitorMethod::isBlocked()`
+  already used, now shared instead of duplicated) replaces the unscoped
+  `pluck('ip')` in both `only_blocked` code paths; `monitor:prune
+  --only-blocked` and the `pruneData` HTTP action inherit the fix
+  automatically (same underlying class). No behavior change for
+  `--older-than-days` without `--only-blocked`, and no new table —
+  `strike_count`/`lifetime_offense_count` stay on `monitor_blocked_ips`.
+
 ## [0.37.0] - 2026-09-20
 ### Fixed
 - **Honeypot hits after the initial flag never blocked the IP** (task

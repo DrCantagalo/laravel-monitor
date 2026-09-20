@@ -1259,10 +1259,9 @@ partial, filtered delete:
   older than `now() - older_than_days` days, and `monitor_ip_stats`
   rows whose `last_seen` is older than the same cutoff.
 - `only_blocked` (optional boolean, default `false`): when `true`,
-  restricts the delete to rows belonging to an IP present in
-  `monitor_blocked_ips` (confirmed/blocked, not just flagged by the live
-  heuristic) — matched via `data.ips` on `Monitor`, the `ip` column on
-  `IpStat` — instead of every row past the cutoff.
+  restricts the delete to rows belonging to an IP **currently blocked**
+  in `monitor_blocked_ips` — matched via `data.ips` on `Monitor`, the
+  `ip` column on `IpStat` — instead of every row past the cutoff.
   > ⚠️ **Breaking change in v0.7.0**: this parameter was named
   > `only_scraper_flagged` and matched `data.flags.scraper`/
   > `IpStat.flagged` instead — the automatic, non-cumulative heuristic
@@ -1271,6 +1270,17 @@ partial, filtered delete:
   > for an IP on an unreviewed false positive. It now matches
   > `monitor_blocked_ips` (an IP the user actually confirmed/blocked)
   > instead.
+  > ⚠️ **Behavior change in v0.38.0**: "blocked" here used to mean *any*
+  > row in `monitor_blocked_ips`, including a temporary block whose
+  > `blocked_until` had already expired — that row intentionally lives on
+  > after expiry (it feeds the escalating block duration on the *next*
+  > offense, see "Manual IP blocking"/`ScraperBlocker`), but treating it
+  > as still-blocked for pruning purposes meant an IP that served its
+  > temporary block and went back to being a normal visitor kept having
+  > its tracking wiped every automatic cleanup cycle. `only_blocked` now
+  > only matches a currently-active block (permanent, or temporary and
+  > not yet expired) — same check `MonitorMethod` itself uses to decide
+  > whether to block a request (`BlockedIp::active()`).
 
 Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4}`.
 

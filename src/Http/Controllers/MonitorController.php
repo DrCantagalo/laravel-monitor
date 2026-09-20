@@ -953,6 +953,15 @@ class MonitorController extends Controller
      * já espera das outras abas, com os campos extras de `BlockedIp`
      * (`blocked_until`, `strike_count`, `lifetime_offense_count`,
      * `last_offense_at`, `source`) só somados, nunca substituindo nada.
+     *
+     * Decisão (task 147, revisada junto com `DataPruner::active()`): esta
+     * aba continua listando `BlockedIp::query()` sem filtro de vigência
+     * (inclusive bloqueio temporário já expirado) — de propósito, ao
+     * contrário do prune. Aqui é uma visão de HISTÓRICO/reputação (quem já
+     * foi confirmado scraper alguma vez, com `strike_count`/
+     * `lifetime_offense_count`), não uma checagem de "bloqueado agora"; o
+     * `blocked_until` já vai na resposta, então o frontend consegue
+     * distinguir um bloqueio vigente de um expirado sem esconder a linha.
      */
     protected function buildBlockedVisitorsResult(int $page, int $perPage, ?string $dateFrom, ?string $dateTo): array
     {

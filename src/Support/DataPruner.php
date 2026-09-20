@@ -22,7 +22,29 @@ use Illuminate\Support\Facades\DB;
  * um IP já confirmado como scraper não tem valor, e o volume de dados
  * cresce rápido por causa deles — sem isso, só existia o cutoff manual por
  * idade (`older_than_days`), sem meio de purgar automaticamente assim que
- * um IP é bloqueado.
+ * um IP é bloqueado. Desde a task 147, "bloqueado" aqui significa bloqueio
+ * VIGENTE (`BlockedIp::active()`) — uma linha de bloqueio temporário já
+ * expirado não conta mais, ver docblock de `pruneMonitors()`.
+ *
+ * **Nota de investigação (task 147)**: uma anomalia foi reportada em
+ * produção (`cantagalo.it`, 2026-09-20, laravel-monitor 0.35.0) — um IP
+ * com bloqueio temporário já expirado em `monitor_blocked_ips` continuava
+ * com uma linha ativa (não purgada) em `monitor_ip_stats`, mesmo com o
+ * auto-prune tendo rodado depois da linha existir. Não foi possível
+ * reproduzir (sem acesso aos dados de produção). Revisão do código não
+ * encontrou nenhum bug de lógica no caminho do `DELETE` em si — o delete
+ * de `monitor_ip_stats` em `prune()` roda sempre (sem teto, mesmo depois
+ * da task 145), e uma chamada direta e determinística a `prune(0, true)`
+ * apaga uma linha elegível corretamente (ver testes). A hipótese mais
+ * provável, não confirmada: um mismatch de string entre
+ * `monitor_blocked_ips.ip` e `monitor_ip_stats.ip` pro mesmo cliente real
+ * (ex: IPv4 vs. representação IPv4-mapped-IPv6, dependendo de qual hop de
+ * proxy populou `$request->ip()` em requests diferentes — ver
+ * `TrustProxies`) — `whereIn('ip', ...)` compara string exata, então um
+ * mismatch assim nunca gera erro, só nunca casa aquela linha específica,
+ * indefinidamente. Se o sintoma reaparecer, comparar a string exata de
+ * `monitor_blocked_ips.ip` com `monitor_ip_stats.ip` pro mesmo IP (byte a
+ * byte, não só visualmente) antes de assumir outra causa.
  */
 class DataPruner
 {
@@ -110,7 +132,7 @@ class DataPruner
         $ipStatQuery = IpStat::where('last_seen', '<', $cutoff);
 
         if ($onlyBlocked) {
-            $ipStatQuery->whereIn('ip', BlockedIp::pluck('ip'));
+            $ipStatQuery->whereIn('ip', BlockedIp::active()->pluck('ip'));
         }
 
         $ipStatsDeleted = $ipStatQuery->delete();
@@ -157,12 +179,22 @@ class DataPruner
      * o backlog em regime estacionário é ~zero, ver task 145).
      *
      * `monitor_ip_stats` (em `prune()`) NÃO usa o mesmo teto: a lista de
-     * IPs bloqueados que restringe aquele delete (`BlockedIp::pluck('ip')`)
-     * é limitada ao tamanho de `monitor_blocked_ips` (181 linhas medidas em
-     * produção — cresce devagar, é a MESMA lista que já paginava sem teto
-     * em `BlockedIpCleaner`), não ao volume de tracking acumulado que
-     * motivou este teto; comprovadamente leve o bastante pra não precisar
-     * de chunk.
+     * IPs bloqueados que restringe aquele delete (`BlockedIp::active()->
+     * pluck('ip')`) é limitada ao tamanho de `monitor_blocked_ips` (181
+     * linhas medidas em produção — cresce devagar, é a MESMA lista que já
+     * paginava sem teto em `BlockedIpCleaner`), não ao volume de tracking
+     * acumulado que motivou este teto; comprovadamente leve o bastante pra
+     * não precisar de chunk.
+     *
+     * Task 147: `only_blocked` só considera bloqueio VIGENTE
+     * (`BlockedIp::active()`, mesmo predicado de `MonitorMethod::
+     * isBlocked()`) — antes usava `BlockedIp::pluck('ip')` sem filtro,
+     * tratando um bloqueio temporário já expirado como "ainda bloqueado"
+     * pra fins de purga, apagando o tracking de um IP que já voltou a ser
+     * um visitante normal (a linha em `monitor_blocked_ips` continua
+     * existindo de propósito depois de expirar, só pra alimentar a escada
+     * de `strike_count`/`lifetime_offense_count` do próximo bloqueio, ver
+     * `ScraperBlocker::registerOffense`).
      */
     public static function pruneMonitors(Carbon $cutoff, bool $onlyBlocked, ?int $maxRows = null): array
     {
@@ -173,7 +205,7 @@ class DataPruner
             ];
         }
 
-        $blockedIps = BlockedIp::pluck('ip');
+        $blockedIps = BlockedIp::active()->pluck('ip');
 
         if ($blockedIps->isEmpty()) {
             return ['deleted' => 0, 'done' => true];

@@ -161,16 +161,17 @@ class MonitorMethod
      *
      * `blocked_until` null = permanente (bloqueio manual, ou automático já
      * escalado a permanente — ver `ScraperBlocker::registerOffense`);
-     * um `blocked_until` no passado não conta mais como bloqueado. Como o
-     * TTL do cache acima já é curto por padrão (60s), a expiração natural
-     * do cache garante que um bloqueio expirado some da aplicação nesse
-     * intervalo, sem precisar de nenhum job/cron dedicado.
+     * um `blocked_until` no passado não conta mais como bloqueado (mesmo
+     * predicado de `BlockedIp::scopeActive()`, task 147 — reusado daqui em
+     * vez de duplicado, pra nunca divergir do que `DataPruner` considera
+     * "bloqueado agora"). Como o TTL do cache acima já é curto por padrão
+     * (60s), a expiração natural do cache garante que um bloqueio expirado
+     * some da aplicação nesse intervalo, sem precisar de nenhum job/cron
+     * dedicado.
      */
     protected function isBlocked(string $ip): bool
     {
-        $query = fn () => BlockedIp::where('ip', $ip)
-            ->where(fn ($q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>', now()))
-            ->exists();
+        $query = fn () => BlockedIp::where('ip', $ip)->active()->exists();
 
         try {
             return Cache::remember(
