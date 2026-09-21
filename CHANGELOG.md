@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.40.0] - 2026-09-21
+### Fixed
+- **`getVisitorsByIp` showed an IP as "blocked" after its temporary block
+  had expired** (task 149, found in production on `cantagalo.it`: an IP
+  blocked for 2h on 2026-09-18 came back, was re-flagged as a possible
+  scraper, and the dashboard listed it as flagged *and* blocked at the
+  same time). Same root cause as 0.38.0's `DataPruner` fix, missed in
+  this code path: `blocked` and the `flagged`/`clean` exclusion used
+  `BlockedIp::pluck('ip')` (every row in `monitor_blocked_ips`, including
+  expired temporary blocks that are kept on purpose for the escalation
+  ladder). It now uses `BlockedIp::active()`, so an IP whose block
+  expired is shown by its real state (flagged or clean, not blocked) and
+  appears in the `filter=flagged` review queue again. The `filter=blocked`
+  tab is unchanged: it stays a history/reputation view listing expired
+  blocks too (with `blocked_until` in the response).
+
 ## [0.39.0] - 2026-09-21
 ### Changed
 - **Honeypot hits now respond `404` on the first hit from a not-yet-blocked

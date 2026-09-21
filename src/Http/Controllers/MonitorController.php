@@ -888,7 +888,14 @@ class MonitorController extends Controller
             $query->where('last_seen', '<=', $dateTo);
         }
 
-        $blockedIps = BlockedIp::pluck('ip');
+        // Task 149: só bloqueio vigente (`BlockedIp::active()`, mesmo
+        // predicado de `MonitorMethod::isBlocked()`). Antes era
+        // `BlockedIp::pluck('ip')`, que incluía a linha de um bloqueio
+        // temporário já expirado (mantida de propósito pra escada de
+        // `strike_count`) - o IP voltava a ser tracked e flagado, mas o
+        // dashboard seguia mostrando "blocked" + "possible scraper" ao
+        // mesmo tempo, e o IP nem entrava na fila `flagged`.
+        $blockedIps = BlockedIp::active()->pluck('ip');
 
         match ($filter) {
             // whereNotIn($blockedIps): um IP já bloqueado já foi
