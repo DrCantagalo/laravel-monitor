@@ -703,11 +703,23 @@ below for the bug this avoids:
 
 - **First offense**: `strike_count`/`lifetime_offense_count` both start
   at `1`, block lasts `2^1 = 2` hours.
-- **Each subsequent offense** (before the block from the previous one
-  fully decays, see below) doubles the exponent on `strike_count`: 2nd
-  offense → `2^2 = 4h`, 3rd → `2^3 = 8h`, 4th → `2^4 = 16h`, and so on.
-  `lifetime_offense_count` simply increments by 1 every time,
-  unconditionally.
+- **Each subsequent offense** — an offense committed *after* the previous
+  block has expired (the IP came back and reoffended) — doubles the
+  exponent on `strike_count`: 2nd offense → `2^2 = 4h`, 3rd → `2^3 = 8h`,
+  4th → `2^4 = 16h`, and so on. `lifetime_offense_count` increments by 1
+  each time.
+- **One attack is one offense (since `0.44.0`)**: while an IP's block is
+  in force (permanent, or temporary and not yet expired), a new offense
+  counts for nothing — `strike_count`, `lifetime_offense_count`,
+  `blocked_until`, `last_offense_at` and `source` stay exactly as they are.
+  The counters exist so an IP that "regenerated" can come back later and,
+  if it reoffends after each block, be blocked for longer and eventually
+  permanently; how many infractions it committed inside a single attack is
+  irrelevant. Before `0.44.0`, flagging many honeypot paths at once
+  (`flagScraperPaths`, e.g. the AI triage marking 125 paths) registered one
+  offense *per path* for every IP that had hit them: 125 strikes and a
+  permanent block from the first batch. `flagScraperPaths` now also
+  registers a single offense per IP for the whole batch.
 - **Decay**: every `config('monitor.auto_block_strike_decay_cooldown_days')`
   (default `30`) days that pass *without* a new offense from that IP,
   `strike_count` drops by 1 (never below 1) the next time that IP offends

@@ -39,10 +39,27 @@ class ScraperBlocker
      * (se aplicável), incrementando `strike_count` e `lifetime_offense_count`,
      * e recalculando `blocked_until` — cria a linha em `monitor_blocked_ips`
      * se ainda não existir. Retorna o model já salvo.
+     *
+     * **Um ataque é uma ofensa só.** Enquanto o IP tem um bloqueio VIGENTE
+     * (permanente, ou temporário que ainda não expirou), uma nova ofensa não
+     * soma nada — nem `strike_count`, nem `lifetime_offense_count`, nem mexe
+     * em `blocked_until`/`last_offense_at`: retorna a linha como está. A
+     * contagem de ofensas existe pra escada de reincidência (um IP que
+     * "regenerou" pode voltar depois; quem reincide depois de cada bloqueio
+     * fica bloqueado por mais tempo, até virar permanente), então o que
+     * importa é quantas VEZES o IP voltou a ofender depois de bloqueado, não
+     * quantas infrações cometeu no mesmo ataque. Antes disso, marcar 125
+     * paths como armadilha de uma vez (`flagScraperPaths`, ex: triagem por IA)
+     * chamava isto uma vez por path para o mesmo IP: 125 strikes e bloqueio
+     * permanente de primeira (limite de 10 ofensas na vida).
      */
     public function registerOffense(string $ip, string $source): BlockedIp
     {
         $blockedIp = BlockedIp::firstOrNew(['ip' => $ip]);
+
+        if ($blockedIp->exists && $blockedIp->isActive()) {
+            return $blockedIp;
+        }
 
         $strikeCount = $blockedIp->exists ? (int) $blockedIp->strike_count : 0;
         $lifetimeOffenseCount = $blockedIp->exists ? (int) $blockedIp->lifetime_offense_count : 0;

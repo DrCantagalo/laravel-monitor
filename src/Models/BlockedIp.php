@@ -34,4 +34,14 @@ class BlockedIp extends Model
             fn (Builder $q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>', now())
         );
     }
+
+    /**
+     * Mesmo predicado de `scopeActive()`, pra uma linha já carregada: o
+     * bloqueio desta linha está vigente agora (permanente, ou temporário
+     * ainda não expirado)?
+     */
+    public function isActive(): bool
+    {
+        return $this->blocked_until === null || $this->blocked_until->isFuture();
+    }
 }

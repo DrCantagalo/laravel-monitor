@@ -1653,9 +1653,15 @@ class MonitorController extends Controller
             $flagged[] = $path;
 
             foreach (array_keys($ipsByPath[$path] ?? []) as $ip) {
-                (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
                 $blockedIps[$ip] = true;
             }
+        }
+
+        // Uma ofensa por IP, não por (path, IP): o mesmo scraper costuma ter
+        // batido em dezenas de paths do lote, e é um ataque só (ver
+        // `ScraperBlocker::registerOffense`).
+        foreach (array_keys($blockedIps) as $ip) {
+            (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
         }
 
         if (empty($flagged)) {

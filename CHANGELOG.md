@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.44.0] - 2026-09-21
+### Fixed
+- **One attack is one offense.** `ScraperBlocker::registerOffense()` now does
+  nothing (returns the row untouched) while the IP has a block in force —
+  permanent, or temporary and not yet expired — so `strike_count`,
+  `lifetime_offense_count`, `blocked_until`, `last_offense_at` and `source`
+  aren't changed. Found on `cantagalo.it`: the AI triage flagged 125 honeypot
+  paths in one run, `flagScraperPaths` registered an offense *per path* for the
+  scraper that had hit them all, and the IP ended with 126 strikes and a
+  **permanent** block on its first incident (the permanent threshold is 10
+  lifetime offenses). The ladder exists so a regenerated IP can return later
+  and be blocked longer if it reoffends after each block — not to count how
+  many infractions one attack contained. An offense after the block has
+  expired counts normally (recidivism, decay and the 10-offense permanent
+  threshold are unchanged).
+- `flagScraperPaths` registers one offense per IP for the whole batch
+  instead of one per (path, IP) (also saves N writes and N cache/listing
+  invalidations per IP).
+- New `BlockedIp::isActive()` (same predicate as `scopeActive()`, for a loaded
+  row).
+
+---
+
 ## [0.43.0] - 2026-09-21
 ### Added
 - **`monitor.ignore_ips`** (env `MONITOR_IGNORE_IPS`, comma-separated): IPs or
