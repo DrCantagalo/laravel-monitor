@@ -125,26 +125,19 @@ loading a full `Monitor` row into PHP:
 
 - **`visitors_total`**: `Monitor::count()` — one row per recognized
   device/browser (see "Remember-me" above).
-- **`visits_total`**: `SUM` of `data.visits` across every row, computed in
-  SQL directly on the JSON column (`JSON_EXTRACT`/`json_extract`
-  depending on the driver) — never loads a row into PHP. `data.visits`
-  counts one visit per **new PHP session** for that visitor, not per page
-  view — a visitor browsing multiple pages in the same session only
-  counts as one visit (since `0.28.0`; before that, every request within
-  an already-tracked session incorrectly incremented `data.visits`, see
-  CHANGELOG `[0.28.0]` and `monitor:recalculate-visits` below for the
-  backfill).
-- **`sessions_total`**: `SUM` of the length of `data.sessions` per row
-  (`JSON_LENGTH`/`json_array_length`), also computed in SQL. This is a
-  count of recorded sessions, **not** a cross-row deduplicated count —
-  in practice a session id only ever belongs to one `Monitor` row, so
-  this already reflects the real total in the overwhelming majority of
-  installs, but there's no dedicated table enforcing that globally
-  (unlike IPs, see below).
+- **`visits_total`**: `COUNT(*)` of `monitor_visits` (see "Visits"
+  below) — one row per **new PHP session**, not per page view. A visitor
+  browsing multiple pages in the same session is one visit. Only counts
+  visits recorded since `0.42.0` (until `0.41.0` this was a `SUM` of
+  `data.visits` over the JSON blob, which is no longer written) and stays
+  `0` with `monitor.track_visits` turned off.
+- **`sessions_total`**: since `0.42.0` a visit **is** a PHP session, so
+  this is the same number as `visits_total`. Both keys are kept in the
+  response for backward compatibility.
 - **`unique_ips_total`**: `IpStat::count()` — reuses `monitor_ip_stats`
   (see "Per-IP stats" below), which already keeps exactly one row per
-  unique IP ever seen. Deliberately **not** a scan/dedupe of
-  `data.ips` across every `Monitor` row.
+  unique IP ever seen. Deliberately **not** a dedupe of
+  `monitor_visit_ips` across every `Monitor`.
 - **`blocked_attempts_total`**: unchanged, see "Blocked-attempt counter"
   below.
 - All four new totals share a short, fixed cache TTL
@@ -164,8 +157,9 @@ the full rationale.
 
 When `MonitorMethod` creates a new `Monitor` record for a first-time
 visitor (session-based, non-bot request), it generates a random token,
-stores it in `data['id-token']`, and attaches it to the response as a
-long-duration cookie so the same browser can be recognized again after its
+stores it in the `monitors.id_token` column (unique index; until `0.41.0`
+it lived in `data['id-token']` and was looked up by scanning the JSON of
+every row), and attaches it to the response as a long-duration cookie so the same browser can be recognized again after its
 PHP session expires.
 
 > ⚠️ **Breaking change in v0.2.0**: the public `GET /monitor/remember-me`
@@ -337,22 +331,30 @@ what did each of them do".
   "last_activity": "2026-08-30T12:00:00+00:00", "name": null, "email":
   null}, ...], "meta": {"page", "per_page", "total", "last_page"}}`,
   ordered by `last_activity` descending. Aggregation
-  (`SUM(data.visits)`/`MAX(updated_at)`) and pagination run in SQL,
-  grouped by the same indexed generated column `Monitor::forUserId()`
-  uses on MySQL (`monitors_user_id`) — never the raw `data->user_id`
-  expression, for the same index-matching reason documented above.
-  - Since `0.12.0`: `visits_count` sums `data.visits` per `user_id`
-    (same portable MySQL/SQLite JSON expression `visitsTotal()` uses in
-    `getData`) instead of counting `Monitor` rows. A `Monitor` row is
+  (`COUNT` of visits/`MAX(monitors.updated_at)`) and pagination run in
+  SQL, grouped by the same indexed generated column
+  `Monitor::forUserId()` uses on MySQL (`monitors_user_id`) — never the
+  raw `data->user_id` expression, for the same index-matching reason
+  documented above.
+  - `visits_count` counts `monitor_visits` rows per `user_id` (a
+    `LEFT JOIN`, so a `Monitor` with no visit recorded yet still counts
+    as `0`) instead of counting `Monitor` rows. A `Monitor` row is
     reused across sessions for the same device/browser (reconnected via
     the remember-me cookie), not created per visit, so counting rows
     used to always give `1` for a user who only ever visits from the
-    same browser.
+    same browser. (`0.12.0`–`0.41.0` summed `data.visits` from the JSON
+    blob instead, which is no longer written.)
 - **`getUserVisits`**: given `user_id` (required, `422` if missing),
-  paginated listing of that user's raw `Monitor` rows (via
-  `Monitor::forUserId($id)`, newest first) — `id`, `data` (pages, IPs,
-  session ids, everything already tracked per device/browser),
-  `created_at`, `updated_at`. Same `page`/`per_page` params as
+  paginated listing of that user's `Monitor` rows (via
+  `Monitor::forUserId($id)`, newest first) — `id`, `data`,
+  `created_at`, `updated_at`, plus (since `0.42.0`) `visits`: that
+  device's last 20 rows of `monitor_visits` (`id`, `paths` in access
+  order, `scraper`, `created_at`, `updated_at`). Since `0.42.0`
+  `data.page` and `data.ips` are no longer stored in the blob, so this
+  action **rebuilds** them into each row's `data` from
+  `monitor_page_hits` (`{path: hits}`) and `monitor_visit_ips` (list of
+  IPs), keeping the response shape existing dashboards read
+  (`row.data.page`, `row.data.ips`). Same `page`/`per_page` params as
   `getUsers`.
 - **`name`/`email`**: the package never queries a host app's `users`
   table (arbitrary schema, out of scope for a host-agnostic package).
@@ -402,7 +404,8 @@ application's backend — only a short-lived, read-only token does.
 ## 404 tracking + scrapper path blocking
 
 `MonitorMethod` records, per visited path, whether the response was a
-`404` (`data.not_found[path] = true`) — aggregated by `getPages` (see
+`404` (`monitor_page_hits.not_found`, sticky once set; `data.not_found[path]`
+until `0.41.0`) — aggregated by `getPages` (see
 "Paginated page listing" below) into a `not_found` flag per path, letting
 a dashboard flag paths that don't actually exist on the monitored site (a
 common scraper tell: `/wp-admin/install.php` on a site that isn't
@@ -464,12 +467,13 @@ only ever came from `getPages`.
      state" below). From then on, `MonitorMethod` rejects any request
      whose path matches, **regardless of host** — an installation shared
      by multiple subdomains is protected on all of them at once, since the
-     block check ignores the host prefix that `data.page` uses. **Since
+     block check ignores the host prefix that tracked paths carry
+     (`host/path`, in `monitor_page_hits.path`). **Since
      `0.39.0`**, the rejection is `404` (indistinguishable from any other
      nonexistent route) on the first hit from an IP not yet blocked, and
      `403` from then on once that IP is itself in `monitor_blocked_ips` —
      see "Honeypot hits" below for why.
-  2. Every IP already recorded (`data.ips`) against a `Monitor` that
+  2. Every IP already recorded (`monitor_visit_ips`) against a `Monitor` that
      visited that path is blocked in `monitor_blocked_ips` (`source:
      'scraper-path'`), same mechanism as `updateBlockedIps`.
   - Response: `{"success": true, "path": "...", "blocked_ips": [...]}`,
@@ -501,9 +505,9 @@ only ever came from `getPages`.
     `WHERE not_found = false` (same technique as
     `PathsAuditor::liveTrafficSuffixIndex()`), and the IP scan resolves
     the small set of matching `monitor_page_hits` rows
-    (`WHERE not_found = true`) first, then reads `Monitor.data.ips` only
-    for those specific `monitor_id`s. Same matching logic, no response
-    shape change.
+    (`WHERE not_found = true`) first, then reads `monitor_visit_ips` only
+    for those specific `monitor_id`s (until `0.41.0` this decoded
+    `Monitor.data.ips`). Same matching logic, no response shape change.
 
 - **`flagScraperPaths`** (same auth as `flagScraperPath`, since `0.19.0`):
   batch version — `POST /monitor/handler?action=flagScraperPaths` with
@@ -1123,9 +1127,9 @@ action on top of this table (`getVisitorsByIp`).
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the
 permanent `local_token` **or** the ephemeral read token from
-`issueReadToken`). Aggregates every `Monitor.data.page`/`data.not_found`
-into one entry per path (`host/path`, same key format as `data.page`)
-instead of shipping raw `Monitor` rows. As of `0.3.0`, this listing no
+`issueReadToken`). Aggregates `monitor_page_hits` (`hits`/`not_found`,
+across every `Monitor`) into one entry per path (`host/path`) instead of
+shipping raw `Monitor` rows. As of `0.3.0`, this listing no
 longer carries a scraper signal at the path level — a path like `/` could
 end up marked "possible scraper" just because one bot happened to pass
 through it once. The scraper heuristic still runs exactly the same, it's
@@ -1259,7 +1263,7 @@ ephemeral read token from `issueReadToken`).
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
   missing/invalid), finds every `Monitor` that's ever seen that IP and
-  aggregates the paths (`data.page`) it's been seen on — lets you
+  aggregates the paths (`monitor_page_hits`) it's been seen on — lets you
   confirm visually that an IP is a scraper before blocking it. No
   pagination/caching: the result set per IP is small and this is a
   lookup triggered on demand (e.g. expanding a row in the dashboard), not
@@ -1309,7 +1313,7 @@ partial, filtered delete:
   rows whose `last_seen` is older than the same cutoff.
 - `only_blocked` (optional boolean, default `false`): when `true`,
   restricts the delete to rows belonging to an IP **currently blocked**
-  in `monitor_blocked_ips` — matched via `data.ips` on `Monitor`, the
+  in `monitor_blocked_ips` — matched via `monitor_visit_ips` on `Monitor`, the
   `ip` column on `IpStat` — instead of every row past the cutoff.
   > ⚠️ **Breaking change in v0.7.0**: this parameter was named
   > `only_scraper_flagged` and matched `data.flags.scraper`/
@@ -1394,25 +1398,69 @@ This only affects the automatic trigger. `monitor:prune` and `pruneData`
 (manual/administrative use) are always uncapped and delete everything
 matching the filter in one go, exactly as before.
 
-### `monitor:recalculate-visits` (since `0.28.0`)
+### Visit retention (since `0.42.0`)
 
-One-time backfill for installations updating from before `0.28.0`, when
-`data.visits` counted every page view within an already-tracked session
-instead of only new sessions (see CHANGELOG `[0.28.0]`) — existing
-`Monitor` rows carry an inflated `visits` value from that bug.
-`data.sessions` was always deduplicated correctly (not affected by the
-bug), so `count(data.sessions)` is already the correct `visits` value for
-any existing row:
+`monitor.visits_retention_days` (default `90`, `0` disables) deletes
+`monitor_visits` rows whose `updated_at` (last activity) is older than that,
+**independent of the age of the parent `Monitor`**: a device recognized by
+the 5-year remember-me cookie is never deleted by the prune above, so
+without this its visits would pile up forever. It runs inside
+`DataPruner::prune()` — the automatic trigger (capped by
+`data_prune_max_rows_per_run`, same "resume on the next request" behavior),
+`monitor:prune` and `pruneData` — and the visits of a deleted `Monitor` go
+away through the foreign key's `ON DELETE CASCADE`. `monitor:prune`'s
+output and `DataPruner::prune()`'s return value gained a `visits_deleted`
+count.
 
-```
-php artisan monitor:recalculate-visits
-```
+## Visits (`monitor_visits`, since `0.42.0`)
 
-Walks the `Monitor` table in chunks (never `::all()`/`cursor()` over the
-whole table, same strategy as `monitor:prune`) and sets `data.visits =
-count(data.sessions)` on every row where it doesn't already match. **Run
-this once, manually, after `composer update` to `0.28.0` or later** —
-same treatment as a new migration.
+Where each piece of tracking data lives:
+
+| Data | Lives in |
+|---|---|
+| Remember-me token (the cookie value) | `monitors.id_token` (unique index) |
+| Device data: `ua`, `user_id`, `flags`, your own `tag()` data | `monitors.data` (JSON) |
+| Hits per path (+ `not_found`) | `monitor_page_hits` |
+| IPs seen per device | `monitor_visit_ips` |
+| **The journey of each visit** | `monitor_visits` |
+
+Until `0.41.0`, `page`/`not_found`/`ips`/`sessions`/`visits` were written
+into the JSON blob and copied to the child tables by a model hook. From
+`0.42.0` the child tables are the source of truth, written directly by the
+trackers (`Monitor::recordHit()` is an atomic `hits = hits + 1` upsert;
+`Monitor::recordIp()` an `insertOrIgnore`), and the blob no longer carries
+those keys — reading `$monitor->data['page']` etc. now returns nothing.
+
+`monitor_visits` has one row per **visit = one PHP session**: `paths` is the
+list of paths hit during the visit **in access order, raw and without
+counts** (consecutive repeats such as a page reload are kept — they're
+diagnostic signal; collapse them when analysing, not when storing),
+`created_at` is the start of the visit, `updated_at` is its last activity
+(the server can't know when the user actually left), and `scraper` turns
+`true` as soon as any request of the visit was flagged and never goes back
+— the visit is still recorded, just marked, so funnel analyses can filter
+`WHERE scraper = false`.
+
+The visit is keyed by a `monitor_visit_id` stored **inside the session**,
+not by the session id: Laravel regenerates the session id on login, which
+would otherwise split a `login → dashboard` journey in two. A genuinely new
+session has no `monitor_visit_id` and starts a new visit. Only the tracker
+with a session creates visits; the anonymous one (API/bots/scrapers, no
+session) never does. Every tracked request is added, including AJAX/API
+calls inside the `web` group — call `Monitor::skipTracking()` for the ones
+that shouldn't show up in the journey.
+
+Config (all in `config/monitor.php`; `monitor:update` adds missing keys):
+
+- `track_visits` (default `true`): journey + IP + a 5-year cookie is
+  personal data — turn it off if your privacy policy doesn't cover it.
+- `visit_max_paths` (default `200`): once a visit reaches this many paths it
+  only bumps `updated_at`.
+- `visits_retention_days` (default `90`): see "Visit retention" above.
+
+`Monitor::skipTracking()` is unchanged. A concurrent pair of requests from
+the same session can, rarely, drop one step of a journey (the visit row is
+read-modify-written); hit counts are unaffected (atomic).
 
 ## Advanced usage
 

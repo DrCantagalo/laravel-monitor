@@ -4,6 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Casts\AsArrayObject;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -14,78 +15,56 @@ class Monitor extends Model
         'data' => AsArrayObject::class,
     ];
 
-    protected $fillable = ['data'];
+    protected $fillable = ['data', 'id_token'];
 
     /**
-     * Mantém `monitor_page_hits` (uma linha por path por Monitor, ver
-     * migration `create_monitor_page_hits_table`) em sincronia com
-     * `data.page`/`data.not_found` a cada save — via evento de model, não
-     * chamada explícita nos trackers (diferente de `IpStat::recordVisit`),
-     * porque vários testes (e o próprio `tinker`) criam/alteram `Monitor`
-     * direto (`Monitor::create(['data' => [...]])`), sem passar pelos
-     * trackers — só um hook no model cobre esses casos automaticamente.
-     * `MonitorController::buildPagesResult()` (laravel-monitor 103) lê
-     * desta tabela via SQL em vez de decodificar o JSON de toda a tabela
-     * `Monitor` a cada `getPages`.
-     */
-    protected static function booted(): void
-    {
-        static::saved(function (self $monitor) {
-            $monitor->syncPageHits();
-            $monitor->syncVisitIps();
-        });
-
-        static::deleted(function (self $monitor) {
-            DB::table('monitor_page_hits')->where('monitor_id', $monitor->id)->delete();
-            DB::table('monitor_visit_ips')->where('monitor_id', $monitor->id)->delete();
-        });
-    }
-
-    /**
-     * Upsert em lote (uma query, `ON DUPLICATE KEY UPDATE`/`ON CONFLICT`
-     * conforme o driver — mesmo padrão de `IpStat::recordVisit`/
-     * `MonitorMethod::recordBlockedAttempt`) sincronizando TODO o
-     * `data.page`/`data.not_found` atual deste Monitor: cada linha grava o
-     * valor absoluto corrente (não um incremento), então é idempotente e
-     * correto não importa como `data` foi mutado antes do save. Sem
-     * delete prévio: paths só são adicionados a `data.page`, nunca
-     * removidos (ver trackers), então não há linha órfã a limpar aqui.
+     * `monitor_page_hits` (uma linha por path por Monitor) e
+     * `monitor_visit_ips` (uma linha por IP por Monitor) são a fonte da
+     * verdade desses dados — gravadas direto pelos trackers via
+     * `recordHit()`/`recordIp()`, não mais copiadas do blob `data` por um
+     * hook `saved` (até 0.41.0, `data.page`/`data.not_found`/`data.ips`
+     * eram a fonte e essas tabelas só uma cópia, com upsert de TODOS os
+     * paths a cada save). Quem limpa as linhas filhas de um Monitor
+     * apagado é o `cascadeOnDelete` da FK — `Monitor::where(...)->delete()`
+     * em massa (DataPruner) nunca disparou eventos de model de qualquer
+     * forma.
+     *
+     * Incremento atômico (`hits = hits + 1` no banco, mesmo padrão de
+     * `IpStat::recordVisit`), sem ler-modificar-gravar: duas requests
+     * simultâneas do mesmo visitante não perdem contagem. `not_found` só
+     * entra na lista de update quando `$notFound` é true — "gruda em
+     * true": uma vez marcado 404, nunca volta a false (mesma semântica de
+     * `data.not_found[$path] = true` de antes), sem precisar de uma
+     * expressão SQL específica de driver (`OR`/`GREATEST`).
      * Fail-open (try/catch QueryException, mesmo padrão de
      * `isPathBlocked`/`recordBlockedAttempt`): se a migration ainda não
-     * rodou, não pode derrubar o site hospedeiro — o `Monitor` em si já
-     * foi salvo com sucesso antes deste evento disparar, só o índice
-     * derivado fica desatualizado até a migration rodar (ela faz backfill
-     * do estado já existente).
+     * rodou, não pode derrubar o site hospedeiro.
      */
-    protected function syncPageHits(): void
+    public function recordHit(string $path, bool $notFound = false): void
     {
-        $pages = (array) data_get($this->data, 'page', []);
-
-        if (empty($pages)) {
-            return;
-        }
-
-        $notFound = (array) data_get($this->data, 'not_found', []);
         $now = now();
 
-        $rows = [];
+        $update = [
+            'hits' => DB::raw('hits + 1'),
+            'updated_at' => $now,
+        ];
 
-        foreach ($pages as $path => $hits) {
-            $rows[] = [
-                'monitor_id' => $this->id,
-                'path' => (string) $path,
-                'hits' => (int) $hits,
-                'not_found' => ! empty($notFound[$path]),
-                'created_at' => $now,
-                'updated_at' => $now,
-            ];
+        if ($notFound) {
+            $update['not_found'] = true;
         }
 
         try {
             DB::table('monitor_page_hits')->upsert(
-                $rows,
+                [[
+                    'monitor_id' => $this->id,
+                    'path' => $path,
+                    'hits' => 1,
+                    'not_found' => $notFound,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]],
                 ['monitor_id', 'path'],
-                ['hits', 'not_found', 'updated_at']
+                $update
             );
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] tabela monitor_page_hits não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
@@ -93,40 +72,41 @@ class Monitor extends Model
     }
 
     /**
-     * Mesmo padrão de `syncPageHits()`, só que pra `data.ips` em vez de
-     * `data.page` — mantém `monitor_visit_ips` (uma linha por IP por
-     * Monitor, ver migration `create_monitor_visit_ips_table`) em
-     * sincronia, pra `MonitorController::getVisitorPaths()` (laravel-monitor
-     * 104) achar por índice quais Monitor viram um IP, em vez de escanear
-     * `data` de toda a tabela. `insertOrIgnore` em vez de `upsert`: ao
-     * contrário de `data.page` (hits pode mudar de valor pro mesmo path),
-     * um par (monitor_id, ip) não tem coluna própria pra atualizar — só
-     * existe ou não existe, então não faz sentido "atualizar", só evitar
-     * duplicata (a unique key já garante isso, `insertOrIgnore` só evita o
-     * erro de constraint quando o par já foi inserido num save anterior).
+     * Registra que este Monitor foi visto por `$ip`. `insertOrIgnore`, não
+     * `upsert`: um par (monitor_id, ip) não tem coluna própria pra
+     * atualizar — só existe ou não existe, e a unique key já garante que
+     * não duplica. Mesmo fail-open de `recordHit()`.
      */
-    protected function syncVisitIps(): void
+    public function recordIp(string $ip): void
     {
-        $ips = array_unique((array) data_get($this->data, 'ips', []));
-
-        if (empty($ips)) {
-            return;
-        }
-
         $now = now();
 
-        $rows = array_map(fn ($ip) => [
-            'monitor_id' => $this->id,
-            'ip' => (string) $ip,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ], $ips);
-
         try {
-            DB::table('monitor_visit_ips')->insertOrIgnore($rows);
+            DB::table('monitor_visit_ips')->insertOrIgnore([[
+                'monitor_id' => $this->id,
+                'ip' => $ip,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]]);
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] tabela monitor_visit_ips não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
         }
+    }
+
+    /**
+     * Mantido por compatibilidade (método público desde antes de 0.42.0):
+     * `data.sessions`/`data.visits` deixaram de existir — visita agora é
+     * uma linha de `monitor_visits`, criada por `Support\VisitRecorder`
+     * quando a sessão não tem `monitor_visit_id` — então só registra o IP.
+     */
+    public function newVisit($session_id, $ip)
+    {
+        $this->recordIp((string) $ip);
+    }
+
+    public function visits(): HasMany
+    {
+        return $this->hasMany(MonitorVisit::class);
     }
 
     /**
@@ -162,21 +142,5 @@ class Monitor extends Model
         }
 
         return $query->where('monitors_user_id', (string) $userId);
-    }
-
-    public function newVisit($session_id, $ip)
-    {
-        $sessions_array = $this->data['sessions'] ?? [];
-        if (!in_array($session_id, $sessions_array)) {
-            $this->data['sessions'][] = $session_id;
-            $this->data['visits'] = ($this->data['visits'] ?? 0) + 1;
-        }
-
-        $ips_array = $this->data['ips'] ?? [];
-        if (!in_array($ip, $ips_array)) {
-            $this->data['ips'][] = $ip;
-        }
-
-        $this->save();
     }
 }

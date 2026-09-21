@@ -42,6 +42,22 @@ class SessionVisitorTracker
     }
 
     /**
+     * Grava o IP em `monitor_visit_ips` só quando difere do último IP
+     * gravado nesta sessão (`monitor_last_ip`) — evita um INSERT por
+     * request e, de quebra, captura a troca de IP no meio da sessão
+     * (rede móvel), que antes só o tracker anônimo registrava.
+     */
+    protected function recordIpIfChanged(Monitor $monitor, string $ip): void
+    {
+        if (session('monitor_last_ip') === $ip) {
+            return;
+        }
+
+        $monitor->recordIp($ip);
+        session(['monitor_last_ip' => $ip]);
+    }
+
+    /**
      * Rastreia o visitante com sessão (web): remember-me, criação/
      * atualização do registro Monitor e cookie de remember quando um
      * Monitor novo é criado.
@@ -60,14 +76,19 @@ class SessionVisitorTracker
 
         if (session('remember_me')) {
             $token = session('remember_me');
-            $user = Monitor::where('data->id-token', $token)->first();
+            $user = Monitor::where('id_token', $token)->first();
 
             if ($user) {
                 if (session('monitor_id') && session('monitor_id') != $user->id) {
+                    // O cascade da FK leva as visitas do monitor efêmero
+                    // junto; o id da visita na sessão fica órfão e
+                    // VisitRecorder (que valida id + monitor_id) cria uma
+                    // nova pro monitor adotado.
                     Monitor::where('id', session('monitor_id'))->delete();
+                    session()->forget(VisitRecorder::SESSION_KEY);
                 }
 
-                $user->newVisit(session()->getId(), $ip);
+                $this->recordIpIfChanged($user, $ip);
                 session(['monitor_id' => $user->id]);
             }
             session()->forget('remember_me');
@@ -88,10 +109,10 @@ class SessionVisitorTracker
             $cookieToken = $request->cookie(config('monitor.remember_cookie', 'monitor_id_token'));
 
             if ($cookieToken) {
-                $user = Monitor::where('data->id-token', $cookieToken)->first();
+                $user = Monitor::where('id_token', $cookieToken)->first();
 
                 if ($user) {
-                    $user->newVisit(session()->getId(), $ip);
+                    $this->recordIpIfChanged($user, $ip);
                     session(['monitor_id' => $user->id]);
                 }
             }
@@ -103,14 +124,7 @@ class SessionVisitorTracker
             }
             if ($user) {
                 $data = $user->data;
-                $data['page'] = $data['page'] ?? [];
-                $data['page'][$path] = ($data['page'][$path] ?? 0) + 1;
                 $data['ua'] = $userAgent;
-
-                if ($notFound) {
-                    $data['not_found'] = $data['not_found'] ?? [];
-                    $data['not_found'][$path] = true;
-                }
 
                 if (config('monitor.track_authenticated_user', true) && Auth::check()) {
                     $data['user_id'] = Auth::id();
@@ -128,7 +142,20 @@ class SessionVisitorTracker
                 DataPruner::maybeCleanup();
 
                 $user->data = $data;
-                $user->save();
+
+                // Hits, IPs e a jornada da visita vivem em tabelas filhas
+                // (`monitor_page_hits`/`monitor_visit_ips`/`monitor_visits`),
+                // gravadas direto — o blob só guarda ua/flags/user_id/tags.
+                $user->recordHit($path, $notFound);
+                $this->recordIpIfChanged($user, $ip);
+                VisitRecorder::record($user, $path, $isScraper);
+
+                // touch(), não save(): `updated_at` é a "última atividade"
+                // (filtro de datas de getPages, DataPruner, last_activity
+                // de usuários) e o blob nem sempre muda mais a cada
+                // request — sem isso o Eloquent pularia o UPDATE. touch()
+                // ainda grava os atributos sujos (ua/flags) quando houver.
+                $user->touch();
             }
 
             return;
@@ -144,28 +171,23 @@ class SessionVisitorTracker
         DataPruner::maybeCleanup();
 
         $data = [
-            'page' => [$path => 1],
-            'sessions' => [session()->getId()],
-            'ips' => [$ip],
             'ua' => $userAgent,
-            'id-token' => $rememberToken,
-            'visits' => 1,
             'flags' => [
                 'scraper' => $isScraper,
                 'scraper_signals' => $signals,
             ],
         ];
 
-        if ($notFound) {
-            $data['not_found'] = [$path => true];
-        }
-
         if (config('monitor.track_authenticated_user', true) && Auth::check()) {
             $data['user_id'] = Auth::id();
         }
 
-        $user = Monitor::create(['data' => $data]);
+        $user = Monitor::create(['data' => $data, 'id_token' => $rememberToken]);
         session(['monitor_id' => $user->id]);
+
+        $user->recordHit($path, $notFound);
+        $this->recordIpIfChanged($user, $ip);
+        VisitRecorder::record($user, $path, $isScraper);
 
         $response->headers->setCookie(cookie(
             config('monitor.remember_cookie', 'monitor_id_token'),

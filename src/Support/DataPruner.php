@@ -5,9 +5,11 @@ namespace Drcantagalo\LaravelMonitor\Support;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Cleanup parcial de dados de tracking (`Monitor`/`monitor_ip_stats`) mais
@@ -141,15 +143,71 @@ class DataPruner
             self::invalidatePagesCache();
         }
 
-        if ($ipStatsDeleted > 0) {
+        $visits = self::pruneVisits($maxRows);
+
+        if ($ipStatsDeleted > 0 || $visits['deleted'] > 0) {
             ListingsCache::invalidate();
         }
 
         return [
             'monitors_deleted' => $monitors['deleted'],
             'ip_stats_deleted' => $ipStatsDeleted,
-            'done' => $monitors['done'],
+            'visits_deleted' => $visits['deleted'],
+            'done' => $monitors['done'] && $visits['done'],
         ];
+    }
+
+    /**
+     * Retenção própria de `monitor_visits` (`monitor.visits_retention_days`,
+     * 0 = desliga), independente da idade do Monitor pai e de
+     * `$onlyBlocked`/`$olderThanDays` de `prune()`: as visitas são a parte
+     * pesada do tracking, e um device ativo (cookie de remember-me de 5
+     * anos) nunca é apagado por `pruneMonitors()` — sem isto as visitas
+     * dele se acumulariam pra sempre. As visitas de Monitors apagados já
+     * somem pelo `cascadeOnDelete` da FK.
+     *
+     * `$maxRows` (só o caminho automático passa) segue o mesmo esquema de
+     * `pruneMonitors()`: busca no máximo `$maxRows + 1` ids (a linha extra só
+     * detecta se sobrou backlog) e apaga os primeiros `$maxRows`, ordenado
+     * por id — `done=false` quando sobrou. Fail-open: tabela ainda não
+     * migrada não pode derrubar a request que disparou o prune.
+     *
+     * @return array{deleted: int, done: bool}
+     */
+    public static function pruneVisits(?int $maxRows = null): array
+    {
+        $days = (int) config('monitor.visits_retention_days', 90);
+
+        if ($days <= 0) {
+            return ['deleted' => 0, 'done' => true];
+        }
+
+        $cutoff = now()->subDays($days);
+
+        try {
+            $query = DB::table('monitor_visits')->where('updated_at', '<', $cutoff);
+
+            if ($maxRows === null) {
+                return ['deleted' => $query->delete(), 'done' => true];
+            }
+
+            $ids = $query->orderBy('id')->limit($maxRows + 1)->pluck('id');
+            $done = $ids->count() <= $maxRows;
+            $ids = $ids->take($maxRows);
+
+            if ($ids->isEmpty()) {
+                return ['deleted' => 0, 'done' => $done];
+            }
+
+            return [
+                'deleted' => DB::table('monitor_visits')->whereIn('id', $ids)->delete(),
+                'done' => $done,
+            ];
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_visits não encontrada ao podar visitas — rode `php artisan migrate` ou `php artisan monitor:update`. Erro original: '.$e->getMessage());
+
+            return ['deleted' => 0, 'done' => true];
+        }
     }
 
     /**

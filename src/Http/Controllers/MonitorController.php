@@ -185,13 +185,14 @@ class MonitorController extends Controller
     }
 
     /**
-     * `SUM(data.visits)` de todas as linhas `Monitor`, agregado direto em
-     * SQL sobre o blob JSON (`JSON_EXTRACT`/`json_extract`, conforme o
-     * driver) — nunca instancia uma linha `Monitor` inteira em PHP, ao
-     * contrário do `Monitor::all()` que causava a memory exhaustion
-     * original. Mesmo esquema de cache curto/fixo de `blockedAttemptsTotal()`
-     * (mutação a cada request rastreada via `Monitor::newVisit()`, não faz
-     * sentido usar o esquema versionado de getPages/getVisitorsByIp).
+     * `COUNT(*)` de `monitor_visits` (uma linha por visita = sessão PHP,
+     * ver `Support\VisitRecorder`) — indexado/leve, nunca varre nem
+     * decodifica o blob JSON de `monitors` (até 0.41.0 era um `SUM` de
+     * `data.visits` via `JSON_EXTRACT`). Mesmo esquema de cache curto/fixo
+     * de `blockedAttemptsTotal()` (a tabela muda a cada request rastreada,
+     * não faz sentido usar o esquema versionado de getPages/
+     * getVisitorsByIp). Só conta visitas registradas a partir de 0.42.0 e
+     * fica em 0 com `monitor.track_visits` desligado.
      */
     protected function visitsTotal(): int
     {
@@ -200,11 +201,9 @@ class MonitorController extends Controller
             now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
             function () {
                 try {
-                    $expression = $this->jsonNumericSumExpression('visits');
-
-                    return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
+                    return (int) DB::table('monitor_visits')->count();
                 } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] falha ao calcular visits_total em getData. Erro original: '.$e->getMessage());
+                    Log::warning('[laravel-monitor] falha ao calcular visits_total em getData (rode `php artisan migrate` ou `php artisan monitor:update`?). Erro original: '.$e->getMessage());
 
                     return 0;
                 }
@@ -213,38 +212,13 @@ class MonitorController extends Controller
     }
 
     /**
-     * `SUM` do tamanho de `data.sessions` por linha `Monitor`
-     * (`JSON_LENGTH`/`json_array_length`, conforme o driver) — conta
-     * quantas sessions foram registradas no total, **sem** dedupe entre
-     * linhas (ao contrário de `uniqueIpsTotal()` abaixo, que dedupe de
-     * verdade via `monitor_ip_stats`). Na prática cada session_id só
-     * aparece numa única linha `Monitor` (um dispositivo reconhecido via
-     * `remember_cookie` — ver `Monitor::newVisit()`, que já dedupe dentro
-     * da própria linha antes de dar push), então esse número já reflete o
-     * total de sessions distintas na imensa maioria dos casos; não é uma
-     * garantia matemática de unicidade global só porque não existe uma
-     * tabela `monitor_session_stats` dedicada (ao contrário de IPs, que já
-     * tinham `monitor_ip_stats` de outra feature). Calculado 100% em SQL,
-     * sem chunk: `JSON_LENGTH`/`json_array_length` operam por linha no
-     * próprio SGBD, sem precisar trazer o JSON pra PHP.
+     * Desde 0.42.0 uma visita É uma sessão PHP, então `sessions_total` e
+     * `visits_total` são o mesmo número — as duas chaves continuam na
+     * resposta de `getData` só por compatibilidade com o dashboard.
      */
     protected function sessionsTotal(): int
     {
-        return Cache::remember(
-            'monitor:data:sessions-total',
-            now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
-            function () {
-                try {
-                    $expression = $this->jsonArrayLengthExpression('sessions');
-
-                    return (int) (DB::table('monitors')->selectRaw("SUM({$expression}) as total")->value('total') ?? 0);
-                } catch (QueryException $e) {
-                    Log::warning('[laravel-monitor] falha ao calcular sessions_total em getData. Erro original: '.$e->getMessage());
-
-                    return 0;
-                }
-            }
-        );
+        return $this->visitsTotal();
     }
 
     /**
@@ -272,31 +246,6 @@ class MonitorController extends Controller
                 }
             }
         );
-    }
-
-    /**
-     * Expressão SQL portável (MySQL/SQLite — os dois drivers realmente
-     * usados, ver `userIdColumn()`) pra somar um campo numérico escalar
-     * dentro do blob `data`, com `CAST` pro tipo certo (sem o cast, o MySQL
-     * soma a string extraída como 0 quando o path não existe em algumas
-     * versões, e o SQLite trata o retorno de `json_extract` como REAL em
-     * vez de INTEGER em certas comparações).
-     */
-    protected function jsonNumericSumExpression(string $field): string
-    {
-        return Monitor::query()->getConnection()->getDriverName() === 'mysql'
-            ? "CAST(JSON_EXTRACT(data, '$.{$field}') AS UNSIGNED)"
-            : "CAST(json_extract(data, '$.{$field}') AS INTEGER)";
-    }
-
-    /**
-     * Expressão SQL portável pro tamanho de um array dentro do blob `data`.
-     */
-    protected function jsonArrayLengthExpression(string $field): string
-    {
-        return Monitor::query()->getConnection()->getDriverName() === 'mysql'
-            ? "JSON_LENGTH(data, '$.{$field}')"
-            : "json_array_length(data, '$.{$field}')";
     }
 
     /**
@@ -699,10 +648,9 @@ class MonitorController extends Controller
      * `pageHitsSuffixIndexAll(true)` pra achar TODAS as chaves "host/path"
      * com evidência de 404; (3) só os `monitor_id`s donos dessas chaves
      * específicas (`monitor_page_hits`, indexado) são buscados — nunca a
-     * tabela inteira; (4) só ENTÃO `Monitor::whereIn('id', $ids)` (um
-     * SELECT pequeno, filtrado por PK) é lido, via `chunkById`, só pra
-     * extrair `data.ips` desses hits específicos (`monitor_page_hits` não
-     * guarda IP — ver migration `create_monitor_page_hits_table`).
+     * tabela inteira; (4) só ENTÃO `monitor_visit_ips` é lida, filtrada por
+     * esses `monitor_id`s, pra achar os IPs (`monitor_page_hits` não guarda
+     * IP — ver migration `create_monitor_page_hits_table`).
      *
      * @param  array<int, string>  $paths  já normalizados (normalizePathInput)
      * @return array{0: array<string, string>, 1: array<string, array<string, bool>>}
@@ -756,21 +704,22 @@ class MonitorController extends Controller
             }
         }
 
-        // monitor_id -> Set de IPs (data.ips) — só das linhas Monitor
-        // realmente relevantes (achadas acima), via chunkById (mesmo teto
-        // de memória previsível de pruneMonitors()), nunca ::all()/cursor()
-        // sobre a tabela toda.
+        // monitor_id -> Set de IPs (`monitor_visit_ips`, indexada por
+        // monitor_id) — só dos Monitor realmente relevantes (achados
+        // acima), em chunks de 1000 (teto de memória previsível), nunca
+        // a tabela toda. Até 0.41.0 isso decodificava `data.ips` do blob
+        // de cada Monitor via chunkById.
         $monitorIps = [];
 
         if (! empty($monitorIdsNeeded)) {
-            Monitor::whereIn('id', array_keys($monitorIdsNeeded))
-                ->select('id', 'data')
-                ->chunkById(500, function ($monitors) use (&$monitorIps) {
-                    foreach ($monitors as $monitor) {
-                        foreach ((array) data_get($monitor, 'data.ips', []) as $ip) {
-                            if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP)) {
-                                $monitorIps[$monitor->id][$ip] = true;
-                            }
+            DB::table('monitor_visit_ips')
+                ->whereIn('monitor_id', array_keys($monitorIdsNeeded))
+                ->select('id', 'monitor_id', 'ip')
+                ->orderBy('id')
+                ->chunkById(1000, function ($rows) use (&$monitorIps) {
+                    foreach ($rows as $row) {
+                        if (filter_var($row->ip, FILTER_VALIDATE_IP)) {
+                            $monitorIps[$row->monitor_id][$row->ip] = true;
                         }
                     }
                 });
@@ -1157,20 +1106,19 @@ class MonitorController extends Controller
      * Listagem agregada de visitantes por `user_id` (CRM), paginada —
      * um dashboard vendo "quem são meus usuários autenticados e quando
      * foi a última atividade de cada um", sem escanear `data` em PHP:
-     * agrega `SUM(data.visits)`/`MAX(updated_at)` direto em SQL, agrupando
+     * agrega `COUNT` de visitas/`MAX(updated_at)` direto em SQL, agrupando
      * pela coluna gerada indexada (`monitors_user_id`, task 40) em MySQL
      * — nunca `where('data->user_id', ...)` cru, que não usa o índice
      * (ver `Monitor::scopeForUserId()`).
      *
-     * Desde a task 92: `visits_count` soma `data.visits` (via
-     * `jsonNumericSumExpression()`, mesma expressão já usada por
-     * `visitsTotal()` em getData) em vez de `COUNT(*)` de linhas
-     * `Monitor` — uma linha `Monitor` é reaproveitada por dispositivo/
+     * `visits_count` conta linhas de `monitor_visits` (LEFT JOIN — um
+     * `Monitor` sem visita registrada ainda entra com 0), não linhas
+     * `Monitor`: uma linha `Monitor` é reaproveitada por dispositivo/
      * navegador (reconectado via remember-me entre sessões, ver
      * `SessionVisitorTracker::track()`), não criada por visita, então
-     * `COUNT(*)` sempre dava 1 pra um usuário que só troca de sessão no
-     * mesmo navegador. `SUM` ignora linhas sem a chave `visits` (dados
-     * antigos, de antes desta task); por isso o `?? 0` no map abaixo.
+     * `COUNT(*)` de `Monitor` sempre dava 1 pra um usuário que só troca de
+     * sessão no mesmo navegador. Até 0.41.0 isso era um `SUM(data.visits)`
+     * via JSON (task 92).
      *
      * `name`/`email`: como não existe coluna própria pra isso (só
      * aparecem dentro do blob `data` quando o app hospedeiro chamou
@@ -1198,13 +1146,13 @@ class MonitorController extends Controller
     protected function buildUsersResult(int $page, int $perPage): array
     {
         $column = $this->userIdColumn();
-        $visitsExpression = $this->jsonNumericSumExpression('visits');
 
         $paginator = Monitor::query()
+            ->leftJoin('monitor_visits', 'monitor_visits.monitor_id', '=', 'monitors.id')
             ->whereNotNull($column)
             ->select("{$column} as user_id")
-            ->selectRaw("SUM({$visitsExpression}) as visits_count")
-            ->selectRaw('MAX(updated_at) as last_activity')
+            ->selectRaw('COUNT(monitor_visits.id) as visits_count')
+            ->selectRaw('MAX(monitors.updated_at) as last_activity')
             ->groupBy($column)
             ->orderByDesc('last_activity')
             ->paginate($perPage, ['*'], 'page', $page);
@@ -1283,7 +1231,7 @@ class MonitorController extends Controller
                 ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
 
             return [
-                'data' => $paginator->items(),
+                'data' => $this->hydrateUserVisitRows($paginator->items()),
                 'meta' => [
                     'page' => $paginator->currentPage(),
                     'per_page' => $paginator->perPage(),
@@ -1294,6 +1242,61 @@ class MonitorController extends Controller
         });
 
         return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Desde 0.42.0 `data.page`/`data.ips` não existem mais no blob — vivem
+     * em `monitor_page_hits`/`monitor_visit_ips`. Pra não quebrar quem lê o
+     * shape antigo de `getUserVisits` (o dashboard de cantagalo.it usa
+     * `row.data.page`/`row.data.ips`), reconstrói os dois campos a partir
+     * das tabelas filhas (2 queries `whereIn` por página, não uma por
+     * linha) e anexa `visits`: as últimas visitas do monitor, com a
+     * jornada (`paths`, em ordem de acesso) — o motivo de `monitor_visits`
+     * existir. Uma query por monitor da página (no máximo `per_page`, e o
+     * resultado inteiro é cacheado por `listings_cache_ttl_minutes`).
+     *
+     * @param  array<int, Monitor>  $monitors
+     * @return array<int, array<string, mixed>>
+     */
+    protected function hydrateUserVisitRows(array $monitors): array
+    {
+        if (empty($monitors)) {
+            return [];
+        }
+
+        $ids = array_map(fn (Monitor $monitor) => $monitor->id, $monitors);
+
+        $pages = [];
+        DB::table('monitor_page_hits')
+            ->whereIn('monitor_id', $ids)
+            ->orderBy('id')
+            ->get(['monitor_id', 'path', 'hits'])
+            ->each(function ($row) use (&$pages) {
+                $pages[$row->monitor_id][$row->path] = (int) $row->hits;
+            });
+
+        $ips = [];
+        DB::table('monitor_visit_ips')
+            ->whereIn('monitor_id', $ids)
+            ->orderBy('id')
+            ->get(['monitor_id', 'ip'])
+            ->each(function ($row) use (&$ips) {
+                $ips[$row->monitor_id][] = $row->ip;
+            });
+
+        return array_map(function (Monitor $monitor) use ($pages, $ips) {
+            $row = $monitor->toArray();
+            $row['data'] = (array) ($row['data'] ?? []);
+            $row['data']['page'] = $pages[$monitor->id] ?? [];
+            $row['data']['ips'] = $ips[$monitor->id] ?? [];
+            $row['visits'] = $monitor->visits()
+                ->orderByDesc('id')
+                ->limit(20)
+                ->get(['id', 'paths', 'scraper', 'created_at', 'updated_at'])
+                ->toArray();
+
+            return $row;
+        }, $monitors);
     }
 
     /**
@@ -1370,7 +1373,15 @@ class MonitorController extends Controller
     protected function clearData(Request $request)
     {
         // futuramente: validação/admin check
-        Monitor::truncate();
+        //
+        // `delete()` (cascade da FK leva monitor_page_hits/monitor_visit_ips/
+        // monitor_visits junto), não `truncate()`: no MySQL, TRUNCATE numa
+        // tabela referenciada por FK falha (erro 1701) mesmo com as filhas
+        // vazias — e desde a 0.42.0 nada mais depende dos ids reiniciarem.
+        Monitor::query()->delete();
+
+        $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
 
         return response()->json([
             'success' => true,

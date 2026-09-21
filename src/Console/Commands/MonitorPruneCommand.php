@@ -34,7 +34,7 @@ class MonitorPruneCommand extends Command
 
         $result = DataPruner::prune((int) $olderThanDays, (bool) $this->option('only-blocked'));
 
-        $this->info("Pruned {$result['monitors_deleted']} monitor row(s) and {$result['ip_stats_deleted']} IP stat row(s).");
+        $this->info("Pruned {$result['monitors_deleted']} monitor row(s), {$result['ip_stats_deleted']} IP stat row(s) and {$result['visits_deleted']} visit row(s) past monitor.visits_retention_days.");
 
         return 0;
     }

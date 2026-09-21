@@ -59,52 +59,40 @@ class AnonymousVisitorTracker
         // laravel-monitor 141: era `Monitor::where('data->ips', 'like',
         // "%{$ip}%")->first()` — scan não-indexado na coluna JSON a cada
         // request anônima, o caminho mais quente do pacote. `monitor_visit_ips`
-        // (task 104, mantida em sincronia por Monitor::booted()::syncVisitIps()
-        // a cada save, incluindo os que este método faz abaixo) já é o
-        // mesmo mapeamento IP->Monitor indexado, sem escrita extra necessária.
+        // (task 104, gravada direto por Monitor::recordIp() desde 0.42.0) é
+        // o mesmo mapeamento IP->Monitor, indexado.
         $monitorId = DB::table('monitor_visit_ips')->where('ip', $ip)->value('monitor_id');
         $user = $monitorId ? Monitor::find($monitorId) : null;
 
         if ($user) {
+            // O IP já está em `monitor_visit_ips` (foi assim que este
+            // Monitor foi achado), então não há `recordIp()` a fazer aqui.
             $data = $user->data;
-            $data['page'][$path] = ($data['page'][$path] ?? 0) + 1;
-
-            $ips = $data['ips'] ?? [];
-            if (!in_array($ip, $ips)) {
-                $ips[] = $ip;
-                $data['ips'] = $ips;
-            }
 
             $data['flags'] = $data['flags'] ?? [];
             $data['flags']['scraper'] = $isScraper;
             $data['flags']['scraper_signals'] = $signals;
 
-            if ($notFound) {
-                $data['not_found'] = $data['not_found'] ?? [];
-                $data['not_found'][$path] = true;
-            }
-
             $user->data = $data;
-            $user->save();
+            $user->recordHit($path, $notFound);
+
+            // touch(), não save(): ver comentário equivalente em
+            // SessionVisitorTracker — `updated_at` é a última atividade.
+            $user->touch();
 
             return;
         }
 
         $data = [
-            'page'     => [$path => 1],
-            'sessions' => [],
-            'ips'      => [$ip],
-            'ua'       => $userAgent,
-            'flags'    => [
+            'ua'    => $userAgent,
+            'flags' => [
                 'scraper'         => $isScraper,
                 'scraper_signals' => $signals,
             ],
         ];
 
-        if ($notFound) {
-            $data['not_found'] = [$path => true];
-        }
-
-        Monitor::create(['data' => $data]);
+        $user = Monitor::create(['data' => $data]);
+        $user->recordHit($path, $notFound);
+        $user->recordIp($ip);
     }
 }

@@ -104,7 +104,7 @@ class Monitor
             return false;
         }
 
-        $user = MonitorModel::where('data->id-token', $token)->first();
+        $user = MonitorModel::where('id_token', $token)->first();
 
         if (! $user) {
             return false;

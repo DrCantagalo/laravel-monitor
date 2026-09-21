@@ -4,6 +4,87 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.42.0] - 2026-09-21
+### ⚠️ Breaking
+- **`monitors.data` no longer carries `page`, `not_found`, `ips`, `sessions`
+  or `visits`.** `monitor_page_hits` and `monitor_visit_ips` — until now a
+  copy of those keys, kept in sync by a model `saved` hook that re-upserted
+  *every* path on *every* save — are now the source of truth, written
+  directly by the trackers. Reading `$monitor->data['page']` (etc.) returns
+  nothing; read the tables instead. The blob keeps `ua`, `flags`, `user_id`
+  and whatever `Monitor::tag()` wrote. **Existing rows are not
+  migrated** — the release assumes a reset (`clearData`/
+  `Monitor::query()->delete()`) on upgrade; visit history before this version
+  doesn't exist (`data.sessions` never had dates or paths).
+- `Monitor::booted()` (the sync hook) and `syncPageHits()`/`syncVisitIps()`
+  are gone. Code that created `Monitor` rows with `data.page`/`data.ips` and
+  relied on the hook must call `Monitor::recordHit()`/`recordIp()` instead.
+  `Monitor::newVisit()` is kept but now only records the IP.
+- `monitor:recalculate-visits` was removed (it existed only to repair
+  `data.visits`).
+
+### Added
+- **`monitors.id_token`** (new migration
+  `2026_09_21_000001_add_id_token_to_monitors_table`): the remember-me cookie
+  token moves out of the JSON blob (`data['id-token']`) into its own nullable
+  column with a **unique index**. Recognizing a returning visitor — the first
+  request of every new session that carries the cookie, plus
+  `Monitor::recognize()` — was `where('data->id-token', $token)`, i.e.
+  `JSON_UNQUOTE(JSON_EXTRACT(...))` with no usable index: a full scan of
+  `monitors` decoding every row's JSON, growing with the number of devices.
+  A real column behaves the same on MySQL/SQLite/Postgres (unlike the
+  MySQL-only generated column used for `user_id`). The migration backfills
+  the column from existing blobs, in chunks, so already-recognized visitors
+  stay recognized. `Monitor::$fillable` gained `id_token`.
+- **`monitor_visits` — the journey of each visit** (new migration
+  `2026_09_21_000000_create_monitor_visits_table`). One row per visit (= one
+  PHP session): `paths` in **access order**, raw and without counts
+  (consecutive repeats are kept — a reload is diagnostic signal),
+  `created_at` = start, `updated_at` = last activity, `scraper` sticky-true
+  when any request of the visit was flagged (recorded and marked, not
+  dropped). Keyed by a `monitor_visit_id` kept **inside the session** — not
+  the session id, which Laravel regenerates on login and would split a
+  `login → dashboard` journey. Only the session tracker creates visits; the
+  anonymous one never does. New `Models\MonitorVisit`, `Monitor::visits()`,
+  `Support\VisitRecorder`. See README "Visits".
+- `Monitor::recordHit($path, $notFound)` (atomic `hits = hits + 1` upsert;
+  `not_found` sticky) and `Monitor::recordIp($ip)` (`insertOrIgnore`).
+- Config: `track_visits` (`true`), `visit_max_paths` (`200`),
+  `visits_retention_days` (`90`, `0` disables).
+- `DataPruner::pruneVisits()`, run by `DataPruner::prune()` (automatic
+  trigger, `monitor:prune`, `pruneData`): deletes visits past
+  `visits_retention_days` regardless of the parent `Monitor`'s age — a device
+  with the 5-year remember-me cookie is never pruned itself, so the
+  `ON DELETE CASCADE` alone would never clear its visits. `prune()`'s return
+  value and `monitor:prune`'s output gained `visits_deleted`.
+- `getUserVisits` rows now include `visits` (the device's last 20 visits).
+
+### Changed
+- Tracking a request is now: one upsert of the current path (was: upsert of
+  *all* the visitor's paths), an `insertOrIgnore` of the IP only when it
+  changed within the session, the visit append, and one small `UPDATE` of
+  `monitors` — `touch()` instead of `save()`, because `updated_at` (last
+  activity: date filters, pruning, `last_activity`) would otherwise freeze
+  when the blob doesn't change. Hit counters are atomic; the blob is much
+  smaller. The session tracker now also records an IP change mid-session
+  (mobile networks), which only the anonymous tracker used to.
+- `getData`: `visits_total` and `sessions_total` are `COUNT(*)` of
+  `monitor_visits` (same number now — a visit is a session; both keys kept).
+  `getUsers`: `visits_count` counts visits via `LEFT JOIN` instead of
+  `SUM(data.visits)`. The JSON-expression helpers behind both were removed.
+- `getUserVisits` keeps its old shape: `data.page` and `data.ips` are rebuilt
+  from `monitor_page_hits`/`monitor_visit_ips` so dashboards reading
+  `row.data.page`/`row.data.ips` keep working.
+- `resolveScraperPathTargets` (`flagScraperPath(s)`) reads IPs from
+  `monitor_visit_ips` instead of decoding `data.ips` of the matching monitors.
+
+### Fixed
+- `clearData` used `Monitor::truncate()`, which MySQL rejects (error 1701)
+  on a table referenced by a foreign key. It now deletes (the FK cascades to
+  the child tables) and invalidates the pages/listings caches.
+
+---
+
 ## [0.41.0] - 2026-09-21
 ### Changed
 - **`getVisitorsByIp` with `filter=blocked` now only lists active blocks**

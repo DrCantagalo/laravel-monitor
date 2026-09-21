@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.41.0',
+    'version' => '0.42.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -33,6 +33,26 @@ return [
     // privacidade, podem desligar com false. Ver README, seção
     // "Authenticated user tagging".
     'track_authenticated_user' => true,
+
+    // Grava a jornada de cada visita (uma visita = uma sessão PHP) em
+    // `monitor_visits`: os paths acessados, em ordem de acesso, crus e sem
+    // contagem (a contagem por path vive em `monitor_page_hits`). Só o
+    // tracker com sessão cria visitas — o anônimo (API/bots/scrapers, sem
+    // sessão) não. Jornada + IP + cookie de remember-me de longa duração é
+    // dado pessoal: desligue (`false`) se a sua política de privacidade não
+    // comportar isso. Ver README, seção "Visits".
+    'track_visits' => true,
+
+    // Teto de paths gravados por visita: depois disso a visita só atualiza
+    // `updated_at` (última atividade), sem crescer — protege contra uma
+    // sessão que gera requests sem parar (polling, bot com cookie).
+    'visit_max_paths' => 200,
+
+    // Retenção, em dias, de `monitor_visits` (por `updated_at`, última
+    // atividade da visita) — aplicada por `DataPruner` no prune automático
+    // (`data_prune_interval_hours`) e em `monitor:prune`/`pruneData`,
+    // independente da idade do Monitor pai. `0` desliga (guarda pra sempre).
+    'visits_retention_days' => 90,
 
     // Nome do cookie de longa duração usado para reconhecer visitantes
     // recorrentes (fluxo "remember me"). Ver README para o contrato do
