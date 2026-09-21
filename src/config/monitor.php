@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.42.0',
+    'version' => '0.43.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -33,6 +33,19 @@ return [
     // privacidade, podem desligar com false. Ver README, seção
     // "Authenticated user tagging".
     'track_authenticated_user' => true,
+
+    // IPs (ou faixas CIDR, IPv4/IPv6) que o monitor IGNORA por completo:
+    // requests deles passam direto pelo middleware — não criam Monitor,
+    // não entram em monitor_ip_stats/visitas, não disparam sinal de scraper
+    // e nunca são bloqueados (nem por IP, nem por path armadilha). Pensado
+    // pro próprio servidor (health check em cron, chamadas server-to-server
+    // do dashboard) e IPs de monitoramento/administração de confiança. Lista
+    // separada por vírgula no `.env`: MONITOR_IGNORE_IPS=203.0.113.7,127.0.0.1,::1,10.0.0.0/8.
+    // Default vazio = ninguém é ignorado (comportamento de sempre).
+    // ATENÇÃO: só coloque IPs que NÃO podem ser forjados — atrás de proxy
+    // reverso com `trustProxies` aberto (`'*'`), um `X-Forwarded-For` forjado
+    // faria o request parecer vir de um IP ignorado e escapar do monitor.
+    'ignore_ips' => array_values(array_filter(array_map('trim', explode(',', (string) env('MONITOR_IGNORE_IPS', ''))))),
 
     // Grava a jornada de cada visita (uma visita = uma sessão PHP) em
     // `monitor_visits`: os paths acessados, em ordem de acesso, crus e sem

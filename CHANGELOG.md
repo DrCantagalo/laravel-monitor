@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.43.0] - 2026-09-21
+### Added
+- **`monitor.ignore_ips`** (env `MONITOR_IGNORE_IPS`, comma-separated): IPs or
+  CIDR ranges (IPv4/IPv6) that `MonitorMethod` ignores entirely — no
+  `Monitor`, no visit, no `monitor_ip_stats`, no scraper signal, and never
+  blocked (by IP or honeypot path). Checked first, in memory, before any
+  database access. Motivation (found on `cantagalo.it`): the server's own
+  health-check cron (`curl` every minute, no cookie) created a `Monitor` +
+  visit per run — plausibly around half of all tracked rows — and its IP sat one signal
+  short of auto-blocking itself once `high_cumulative_visits` (5000) kicked in,
+  which would have blocked the dashboard's own server-to-server calls. Default
+  empty: behavior unchanged. See README "Ignoring IPs".
+
+---
+
 ## [0.42.0] - 2026-09-21
 ### ⚠️ Breaking
 - **`monitors.data` no longer carries `page`, `not_found`, `ips`, `sessions`

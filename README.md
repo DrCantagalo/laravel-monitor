@@ -1464,6 +1464,34 @@ read-modify-written); hit counts are unaffected (atomic).
 
 ## Advanced usage
 
+### Ignoring IPs (`monitor.ignore_ips`, since `0.43.0`)
+
+Requests from IPs listed in `config('monitor.ignore_ips')` pass straight
+through `MonitorMethod`: no `Monitor` row, no visit, no `monitor_ip_stats`
+entry, no scraper signal, and **never blocked** — not by IP, not by a
+honeypot path. The check is the first thing the middleware does, an
+in-memory comparison before any database access, so it costs nothing per
+request (it actually saves work). Entries are exact IPs or CIDR ranges,
+IPv4 or IPv6. In `.env`, comma-separated:
+
+```
+MONITOR_IGNORE_IPS=203.0.113.7,127.0.0.1,::1,10.0.0.0/8
+```
+
+Built for the server's own traffic — a cron health check doing
+`curl https://your-site` every minute has no cookie, so it used to create one
+`Monitor` + one visit per run, inflate `monitor_ip_stats` (and flag itself as
+a scraper) — and for trusted monitoring/admin IPs. Default is empty
+(nobody is ignored). Requests from an ignored IP aren't tracked *retroactively*:
+existing rows stay until pruned.
+
+> ⚠️ Only list IPs that **can't be forged**. Behind a reverse proxy with an
+> open `trustProxies` (`'*'`), a forged `X-Forwarded-For` would make a request
+> look like it came from an ignored IP and escape the monitor. Also note a
+> cloud instance's public IP can change on stop/start unless it's an
+> Elastic/static IP — when it changes, the ignore silently stops matching
+> (the noise comes back, nothing breaks).
+
 ### Skipping tracking for a request
 
 `MonitorMethod` runs on every request in the `web` middleware group, so

@@ -14,6 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\Response;
 
 class MonitorMethod
@@ -40,6 +41,13 @@ class MonitorMethod
         $path = $request->getHost().'/'.$pathOnly;
         $ip = $request->ip();
         $userAgent = $request->header('User-Agent');
+
+        // IP configurado em `monitor.ignore_ips` (o próprio servidor, IPs de
+        // monitoramento): passa direto, antes de qualquer consulta ao banco
+        // — sem tracking, sem sinal de scraper, sem checagem de bloqueio.
+        if ($this->isIgnoredIp($ip)) {
+            return $next($request);
+        }
 
         // IP bloqueado (via updateBlockedIps) ou path flagado como scrapper
         // (via flagScraperPath): corta o request aqui, antes de qualquer
@@ -129,6 +137,25 @@ class MonitorMethod
         }
 
         return $response;
+    }
+
+    /**
+     * `monitor.ignore_ips`: IPs exatos ou faixas CIDR (IPv4/IPv6, via
+     * `IpUtils::checkIp`). Só uma comparação em memória — não consulta banco
+     * nem cache, então custa praticamente nada por request.
+     */
+    protected function isIgnoredIp(?string $ip): bool
+    {
+        if ($ip === null || $ip === '') {
+            return false;
+        }
+
+        $ignored = array_values(array_filter(array_map(
+            fn ($entry) => trim((string) $entry),
+            (array) config('monitor.ignore_ips', [])
+        )));
+
+        return $ignored !== [] && IpUtils::checkIp($ip, $ignored);
     }
 
     /**
