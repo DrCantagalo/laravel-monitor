@@ -1493,8 +1493,9 @@ class MonitorController extends Controller
      * anterior, tornando flag/markSafe mutuamente exclusivos já que é a
      * mesma linha/tabela desde a fusão que uniu `monitor_blocked_paths` e
      * `monitor_path_reviews`), checada por `MonitorMethod` pra bloquear
-     * (403) qualquer request futura àquele path, em qualquer host que esta
-     * installation atenda; (2) os IPs que já visitaram esse path (via
+     * qualquer request futura àquele path (404 no 1º hit de um IP ainda
+     * não bloqueado, 403 dali em diante — task 148), em qualquer host que
+     * esta installation atenda; (2) os IPs que já visitaram esse path (via
      * `data.page` dos registros de Monitor) são bloqueados em
      * `monitor_blocked_ips`, mesmo mecanismo de `updateBlockedIps`.
      *

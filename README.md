@@ -437,6 +437,20 @@ only ever came from `getPages`.
 > page *looks* identical either way) — it was found live in more than one
 > host app integrating this package, always with the same root cause: a
 > `view(...)` call with no explicit status.
+>
+> **Since `0.39.0`, this also decides whether a honeypot's first-hit `404`
+> (see "Honeypot hits" below) is actually indistinguishable from a genuine
+> one.** `MonitorMethod`'s own `abort(404)` runs *before* this fallback is
+> ever reached, so the two responses only end up byte-identical because
+> Laravel's exception handler renders the same thing for any thrown `404`
+> — a `resources/views/errors/404.blade.php`, if the host app has one
+> (picked automatically for both), or the framework's own default 404 page
+> otherwise. A fallback that returns a body built by hand instead — e.g.
+> `Route::fallback(fn () => response('Not found', 404))` — breaks that
+> equivalence: the honeypot 404 (rendered by the exception handler) and the
+> fallback's genuine 404 (the hand-built body) would have different
+> content even though both are status `404`, reopening the same tell this
+> feature exists to close. Stick to one of the two patterns above.
 
 - **`flagScraperPath`** (`Authorization: Bearer <local_token>`, same auth
   as `updateBlockedIps`/`clearData` — never accepted with the ephemeral
@@ -447,10 +461,14 @@ only ever came from `getPages`.
      (`updateOrCreate`, since `0.20.0` — overwrites a `'safe'` status if
      the path was previously marked safe via `markPathSafe`, making
      flagging and marking safe mutually exclusive; see "Path review
-     state" below). From then on, `MonitorMethod` rejects (`403`) any
-     request whose path matches, **regardless of host** — an installation
-     shared by multiple subdomains is protected on all of them at once,
-     since the block check ignores the host prefix that `data.page` uses.
+     state" below). From then on, `MonitorMethod` rejects any request
+     whose path matches, **regardless of host** — an installation shared
+     by multiple subdomains is protected on all of them at once, since the
+     block check ignores the host prefix that `data.page` uses. **Since
+     `0.39.0`**, the rejection is `404` (indistinguishable from any other
+     nonexistent route) on the first hit from an IP not yet blocked, and
+     `403` from then on once that IP is itself in `monitor_blocked_ips` —
+     see "Honeypot hits" below for why.
   2. Every IP already recorded (`data.ips`) against a `Monitor` that
      visited that path is blocked in `monitor_blocked_ips` (`source:
      'scraper-path'`), same mechanism as `updateBlockedIps`.
@@ -772,12 +790,26 @@ human reviewing the flagged-IP queue required:
   afterwards (`MonitorMethod`, since `0.37.0`): the first request from an
   IP that isn't already blocked registers the offense and blocks it before
   the request is denied; once blocked, later hits from the same IP just
-  take the 403 like any other blocked IP — one offense per block cycle,
-  not one per request, so a bot hammering the honeypot doesn't escalate to
-  a permanent block by itself. Before `0.16.0` this called
-  `BlockedIp::firstOrCreate()` directly (permanent, static block from the
-  first hit); it now goes through the same escalating/expiring mechanism
-  as every other automatic block.
+  take the same rejection like any other blocked IP — one offense per
+  block cycle, not one per request, so a bot hammering the honeypot
+  doesn't escalate to a permanent block by itself. Before `0.16.0` this
+  called `BlockedIp::firstOrCreate()` directly (permanent, static block
+  from the first hit); it now goes through the same escalating/expiring
+  mechanism as every other automatic block.
+  - **`404`, not `403`, on that first hit (since `0.39.0`)**: a `403`
+    response is a tell — it lets a scanner tell the monitored honeypot
+    path apart from every other nonexistent path, which returns `404`,
+    turning the very defense meant to be invisible into a trivial oracle
+    for finding it. The rejection is now `abort(404)` on the request that
+    registers the offense (the offense itself, and the
+    `monitor_block_results` counter below, still happen exactly as
+    before — only the HTTP status changes), and stays `403` from the
+    *second* hit onward, once the IP is itself in `monitor_blocked_ips` —
+    same as any other already-blocked IP hitting any other path. This
+    keeps the CGNAT false-positive diagnostic intact (a shared IP that
+    gets blocked still shows `403` on every subsequent request, so it's
+    easy to spot in logs) while closing the 404-vs-403 tell on the first
+    hit.
 
 Curating which paths count as a honeypot stays 100% manual (a human still
 decides which routes nobody legitimate would ever hit) — only what
@@ -824,13 +856,15 @@ even while permanently keeping every row with 2+ offenses.
 
 ## Blocked-attempt counter (`monitor_block_results`)
 
-Since `0.9.0`, every request rejected with `403` by `MonitorMethod` (both
-branches: the IP itself is in `monitor_blocked_ips`, **or** the path it
-hit has `status: 'trap'` in `monitor_paths` — including a brand-new IP
-that was never separately blocked, hitting an already-flagged honeypot
-path)
+Since `0.9.0`, every request rejected by `MonitorMethod` (both branches:
+the IP itself is in `monitor_blocked_ips`, **or** the path it hit has
+`status: 'trap'` in `monitor_paths` — including a brand-new IP that was
+never separately blocked, hitting an already-flagged honeypot path)
 increments a per-IP counter in the new `monitor_block_results` table
-(`ip` unique, `counter`, `last_attempt_at`). This is a raw "how many
+(`ip` unique, `counter`, `last_attempt_at`) — regardless of whether the
+response was `403` or, since `0.39.0`, the `404` a first-time honeypot
+hit now gets (see "Honeypot hits" above); the counter tracks blocked
+attempts, not any particular status code. This is a raw "how many
 times has this IP been turned away" tally, independent of `monitor_ip_stats`
 (which only tracks requests that were actually let through/tracked).
 
@@ -845,8 +879,9 @@ times has this IP been turned away" tally, independent of `monitor_ip_stats`
 - **Fail-open**: wrapped in the same `try`/`catch (QueryException)`
   pattern as the rest of `MonitorMethod` — if `monitor_block_results`
   hasn't been migrated yet in some environment, the increment is skipped
-  (logged via `Log::warning`) and the request is still blocked (`abort(403)`
-  runs unconditionally, outside the try/catch).
+  (logged via `Log::warning`) and the request is still blocked (`abort()`
+  runs unconditionally, outside the try/catch, with the `403`/`404`
+  status decided as described above).
 - **`blocked_attempts_total`**: a new field on the existing `getData`
   response (`SUM(counter)` across every row) — reuses the same
   client-side fetch that already powers the dashboard's KPI cards instead

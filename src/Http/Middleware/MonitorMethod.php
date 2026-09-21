@@ -51,8 +51,8 @@ class MonitorMethod
         //
         // Fail-open: se as tabelas ainda não existirem (composer require
         // feito mas migrations ainda não rodaram), essa query não pode
-        // derrubar o site inteiro do cliente. abort(403) fica FORA do try
-        // pra não ser engolido pelo catch.
+        // derrubar o site inteiro do cliente. abort() fica FORA do try pra
+        // não ser engolido pelo catch.
         //
         // As duas checagens ficam separadas (em vez de um único OR) porque
         // precisamos saber qual delas disparou: um IP que bate num path
@@ -61,6 +61,8 @@ class MonitorMethod
         // com `! $ipBlocked` preserva o short-circuit que o `||` original já
         // dava (IP já bloqueado nunca chega a consultar `isPathBlocked`),
         // então esse ramo continua sem custo extra no caminho quente comum.
+        // A mesma separação também decide o status HTTP da resposta (task
+        // 148, ver abaixo).
         try {
             $ipBlocked = $this->isBlocked($ip);
             $pathBlocked = ! $ipBlocked && $this->isPathBlocked($pathOnly);
@@ -82,8 +84,8 @@ class MonitorMethod
                 // incrementar `strike_count`/`lifetime_offense_count` de
                 // novo (ver ScraperBlocker::registerOffense). Try/catch:
                 // falha ao registrar (banco fora, tabela ausente) não pode
-                // impedir o abort(403) abaixo nem virar 500 — mesmo
-                // fail-open do resto do método.
+                // impedir o abort() abaixo nem virar 500 — mesmo fail-open
+                // do resto do método.
                 try {
                     (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
                 } catch (\Throwable $e) {
@@ -92,7 +94,22 @@ class MonitorMethod
             }
 
             $this->recordBlockedAttempt($ip);
-            abort(403);
+
+            // Task 148: um scanner batendo num path honeypot via
+            // $pathBlocked (IP ainda não em monitor_blocked_ips, primeiro
+            // hit) recebe 404, indistinguível de uma rota inexistente
+            // qualquer — o 403 denunciava a armadilha (403 só no path
+            // monitorado, 404 em todo o resto é um oráculo de scan trivial
+            // de se detectar). A ofensa acima e recordBlockedAttempt já
+            // rodaram de qualquer forma, então o IP entra em
+            // monitor_blocked_ips e o contador de tentativas bloqueadas
+            // soma normalmente — só o status HTTP da resposta muda. A
+            // partir do 2º hit do mesmo IP (ou qualquer hit de um IP já
+            // bloqueado por outro motivo) $ipBlocked é true e a resposta
+            // volta a ser 403: preserva o diagnóstico de falso positivo
+            // (CGNAT) nos logs, sem mudar o comportamento pra quem já está
+            // bloqueado.
+            abort($pathBlocked ? 404 : 403);
         }
 
         // 2. PROCESSAMENTO (O Laravel segue para os outros middlewares e para o Controller)
@@ -197,12 +214,15 @@ class MonitorMethod
     /**
      * Incrementa o contador de tentativas bloqueadas desse IP em
      * `monitor_block_results` (task 83) — chamado logo antes do
-     * `abort(403)` acima, cobrindo os dois motivos de bloqueio de uma vez
+     * `abort()` acima, cobrindo os dois motivos de bloqueio de uma vez
      * só: `$blocked` já é o OR de `isBlocked()`/`isPathBlocked()`, então
      * não importa qual dos dois disparou — o IP da request atual é quem
-     * toma o 403 e é quem conta aqui, inclusive um IP nunca antes visto
-     * batendo num path já flagado como honeypot (nunca esteve em
-     * `monitor_blocked_ips` por si só).
+     * toma o abort (403 se já bloqueado, 404 se é o primeiro hit num path
+     * honeypot — task 148) e é quem conta aqui, inclusive um IP nunca
+     * antes visto batendo num path já flagado como honeypot (nunca esteve
+     * em `monitor_blocked_ips` por si só). O status HTTP da resposta não
+     * afeta essa contagem — ela soma qualquer tentativa bloqueada,
+     * independente do código retornado.
      *
      * Upsert atômico via query builder (uma query, sem race entre um
      * SELECT+UPDATE/INSERT concorrentes do mesmo IP martelando o mesmo
@@ -213,7 +233,7 @@ class MonitorMethod
      *
      * Fail-open: se `monitor_block_results` ainda não existir (migration
      * não rodou), essa query não pode derrubar o bloqueio em si —
-     * `abort(403)` roda de qualquer jeito, fora deste método, mesmo se o
+     * `abort()` roda de qualquer jeito, fora deste método, mesmo se o
      * catch abaixo disparar.
      */
     protected function recordBlockedAttempt(string $ip): void

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.39.0] - 2026-09-21
+### Changed
+- **Honeypot hits now respond `404` on the first hit from a not-yet-blocked
+  IP, not `403`** (task 148, decision by the user). The previous `403`
+  gave a scanner a trivial way to tell the monitored honeypot path apart
+  from every other nonexistent path (which already returned `404`) —
+  effectively an oracle for finding the trap. `MonitorMethod::handle()`
+  now calls `abort(404)` instead of `abort(403)` when `$pathBlocked` is
+  true (an IP not yet in `monitor_blocked_ips` hitting a `status: 'trap'`
+  path); the offense is still registered via `ScraperBlocker::
+  registerOffense()` and the `monitor_block_results` counter (task 83)
+  still increments exactly as before — only the HTTP status of that one
+  response changes. **Breaking for anything that keyed off the `403`**:
+  once the IP is itself blocked (`$ipBlocked` true, from the second hit
+  onward, or any other path once blocked), the response stays `403` as
+  before — this only affects the very first honeypot hit. See README
+  "Honeypot hits" and `flagScraperPath`.
+
 ## [0.38.0] - 2026-09-20
 ### Fixed
 - **`DataPruner`'s `only_blocked` filter counted an expired temporary
