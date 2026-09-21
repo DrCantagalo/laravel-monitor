@@ -1204,8 +1204,10 @@ ephemeral read token from `issueReadToken`).
   `IpStat::recordVisit()` on every tracked request — see "Per-IP stats"
   above). Params: `page` (default `1`), `per_page` (default `20`, max
   `100`), `filter` (`all` default, `flagged`, `clean`, `blocked` — an
-  IP counts as `blocked` if it's in `monitor_blocked_ips`; unknown
-  value returns `422`), `date_from`/`date_to` (optional, filters by the
+  IP counts as `blocked` if it has an active row in
+  `monitor_blocked_ips` (`BlockedIp::active()`: permanent, or temporary
+  and not yet expired); unknown value returns `422`), `date_from`/
+  `date_to` (optional, filters by the
   row's `last_seen` — "this IP was active in this window", same
   approximation as `getPages`). Response: `{"success": true, "data":
   [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
@@ -1242,6 +1244,18 @@ ephemeral read token from `issueReadToken`).
     `blocked_until`, `strike_count`, `lifetime_offense_count`,
     `last_offense_at` and `source` (all from `monitor_blocked_ips`) — the
     existing fields keep their shape, nothing is removed.
+  - **Since `0.41.0`**: `filter=blocked` only lists **active** blocks
+    (`BlockedIp::active()`) — a temporary block whose `blocked_until` has
+    already expired no longer appears in this listing, same "blocked"
+    definition used everywhere else in the package (the `blocked` field
+    on `filter=all`/`flagged`/`clean` rows since `0.40.0`, and
+    `MonitorMethod::isBlocked()`). Before `0.41.0` this tab intentionally
+    listed expired blocks too, as a history/reputation view; that was
+    inconsistent with the rest of the package and was never actually
+    requested, so it's reverted. The expired row itself is untouched in
+    `monitor_blocked_ips` (still feeds `strike_count`/
+    `lifetime_offense_count` for the escalation ladder) — it just stops
+    showing up here.
 - **`getVisitorPaths`** (since `0.6.0`): given an `ip`
   (`{"success": false, "message": "No valid IP provided"}`, `422`, if
   missing/invalid), finds every `Monitor` that's ever seen that IP and

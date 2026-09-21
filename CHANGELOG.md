@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.41.0] - 2026-09-21
+### Changed
+- **`getVisitorsByIp` with `filter=blocked` now only lists active blocks**
+  (task 150, decision by the user). `buildBlockedVisitorsResult()` used to
+  query `BlockedIp::query()` with no vigency filter, on purpose (task 147):
+  a temporary block whose `blocked_until` had already expired stayed
+  listed under the "Blocked" tab, as a history/reputation view. That was
+  never actually requested, and it made "blocked" mean something
+  different depending on which part of the package you asked
+  (`filter=blocked` included expired rows, while `filter=flagged`/`clean`
+  and `MonitorMethod::isBlocked()` already treated an expired block as
+  not-blocked since `0.40.0`/task 149). `buildBlockedVisitorsResult()` now
+  starts from `BlockedIp::active()`, same predicate used everywhere else.
+  Nothing is deleted or altered in `monitor_blocked_ips`: an expired
+  temporary block's row still exists and still feeds `strike_count`/
+  `lifetime_offense_count` for `ScraperBlocker`'s escalation ladder — it
+  just no longer appears in this listing. See README
+  "Paginated visitor/blocklist listing".
+
 ## [0.40.0] - 2026-09-21
 ### Fixed
 - **`getVisitorsByIp` showed an IP as "blocked" after its temporary block
