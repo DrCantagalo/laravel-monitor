@@ -7,15 +7,17 @@ use Drcantagalo\LaravelMonitor\Console\Commands\MonitorExportDenylistCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorPruneCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorUpdateCommand;
+use Drcantagalo\LaravelMonitor\Http\Middleware\AvoidMonitor;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
 use Drcantagalo\LaravelMonitor\Support\Monitor;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Cookie\Middleware\EncryptCookies;
+use Illuminate\Routing\Router;
 use Illuminate\Support\ServiceProvider;
 
 class MonitorServiceProvider extends ServiceProvider
 {
-    public function boot(Kernel $kernel)
+    public function boot(Kernel $kernel, Router $router)
     {
         $jsonPath = storage_path('monitor/installation.json');
 
@@ -46,6 +48,16 @@ class MonitorServiceProvider extends ServiceProvider
         // persistia entre requests (bug: cada request criava um Monitor
         // novo em vez de reaproveitar o da sessao).
         $kernel->appendMiddlewareToGroup('web', MonitorMethod::class);
+
+        // Alias `avoid-monitor` (laravel-monitor 151) - exclusão permanente
+        // de tracking por rota/grupo, ex: `Route::middleware('avoid-monitor')
+        // ->group(...)`. Complementar a `Monitor::skipTracking()` (ver
+        // README "Advanced usage"). `aliasMiddleware()` só existe no
+        // `Router` (não no `Kernel` — removido do Kernel do Laravel a
+        // partir da 11, quando o app-skeleton passou a registrar aliases
+        // via `bootstrap/app.php`; um pacote não controla esse arquivo do
+        // host app, então registra direto no Router mesmo).
+        $router->aliasMiddleware('avoid-monitor', AvoidMonitor::class);
 
         // O cookie de remember-me é lido diretamente via $request->cookie()
         // no endpoint público, sem passar pelo decrypt padrao do Laravel

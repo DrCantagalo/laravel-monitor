@@ -1531,6 +1531,40 @@ skipping its tracking logic for that one request. The session key used is
 `config('monitor.skip_session_key')` (default `avoid_monitor`) — publish
 the package config (`monitor-config` tag) to change it.
 
+### Permanently excluding a route from tracking (`avoid-monitor`, since `0.45.0`)
+
+`Monitor::skipTracking()` above is circumstantial — it has to be called
+explicitly inside the controller/action handling the request, which is easy
+to forget on a new route (that's exactly how it happens: a route gets added,
+nobody remembers to call the facade inside it, and it starts polluting the
+journey/`data` until someone notices). For a route or group that should
+**never** be tracked — automatic polling, internal dedicated endpoints — put
+that decision in the route definition itself instead of depending on someone
+remembering the facade call inside it:
+
+```php
+use Illuminate\Support\Facades\Route;
+
+Route::middleware('avoid-monitor')->group(function () {
+    Route::get('/dashboard/{installation}/triage-status', TriageStatusController::class);
+});
+```
+
+Use whichever mechanism fits the shape of the decision:
+
+- `Monitor::skipTracking()` — a request should be skipped *conditionally*,
+  decided by something the controller checks at runtime (e.g. an endpoint
+  shared by several callers that only skips tracking when nothing actually
+  changed).
+- `avoid-monitor` middleware — a route should *never* be tracked, full stop,
+  independent of anything the controller does.
+
+The middleware just calls `Monitor::skipTracking()` for you, before
+`$next($request)` runs — same session flag, same mechanism, no separate code
+path to keep in sync. Combining both on the same route (middleware present
+*and* a manual `skipTracking()` call inside the action) is harmless: the
+second call just re-sets the same flag the first one already set.
+
 ### `updateRules` (reserved, not implemented yet)
 
 The handler action `updateRules` exists and is routed (same auth as

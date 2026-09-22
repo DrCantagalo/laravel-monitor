@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.45.0] - 2026-09-22
+### Added
+- New `AvoidMonitor` middleware, aliased as `avoid-monitor`: permanent,
+  route/group-level exclusion from tracking, complementary to
+  `Monitor::skipTracking()` (not a replacement). `skipTracking()` is
+  circumstantial — it has to be called explicitly inside each
+  controller/action, easy to forget on a new route. A route that should
+  *never* be tracked (automatic polling, internal dedicated endpoints)
+  declares that in the route definition itself instead:
+  `Route::middleware('avoid-monitor')->group(function () { ... })`. Reuses
+  the same session-flag mechanism as `skipTracking()` (no duplicated
+  logic) — calls it before `$next($request)` so the flag is already set
+  when `MonitorMethod`'s "back logic" runs. Combining both on the same
+  route is harmless (idempotent). See README "Advanced usage".
+
+---
+
 ## [0.44.0] - 2026-09-21
 ### Fixed
 - **One attack is one offense.** `ScraperBlocker::registerOffense()` now does
