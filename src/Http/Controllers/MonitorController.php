@@ -2,12 +2,15 @@
 
 namespace Drcantagalo\LaravelMonitor\Http\Controllers;
 
+use Composer\InstalledVersions;
 use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
+use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
+use Drcantagalo\LaravelMonitor\Support\DataSanitizer;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
 use Drcantagalo\LaravelMonitor\Support\ListingsCache;
 use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
@@ -43,12 +46,14 @@ class MonitorController extends Controller
 
         // Token de leitura efêmero (issueReadToken) só é aceito pras
         // actions só-leitura (getData, getPages, getVisitorsByIp,
-        // getBlockedIps, getBlockedPaths) — nunca pra
-        // clearData/updateBlockedIps/updateRules/issueReadToken, que
+        // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
+        // getUserVisits, getBlockResults, getIpMonitors, getMonitorVisits
+        // — as duas últimas desde a laravel-monitor 152/v0.46.0) — nunca
+        // pra clearData/updateBlockedIps/updateRules/issueReadToken, que
         // exigem o local_token permanente.
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
-            'getUsers', 'getUserVisits', 'getBlockResults',
+            'getUsers', 'getUserVisits', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -87,6 +92,12 @@ class MonitorController extends Controller
 
             case 'getBlockResults':
                 return $this->getBlockResults($request);
+
+            case 'getIpMonitors':
+                return $this->getIpMonitors($request);
+
+            case 'getMonitorVisits':
+                return $this->getMonitorVisits($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -181,7 +192,38 @@ class MonitorController extends Controller
             // dashboard reusar o mesmo fetch que já alimenta os cards de
             // KPI em vez de bater um endpoint novo só pra esse número.
             'blocked_attempts_total' => $this->blockedAttemptsTotal(),
+            // laravel-monitor 152 (v0.46.0): versão do pacote de fato
+            // instalado, pro dashboard exibir/comparar sem exigir um
+            // handshake dedicado. Ver packageVersion().
+            'package_version' => $this->packageVersion(),
         ]);
+    }
+
+    /**
+     * Versão do pacote de fato instalado (lida do `composer.lock`/runtime
+     * do Composer via `InstalledVersions`, não de `config('monitor.version')`).
+     * Deliberadamente NÃO usa a config: `config/monitor.php` é publicada
+     * (vendor:publish --tag=monitor-config) como uma cópia ESTÁTICA no
+     * projeto hospedeiro — uma vez publicada, `'version'` naquele arquivo
+     * fica congelada no valor de quando foi publicada/atualizada pela
+     * última vez via `monitor:update`, e diverge da versão real instalada
+     * assim que o pacote é atualizado sem rodar `monitor:update` na
+     * sequência (mesmo problema, resolvido do mesmo jeito, em
+     * `MonitorUpdateCommand`). `InstalledVersions` lê direto do que o
+     * Composer realmente instalou, sempre em dia.
+     *
+     * `OutOfBoundsException`: o pacote não está registrado no
+     * `installed.php` do Composer gerado (instalação fora do fluxo normal
+     * do Composer, ex: symlink manual em dev) — fail-open pra `null` em vez
+     * de derrubar `getData`.
+     */
+    protected function packageVersion(): ?string
+    {
+        try {
+            return InstalledVersions::getPrettyVersion('drcantagalo/laravel-monitor');
+        } catch (\OutOfBoundsException $e) {
+            return null;
+        }
     }
 
     /**
@@ -1025,6 +1067,186 @@ class MonitorController extends Controller
     }
 
     /**
+     * laravel-monitor 152 (v0.46.0): dado um IP, lista PAGINADA dos
+     * `Monitor` (dispositivos/navegadores) que já foram vistos com esse IP
+     * — complementar a `getVisitorPaths` (que agrega só os paths, sem
+     * expor as linhas `Monitor` em si). Mesmo caso de uso: confirmar
+     * visualmente, a partir de um IP suspeito, quais dispositivos ele já
+     * usou antes de bloquear.
+     *
+     * Mesma validação de `getVisitorPaths` (`filter_var(..., FILTER_VALIDATE_IP)`,
+     * `422` se ausente/inválido) e mesmo lookup indexado via
+     * `monitor_visit_ips.ip` (nunca escaneia `Monitor` inteiro). Ordenado
+     * por `updated_at` desc (atividade mais recente primeiro), `id` desc
+     * como desempate determinístico (mesmo padrão de `getUserVisits`).
+     *
+     * `data` sai sanitizado (`DataSanitizer::sanitize`, tira `id-token`
+     * legado) e a coluna `id_token` (a credencial de remember-me) nunca é
+     * selecionada. `ips` (todos os IPs já vistos daquele Monitor, não só o
+     * pesquisado) e `visits_count` são resolvidos com uma query agregada
+     * cada por página (`whereIn` nos ids da página atual), nunca uma por
+     * linha — mesmo padrão de `hydrateUserVisitRows`.
+     */
+    protected function getIpMonitors(Request $request)
+    {
+        $ip = (string) $request->input('ip', '');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('ip-monitors', [$ip, $page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($ip, $page, $perPage) {
+            return $this->buildIpMonitorsResult($ip, $page, $perPage);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    protected function buildIpMonitorsResult(string $ip, int $page, int $perPage): array
+    {
+        $monitorIds = DB::table('monitor_visit_ips')->where('ip', $ip)->pluck('monitor_id');
+
+        if ($monitorIds->isEmpty()) {
+            return [
+                'data' => [],
+                'meta' => ['page' => $page, 'per_page' => $perPage, 'total' => 0, 'last_page' => 1],
+            ];
+        }
+
+        $paginator = Monitor::query()
+            ->whereIn('id', $monitorIds)
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
+
+        return [
+            'data' => $this->hydrateIpMonitorRows($paginator->items()),
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    /**
+     * Suporte de `getIpMonitors`: dado o lote de `Monitor` já paginado,
+     * resolve `ips`/`visits_count` de cada um com uma query agregada por
+     * página (não uma por linha) — mesmo padrão de `hydrateUserVisitRows`.
+     *
+     * @param  array<int, Monitor>  $monitors
+     * @return array<int, array<string, mixed>>
+     */
+    protected function hydrateIpMonitorRows(array $monitors): array
+    {
+        if (empty($monitors)) {
+            return [];
+        }
+
+        $ids = array_map(fn (Monitor $monitor) => $monitor->id, $monitors);
+
+        $ipsByMonitor = [];
+        DB::table('monitor_visit_ips')
+            ->whereIn('monitor_id', $ids)
+            ->orderBy('id')
+            ->get(['monitor_id', 'ip'])
+            ->each(function ($row) use (&$ipsByMonitor) {
+                $ipsByMonitor[$row->monitor_id][] = $row->ip;
+            });
+
+        $visitsCounts = [];
+        DB::table('monitor_visits')
+            ->whereIn('monitor_id', $ids)
+            ->selectRaw('monitor_id, COUNT(*) as visits_count')
+            ->groupBy('monitor_id')
+            ->get()
+            ->each(function ($row) use (&$visitsCounts) {
+                $visitsCounts[$row->monitor_id] = (int) $row->visits_count;
+            });
+
+        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts) {
+            $row = $monitor->toArray();
+            $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
+            $row['ips'] = $ipsByMonitor[$monitor->id] ?? [];
+            $row['visits_count'] = $visitsCounts[$monitor->id] ?? 0;
+
+            return $row;
+        }, $monitors);
+    }
+
+    /**
+     * laravel-monitor 152 (v0.46.0): dado um `monitor_id`, lista PAGINADA
+     * da jornada completa (`monitor_visits`) daquele dispositivo/navegador
+     * — ao contrário de `hydrateUserVisitRows`/`getUserVisits`, que só
+     * anexa as ÚLTIMAS 20 visitas por linha, esta action existe pra
+     * paginar o histórico completo de um Monitor específico sob demanda
+     * (ex: expandir "ver todas as visitas" no dashboard).
+     *
+     * Validação: `monitor_id` ausente/vazio, não-inteiro, ou sem `Monitor`
+     * correspondente — todos `422` com mensagem própria (mesmo espírito de
+     * `getUserVisits`, que também `422` quando `user_id` está ausente).
+     */
+    protected function getMonitorVisits(Request $request)
+    {
+        $rawMonitorId = $request->input('monitor_id');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(50, (int) $request->input('per_page', 20)));
+
+        if ($rawMonitorId === null || $rawMonitorId === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'monitor_id is required',
+            ], 422);
+        }
+
+        if (! ctype_digit((string) $rawMonitorId)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'monitor_id must be an integer',
+            ], 422);
+        }
+
+        $monitorId = (int) $rawMonitorId;
+
+        if (! Monitor::whereKey($monitorId)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Monitor not found',
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('monitor-visits', [$monitorId, $page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($monitorId, $page, $perPage) {
+            $paginator = MonitorVisit::where('monitor_id', $monitorId)
+                ->orderByDesc('id')
+                ->paginate($perPage, ['id', 'ip', 'paths', 'scraper', 'created_at', 'updated_at'], 'page', $page);
+
+            return [
+                'data' => $paginator->items(),
+                'meta' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ];
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
      * Listagem paginada de `monitor_blocked_ips` (sem filtro além de
      * paginação — dataset pequeno, mas pagina em SQL real já que não há
      * blob JSON pra agregar aqui, ao contrário de getPages/getVisitorsByIp).
@@ -1286,13 +1508,18 @@ class MonitorController extends Controller
 
         return array_map(function (Monitor $monitor) use ($pages, $ips) {
             $row = $monitor->toArray();
-            $row['data'] = (array) ($row['data'] ?? []);
+            // laravel-monitor 152 (v0.46.0): sanitiza antes de somar
+            // page/ips — tira `id-token` legado do blob de linhas antigas
+            // (ver DataSanitizer). A coluna `id_token` em si nunca aparece
+            // aqui: o select de getUserVisits só pede id/data/created_at/
+            // updated_at.
+            $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
             $row['data']['page'] = $pages[$monitor->id] ?? [];
             $row['data']['ips'] = $ips[$monitor->id] ?? [];
             $row['visits'] = $monitor->visits()
                 ->orderByDesc('id')
                 ->limit(20)
-                ->get(['id', 'paths', 'scraper', 'created_at', 'updated_at'])
+                ->get(['id', 'ip', 'paths', 'scraper', 'created_at', 'updated_at'])
                 ->toArray();
 
             return $row;
@@ -1426,6 +1653,14 @@ class MonitorController extends Controller
             'success' => true,
             'monitors_deleted' => $result['monitors_deleted'],
             'ip_stats_deleted' => $result['ip_stats_deleted'],
+            // laravel-monitor 152 (v0.46.0): a chave já existia no retorno
+            // de DataPruner::prune() (e no output de monitor:prune) desde a
+            // 0.42.0, mas nunca tinha sido repassada na response HTTP desta
+            // action — corrigido aqui. Ganha ainda mais peso agora que
+            // `only_blocked=false` também varre monitor_visits por
+            // `older_than_days` (não só por `visits_retention_days`, hoje
+            // `0`/desligado por padrão) — ver DataPruner::prune().
+            'visits_deleted' => $result['visits_deleted'],
         ]);
     }
 
