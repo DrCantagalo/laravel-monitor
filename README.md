@@ -119,7 +119,8 @@ loading a full `Monitor` row into PHP:
   "visits_total": 84210,
   "sessions_total": 21044,
   "unique_ips_total": 8117,
-  "blocked_attempts_total": 342
+  "blocked_attempts_total": 342,
+  "package_version": "0.46.0"
 }
 ```
 
@@ -140,11 +141,30 @@ loading a full `Monitor` row into PHP:
   `monitor_visit_ips` across every `Monitor`.
 - **`blocked_attempts_total`**: unchanged, see "Blocked-attempt counter"
   below.
-- All four new totals share a short, fixed cache TTL
+- **`package_version`** (since `0.46.0`): the actually-installed package
+  version, read from `Composer\InstalledVersions::getPrettyVersion(
+  'drcantagalo/laravel-monitor')` — **not** from `config('monitor.version')`.
+  Deliberately not the config value: `config/monitor.php` is published
+  (`vendor:publish --tag=monitor-config`) as a **static copy** in the
+  host project, so once published its `'version'` key stays frozen at
+  whatever it was the last time `monitor:install`/`monitor:update` wrote
+  it — it drifts from the real installed version the moment the package
+  is updated without running `monitor:update` right after (same problem
+  `MonitorUpdateCommand` already solves for that specific key by reading
+  `InstalledVersions` itself, ver `MonitorUpdateCommand`). `getData`
+  always reflects what Composer actually installed. `null` if the
+  package somehow isn't registered in Composer's `installed.php` (e.g. a
+  manual symlink outside the normal Composer flow) — fails open, never
+  breaks `getData`.
+- `visitors_total`/`visits_total`/`sessions_total`/`unique_ips_total`
+  (added in `0.10.0`) share a short, fixed cache TTL
   (`config('monitor.data_totals_cache_ttl_seconds')`, default `45`
   seconds — same rationale as `block_results_cache_ttl_seconds`) and
   fail open to `0` if the underlying table/column isn't there yet on an
   older, not-yet-migrated install (logged via `Log::warning`).
+  `package_version` is **not** cached (a plain in-memory Composer lookup,
+  no I/O) and `blocked_attempts_total` has its own separate cache, see
+  "Blocked-attempt counter" below.
 
 If your integration was reading the raw `data` array from `getData`,
 there is no drop-in replacement — it was removed entirely rather than
@@ -373,6 +393,24 @@ the shared `monitor:listings:version` counter) — since this data
 changes on every tracked visit rather than through an explicit admin
 action, staleness here is bounded by the TTL alone, same as `getPages`.
 
+### Sanitizing the `data` blob (since `0.46.0`)
+
+Every response that exposes a `Monitor`'s `data` blob (`getUserVisits`
+above, `getIpMonitors` below) runs it through
+`Support\DataSanitizer::sanitize()` first — one shared helper, so the rule
+lives in exactly one place instead of being duplicated per action. Today
+it only strips the legacy `id-token` key: before `0.42.0`
+(`monitors.id_token`, its own unique-indexed column) the remember-me
+cookie's value lived at `data['id-token']`, and the migration that
+introduced the column only **read** that key to backfill the new column —
+it never deleted it from the blob. A `Monitor` row created before `0.42.0`
+can therefore still carry the raw remember-me token (effectively a
+credential — whoever has it can be recognized as that visitor) inside
+`data` forever, unless sanitized on the way out. The real `id_token`
+column itself is a separate concern and is handled the ordinary way: every
+action's `select()`/`toArray()` simply never includes that column in the
+first place.
+
 ## Ephemeral read token + dedicated CORS (dashboard direct fetch)
 
 The dashboard (`monitor.cantagalo.it`) can call `/monitor/handler?action=getData`
@@ -386,8 +424,9 @@ application's backend — only a short-lived, read-only token does.
   returns `{"success": true, "token": "...", "expires_at": "..."}`.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
-  `getBlockedIps`, `getBlockedPaths`, `getUsers`, `getUserVisits`,
-  `getBlockResults`)**.
+  `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
+  `getUserVisits`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`
+  — the last two since `0.46.0`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -1291,6 +1330,73 @@ ephemeral read token from `issueReadToken`).
     relevant `monitor_id`s, then `monitor_page_hits` sums hits per path
     for just those ids — both steps in SQL. Upgrading runs a one-time
     backfill migration populating `monitor_visit_ips`.
+- **`getIpMonitors`** (since `0.46.0`): given an `ip` (`{"success":
+  false, "message": "No valid IP provided"}`, `422`, if missing/invalid,
+  same validation as `getVisitorPaths`), a **paginated** listing of the
+  actual `Monitor` rows (devices/browsers) ever seen from that IP —
+  complements `getVisitorPaths` (which only aggregates paths, without
+  exposing the `Monitor` rows themselves). Params: `page` (default `1`),
+  `per_page` (default `20`, max `100`). Looked up the same way as
+  `getVisitorPaths` (`monitor_visit_ips.ip`, indexed — never a scan of
+  `Monitor`), ordered by `updated_at` descending (`id` descending as a
+  deterministic tiebreaker). Response:
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": 42,
+        "created_at": "2026-09-10T12:00:00.000000Z",
+        "updated_at": "2026-09-23T08:15:00.000000Z",
+        "data": {"ua": "Mozilla/5.0 ...", "flags": {"scraper": false, "scraper_signals": []}},
+        "ips": ["203.0.113.9", "203.0.113.14"],
+        "visits_count": 7
+      }
+    ],
+    "meta": {"page": 1, "per_page": 20, "total": 1, "last_page": 1}
+  }
+  ```
+  - `data` (the blob) is **sanitized** the same way as `getUserVisits` —
+    see "Sanitizing the `data` blob" below.
+  - `ips`: **every** IP that `Monitor` has ever been seen from (not just
+    the one searched for), and `visits_count`: `COUNT(*)` of
+    `monitor_visits` for that `Monitor` — both resolved with one grouped
+    `whereIn` query per page (not one query per row), same pattern as
+    `getUserVisits`/`hydrateUserVisitRows`.
+  - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
+- **`getMonitorVisits`** (since `0.46.0`): given a `monitor_id`
+  (`{"success": false, "message": "monitor_id is required"}` /
+  `"monitor_id must be an integer"` / `"Monitor not found"`, `422`, when
+  missing, non-integer, or not an existing `Monitor` id, respectively), a
+  **paginated** listing of that device/browser's **full** visit history
+  (`monitor_visits`), newest first (`id` descending). Unlike
+  `getUserVisits` (which only attaches each row's **last 20** visits),
+  this action lets you page through the complete journey history of one
+  specific `Monitor` on demand (e.g. an "see all visits" expansion in the
+  dashboard). Params: `page` (default `1`), `per_page` (default `20`,
+  max `50`). Response:
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": 981,
+        "ip": "203.0.113.9",
+        "paths": ["example.test/", "example.test/cart", "example.test/checkout"],
+        "scraper": false,
+        "created_at": "2026-09-23T08:00:00.000000Z",
+        "updated_at": "2026-09-23T08:04:00.000000Z"
+      }
+    ],
+    "meta": {"page": 1, "per_page": 20, "total": 1, "last_page": 1}
+  }
+  ```
+  - `ip`: the IP that **opened** that specific visit — see "Visits"
+    below (`monitor_visits.ip`, new in `0.46.0`); `null` for a visit
+    recorded before this column existed (not backfilled).
+  - `paths`: the full journey, in access order, same field as
+    `getUserVisits`'s attached `visits`.
+  - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
 - **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
   `monitor_paths` rows with `status: 'trap'` (`{"path", "created_at"}`,
@@ -1347,7 +1453,11 @@ partial, filtered delete:
   > not yet expired) — same check `MonitorMethod` itself uses to decide
   > whether to block a request (`BlockedIp::active()`).
 
-Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4}`.
+Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
+"visits_deleted": 3}`. `visits_deleted` (its value was already computed by
+`Support\DataPruner::prune()` since `0.42.0`, but this HTTP response never
+surfaced it until `0.46.0` — fixed here) now also reflects the
+`only_blocked=false` cutoff sweep described in "Visit retention" below.
 
 Bumps the `getPages`/`getVisitorsByIp` listing cache version counters
 (`invalidatePagesCache`/`invalidateListingsCache`) whenever something
@@ -1412,17 +1522,66 @@ matching the filter in one go, exactly as before.
 
 ### Visit retention (since `0.42.0`)
 
-`monitor.visits_retention_days` (default `90`, `0` disables) deletes
-`monitor_visits` rows whose `updated_at` (last activity) is older than that,
-**independent of the age of the parent `Monitor`**: a device recognized by
-the 5-year remember-me cookie is never deleted by the prune above, so
-without this its visits would pile up forever. It runs inside
-`DataPruner::prune()` — the automatic trigger (capped by
-`data_prune_max_rows_per_run`, same "resume on the next request" behavior),
-`monitor:prune` and `pruneData` — and the visits of a deleted `Monitor` go
-away through the foreign key's `ON DELETE CASCADE`. `monitor:prune`'s
-output and `DataPruner::prune()`'s return value gained a `visits_deleted`
-count.
+`monitor.visits_retention_days` deletes `monitor_visits` rows whose
+`updated_at` (last activity) is older than that, **independent of the age
+of the parent `Monitor`**: a device recognized by the 5-year remember-me
+cookie is never deleted by the prune above, so without this its visits
+would pile up forever. It runs inside `DataPruner::prune()` — the
+automatic trigger (capped by `data_prune_max_rows_per_run`, same "resume
+on the next request" behavior), `monitor:prune` and `pruneData` — and the
+visits of a deleted `Monitor` go away through the foreign key's
+`ON DELETE CASCADE`.
+
+> ⚠️ **Behavior change in `0.46.0`**: the default changed from `90` to
+> `0` (**disabled** — retention is now opt-in/manual). Until `0.45.0`,
+> `visits_retention_days` defaulted to `90` *and* the automatic trigger
+> (`DataPruner::maybeCleanup()`, run on every tracked request) called
+> `prune(0, true)`, which already included this retention sweep — meaning
+> **every** installation that never published `config/monitor.php` (most
+> of them) was already auto-deleting `monitor_visits` older than 90 days,
+> silently, by accident. That was never the intent: the automatic trigger
+> exists to purge tracking for already-confirmed-blocked IPs
+> (`only_blocked=true`), not to sweep everyone's visits by age. Two
+> concrete consequences:
+> - **A site that never published `config/monitor.php`** loses the old
+>   automatic 90-day visit retention on upgrade to `0.46.0` — visits now
+>   accumulate indefinitely unless you opt back in (see below). This is
+>   the majority of installations (publishing the config is optional).
+> - **A site that already published `config/monitor.php`** keeps
+>   whatever value it has in that file — `monitor:update` never
+>   overwrites a key you've customized (see "Updating" above), so nothing
+>   changes for you here.
+>
+> To restore automatic visit cleanup, either (a) publish
+> `config/monitor.php` (if not already) and set `visits_retention_days`
+> to a value `> 0` — the automatic trigger keeps honoring it exactly like
+> before `0.46.0` — or (b) schedule
+> `monitor:prune --older-than-days=X` (without `--only-blocked`) yourself,
+> which as of `0.46.0` **also** sweeps `monitor_visits` — see next
+> paragraph.
+>
+> **New in `0.46.0`**: `DataPruner::prune($olderThanDays, $onlyBlocked)`
+> now *additionally* deletes `monitor_visits` rows older than the same
+> `$olderThanDays` cutoff used for `Monitor`/`monitor_ip_stats`, whenever
+> `$onlyBlocked` is `false` — independent of, and on top of,
+> `visits_retention_days`. This is what `pruneData`
+> (`only_blocked=false`, the dashboard's "partial cleanup" UI) and
+> `monitor:prune --older-than-days=X` (without `--only-blocked`) use to
+> let you manually sweep old visits from active devices even with
+> retention disabled — the tool that replaces the old accidental
+> automatic behavior. It's a second, independent `DELETE` (no
+> double-counting: a row either query already removed just isn't found by
+> the other), and its count is folded into the same `visits_deleted`.
+> This new sweep **never** runs from the automatic trigger
+> (`maybeCleanup()` always calls `prune(0, true)` — `only_blocked=true`),
+> so the automatic path still never deletes a visit on its own with the
+> default config, exactly as intended.
+
+`monitor:prune`'s output and `DataPruner::prune()`'s return value gained a
+`visits_deleted` count in `0.42.0`; since `0.46.0` it sums both sources
+above, and the command's message says so (`"past
+monitor.visits_retention_days"` when `--only-blocked` was passed, `"past
+monitor.visits_retention_days and/or --older-than-days"` otherwise).
 
 ## Visits (`monitor_visits`, since `0.42.0`)
 
@@ -1435,6 +1594,7 @@ Where each piece of tracking data lives:
 | Hits per path (+ `not_found`) | `monitor_page_hits` |
 | IPs seen per device | `monitor_visit_ips` |
 | **The journey of each visit** | `monitor_visits` |
+| **The IP that opened each visit** | `monitor_visits.ip` (since `0.46.0`) |
 
 Until `0.41.0`, `page`/`not_found`/`ips`/`sessions`/`visits` were written
 into the JSON blob and copied to the child tables by a model hook. From
@@ -1462,13 +1622,24 @@ session) never does. Every tracked request is added, including AJAX/API
 calls inside the `web` group — call `Monitor::skipTracking()` for the ones
 that shouldn't show up in the journey.
 
+**`ip` (since `0.46.0`)**: the IP that **opened** the visit, written only
+when the `monitor_visits` row is **created** (`Support\VisitRecorder::record()`)
+— never rewritten on later requests of the same visit, even if the
+visitor's IP changes mid-session (that's tracked separately, and
+independently, by `monitor_visit_ips`/`SessionVisitorTracker::recordIpIfChanged()`).
+Nullable: a visit recorded before this column existed keeps `ip = NULL`
+forever — there's no reliable per-visit IP to backfill it from (only
+`monitor_visit_ips`, which doesn't record which IP opened *which* visit,
+existed before). Exposed by `getMonitorVisits` above.
+
 Config (all in `config/monitor.php`; `monitor:update` adds missing keys):
 
 - `track_visits` (default `true`): journey + IP + a 5-year cookie is
   personal data — turn it off if your privacy policy doesn't cover it.
 - `visit_max_paths` (default `200`): once a visit reaches this many paths it
   only bumps `updated_at`.
-- `visits_retention_days` (default `90`): see "Visit retention" above.
+- `visits_retention_days` (default `0` since `0.46.0`, was `90`): see
+  "Visit retention" above, including the `0.46.0` behavior change.
 
 `Monitor::skipTracking()` is unchanged. A concurrent pair of requests from
 the same session can, rarely, drop one step of a journey (the visit row is

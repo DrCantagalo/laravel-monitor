@@ -4,6 +4,110 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.46.0] - 2026-09-23
+### ⚠️ Behavior change
+- **`monitor.visits_retention_days` default changed from `90` to `0`
+  (disabled — retention is now manual/opt-in).** Until `0.45.0`, the
+  automatic prune trigger (`DataPruner::maybeCleanup()`, run on every
+  tracked request via `prune(0, true)`) already included the retention
+  sweep (`pruneVisits()`), so **any site that never published
+  `config/monitor.php`** — most installations — was silently
+  auto-deleting `monitor_visits` older than 90 days, without asking. That
+  was never the intent: the automatic trigger exists to purge tracking
+  for confirmed-blocked IPs, not to sweep everyone's visit history by
+  age. Effects on upgrade:
+  - **Sites that never published `config/monitor.php`** lose the old
+    automatic 90-day visit retention — visits now accumulate
+    indefinitely unless you opt back in.
+  - **Sites that already published `config/monitor.php`** are
+    unaffected — `monitor:update` never overwrites a key you've
+    customized, so your existing `visits_retention_days` value (whatever
+    it is) keeps being honored by the automatic trigger exactly as
+    before.
+  - To restore automatic cleanup: publish the config (if not already)
+    and set `visits_retention_days` to a value `> 0`, or schedule
+    `monitor:prune --older-than-days=X` (without `--only-blocked`) —
+    see the next entry. See README "Visit retention" for the full
+    rationale and a regression test (`MonitorDataPruneAutoTest`-style)
+    locking in that the automatic path never starts deleting visits with
+    the new default.
+
+### Added
+- **`getIpMonitors`** (params: `ip`, `page`, `per_page` default `20` max
+  `100`): paginated listing of the `Monitor` rows (devices/browsers) ever
+  seen from a given IP — complements `getVisitorPaths` (which only
+  aggregates paths, without exposing the `Monitor` rows). Same IP
+  validation as `getVisitorPaths` (`422` if missing/invalid). Each row:
+  `id`, `created_at`, `updated_at`, `data` (sanitized, see below), `ips`
+  (every IP that `Monitor` has ever been seen from), `visits_count`
+  (`COUNT(*)` of `monitor_visits`) — the last two resolved with one
+  grouped `whereIn` query per page, not one query per row. Cached and
+  paginated the same way as `getVisitorsByIp`/`getBlockedIps`.
+- **`getMonitorVisits`** (params: `monitor_id`, `page`, `per_page`
+  default `20` max `50`): paginated listing of a **single** `Monitor`'s
+  full visit history (`monitor_visits`, newest first) — unlike
+  `getUserVisits`, which only attaches each row's last 20 visits, this
+  paginates the complete journey history on demand. `422` when
+  `monitor_id` is missing, non-integer, or doesn't match an existing
+  `Monitor`. Each row: `id`, `ip`, `paths` (full journey, access order),
+  `scraper`, `created_at`, `updated_at`.
+- Both new actions accepted by the ephemeral read token from
+  `issueReadToken` (same read-only tier as `getData`/`getPages`/etc).
+- **`monitor_visits.ip`**: the IP that **opened** the visit, written only
+  when the visit row is **created** (`Support\VisitRecorder::record()`
+  gained a new, backward-compatible `?string $ip = null` parameter) —
+  never rewritten on later requests of the same visit, even across a
+  mid-session IP change (still tracked separately by
+  `monitor_visit_ips`). `SessionVisitorTracker` passes the IP it already
+  has through. Nullable, no index; existing visits keep `ip = NULL`
+  forever (not backfilled — no reliable per-visit source to backfill
+  from). New migration
+  `2026_09_23_000000_add_ip_to_monitor_visits_table`. Included in the
+  select list of `hydrateUserVisitRows`'s attached `visits` and exposed
+  by `getMonitorVisits` above.
+- **`getData` gains `package_version`**, read from
+  `Composer\InstalledVersions::getPrettyVersion('drcantagalo/laravel-monitor')`
+  (`OutOfBoundsException` caught → `null`) — deliberately **not**
+  `config('monitor.version')`, which freezes at whatever `monitor:install`/
+  `monitor:update` last wrote into a client's published `config/monitor.php`
+  and drifts from the real installed version after any update that skips
+  `monitor:update`.
+- **`Support\DataSanitizer`**: one shared helper (`sanitize(array $data):
+  array`) that strips the legacy `id-token` key from a `Monitor`'s `data`
+  blob before it's exposed in any response. Before `0.42.0`
+  (`monitors.id_token`) the remember-me token lived at
+  `data['id-token']`; the migration that introduced the `id_token` column
+  only read that key to backfill it, never deleted it from the blob, so
+  an old row can still carry the raw credential inside `data` forever
+  without this. Used by both `getUserVisits`/`hydrateUserVisitRows` and
+  `getIpMonitors` (previously only handled ad hoc, and only in
+  `PROTECTED_DATA_KEYS`, which stops `tag()` from writing the key again —
+  it never stripped it from what was already there or from responses).
+  The real `id_token` column is unaffected by this helper — it's kept out
+  of responses the ordinary way, by never selecting it.
+- `DataPruner::prune($olderThanDays, $onlyBlocked)` now also deletes
+  `monitor_visits` rows whose `updated_at` is older than the same
+  `$olderThanDays` cutoff whenever `$onlyBlocked` is `false` — on top of,
+  and independent from, the `visits_retention_days`-based sweep. This is
+  what `pruneData`/`monitor:prune --older-than-days=X` (without
+  `--only-blocked`) use to manually clean up visits of active devices now
+  that automatic retention is opt-in. The automatic trigger
+  (`maybeCleanup()`) always calls `prune(0, true)` — `only_blocked=true`
+  — so this new sweep never runs from there; a dedicated regression test
+  locks in that the automatic path still never deletes a visit on its own
+  with the default config. Folded into the existing `visits_deleted`
+  counter (no double-counting: each source is an independent `DELETE`,
+  a row either one already removed just isn't found by the other).
+  `monitor:prune`'s output message reflects both possible sources.
+  `pruneData`'s HTTP response also gains `visits_deleted` in its JSON —
+  the value existed in `DataPruner::prune()`'s return since `0.42.0` but
+  was never surfaced by this specific route until now.
+
+### Changed
+- `visits_retention_days` default: `90` → `0` (see Behavior change above).
+
+---
+
 ## [0.45.0] - 2026-09-22
 ### Added
 - New `AvoidMonitor` middleware, aliased as `avoid-monitor`: permanent,
