@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.45.0',
+    'version' => '0.46.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -62,10 +62,31 @@ return [
     'visit_max_paths' => 200,
 
     // Retenção, em dias, de `monitor_visits` (por `updated_at`, última
-    // atividade da visita) — aplicada por `DataPruner` no prune automático
-    // (`data_prune_interval_hours`) e em `monitor:prune`/`pruneData`,
-    // independente da idade do Monitor pai. `0` desliga (guarda pra sempre).
-    'visits_retention_days' => 90,
+    // atividade da visita) — aplicada por `DataPruner` em `monitor:prune`/
+    // `pruneData` (nunca no gatilho automático, ver abaixo), independente
+    // da idade do Monitor pai. `0` desliga (guarda pra sempre).
+    //
+    // ATENÇÃO — mudança de comportamento (laravel-monitor 152, v0.46.0):
+    // o default mudou de `90` pra `0` (retenção agora é manual/opt-in).
+    // Até 0.45.0 o gatilho automático (`DataPruner::maybeCleanup()`, roda
+    // a cada request rastreada) chamava `prune(0, true)`, que já incluía
+    // `pruneVisits()` — ou seja, QUALQUER instalação que nunca publicou
+    // este arquivo de config (a maioria) já vinha apagando visitas com
+    // mais de 90 dias sozinha, sem pedir. Isso nunca foi intencional: o
+    // gatilho automático foi desenhado só pra IP já confirmado-bloqueado
+    // (`only_blocked=true`), não pra varrer visitas de todo mundo por
+    // idade. Corrigido: `prune(0, true)` (o único jeito de chamar `prune()`
+    // que o gatilho automático usa) não passa mais aqui - ver
+    // `DataPruner::prune()`. Quem quer voltar a limpar visitas antigas
+    // automaticamente agora precisa (a) publicar este arquivo e setar um
+    // valor > 0 (mantém rodando dentro do gatilho automático via
+    // `pruneVisits()`, sem mudança de comportamento pra quem já tinha
+    // publicado e customizado essa chave), ou (b) agendar
+    // `monitor:prune --older-than-days=X` (sem `--only-blocked`) por conta
+    // própria — que agora TAMBÉM varre `monitor_visits` por
+    // `older_than_days`/`--older-than-days`, não só por esta chave (ver
+    // `DataPruner::prune()` e a seção "Visit retention" do README).
+    'visits_retention_days' => 0,
 
     // Nome do cookie de longa duração usado para reconhecer visitantes
     // recorrentes (fluxo "remember me"). Ver README para o contrato do

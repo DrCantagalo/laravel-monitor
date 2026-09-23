@@ -32,9 +32,21 @@ class MonitorPruneCommand extends Command
             return 1;
         }
 
-        $result = DataPruner::prune((int) $olderThanDays, (bool) $this->option('only-blocked'));
+        $onlyBlocked = (bool) $this->option('only-blocked');
+        $result = DataPruner::prune((int) $olderThanDays, $onlyBlocked);
 
-        $this->info("Pruned {$result['monitors_deleted']} monitor row(s), {$result['ip_stats_deleted']} IP stat row(s) and {$result['visits_deleted']} visit row(s) past monitor.visits_retention_days.");
+        // laravel-monitor 152 (v0.46.0): visits_deleted agora soma duas
+        // fontes independentes — a retenção configurável
+        // (monitor.visits_retention_days, 0 = desligada por padrão) e,
+        // só quando --only-blocked NÃO foi passado, um segundo varrimento
+        // por --older-than-days (ver DataPruner::prune()). A mensagem
+        // reflete os dois sem assumir qual deles (se algum) de fato gerou
+        // as linhas apagadas.
+        $visitsNote = $onlyBlocked
+            ? 'past monitor.visits_retention_days'
+            : 'past monitor.visits_retention_days and/or --older-than-days';
+
+        $this->info("Pruned {$result['monitors_deleted']} monitor row(s), {$result['ip_stats_deleted']} IP stat row(s) and {$result['visits_deleted']} visit row(s) {$visitsNote}.");
 
         return 0;
     }

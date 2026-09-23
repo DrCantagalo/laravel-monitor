@@ -124,6 +124,41 @@ class DataPruner
      * apagando tudo de uma vez como sempre fizeram; são invocações
      * manuais/administrativas, não algo que roda sozinho dentro de toda
      * request de visitante.
+     *
+     * Task 152 (v0.46.0): além da retenção própria de
+     * `pruneVisits()`/`monitor.visits_retention_days` (agora `0`/desligada
+     * por padrão — ver comentário da config), quando `$onlyBlocked` é
+     * `false` este método TAMBÉM apaga `monitor_visits` mais antigas que o
+     * MESMO cutoff de `$olderThanDays` usado pra `monitors`/`monitor_ip_stats`
+     * acima — independente do valor de `visits_retention_days`.
+     *
+     * Motivação: até 0.45.0, `visits_retention_days` default `90` +
+     * `maybeCleanup()` chamando `prune(0, true)` a cada request rastreada
+     * significava que TODA installation (mesmo quem nunca publicou
+     * `config/monitor.php`) já vinha apagando `monitor_visits` com mais de
+     * 90 dias sozinha, automaticamente. Isso nunca foi intencional — o
+     * gatilho automático foi desenhado só pra IP já confirmado-bloqueado
+     * (`only_blocked=true`), não pra varrer visitas de todo mundo por
+     * idade (ver `maybeCleanup()`, sempre chama `prune(0, true)`, nunca
+     * `false`). Com o default de `visits_retention_days` agora `0`
+     * (desligado), esse cleanup vira 100% manual: sem este bloco, um
+     * device ativo (cookie de remember-me de 5 anos, `pruneMonitors()`
+     * nunca o apaga) acumularia `monitor_visits` pra sempre, sem NENHUM
+     * jeito de limpar via `pruneData`/`monitor:prune --older-than-days`
+     * (que é justamente a ferramenta manual/administrativa que existe pra
+     * isso). Ligando este bloco a `$onlyBlocked = false` (nunca a `true`)
+     * garante que o caminho automático (`maybeCleanup()` → sempre
+     * `prune(0, true)`) continua NUNCA apagando visitas por conta própria —
+     * ver `MonitorDataPruneAutoTest`/o teste de regressão equivalente no
+     * harness.
+     *
+     * Sem sobreposição/dupla-contagem com `pruneVisits()`: são dois
+     * `DELETE ... WHERE updated_at < ?` independentes (cutoffs
+     * tipicamente diferentes — um por `visits_retention_days`, outro por
+     * `$olderThanDays`); uma linha que a primeira já apagou simplesmente
+     * não é encontrada pela segunda (delete idempotente por natureza), e
+     * uma linha que sobra pra segunda encontrar é, por definição, uma que
+     * a primeira não pegou.
      */
     public static function prune(int $olderThanDays, bool $onlyBlocked, ?int $maxRows = null): array
     {
@@ -145,15 +180,21 @@ class DataPruner
 
         $visits = self::pruneVisits($maxRows);
 
-        if ($ipStatsDeleted > 0 || $visits['deleted'] > 0) {
+        $cutoffVisits = $onlyBlocked
+            ? ['deleted' => 0, 'done' => true]
+            : self::deleteVisitsOlderThan($cutoff, $maxRows);
+
+        $visitsDeleted = $visits['deleted'] + $cutoffVisits['deleted'];
+
+        if ($ipStatsDeleted > 0 || $visitsDeleted > 0) {
             ListingsCache::invalidate();
         }
 
         return [
             'monitors_deleted' => $monitors['deleted'],
             'ip_stats_deleted' => $ipStatsDeleted,
-            'visits_deleted' => $visits['deleted'],
-            'done' => $monitors['done'] && $visits['done'],
+            'visits_deleted' => $visitsDeleted,
+            'done' => $monitors['done'] && $visits['done'] && $cutoffVisits['done'],
         ];
     }
 
@@ -176,14 +217,30 @@ class DataPruner
      */
     public static function pruneVisits(?int $maxRows = null): array
     {
-        $days = (int) config('monitor.visits_retention_days', 90);
+        // Default `0` (desligado) desde a v0.46.0 — até 0.45.0 era `90`,
+        // ver comentário de `visits_retention_days` em config/monitor.php
+        // e de `prune()` acima pra por que isso mudou.
+        $days = (int) config('monitor.visits_retention_days', 0);
 
         if ($days <= 0) {
             return ['deleted' => 0, 'done' => true];
         }
 
-        $cutoff = now()->subDays($days);
+        return self::deleteVisitsOlderThan(now()->subDays($days), $maxRows);
+    }
 
+    /**
+     * Núcleo compartilhado de `pruneVisits()` (cutoff via
+     * `visits_retention_days`) e do bloco `only_blocked=false` de
+     * `prune()` (cutoff via `$olderThanDays`) — mesmo
+     * `DELETE ... WHERE updated_at < $cutoff`, chunked/capado por
+     * `$maxRows` do mesmo jeito nos dois casos, só o cutoff em si muda
+     * conforme o chamador.
+     *
+     * @return array{deleted: int, done: bool}
+     */
+    private static function deleteVisitsOlderThan(Carbon $cutoff, ?int $maxRows): array
+    {
         try {
             $query = DB::table('monitor_visits')->where('updated_at', '<', $cutoff);
 
