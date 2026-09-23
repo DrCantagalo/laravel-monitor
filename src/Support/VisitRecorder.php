@@ -42,8 +42,18 @@ class VisitRecorder
      *
      * Fail-open (mesmo padrão dos demais gravadores do pacote): tabela
      * ainda não migrada não pode derrubar o site hospedeiro.
+     *
+     * `$ip` (laravel-monitor 152, v0.46.0, backward compatible — default
+     * `null`): gravado SÓ na criação da visita (o IP que abriu a sessão),
+     * nunca no ramo de update acima — uma visita que troca de IP no meio
+     * (rede móvel, já rastreado à parte por
+     * `SessionVisitorTracker::recordIpIfChanged()`/`monitor_visit_ips`) não
+     * reescreve esta coluna; ela responde só "quem começou", não "todo
+     * mundo que participou" (isso é `monitor_visit_ips`, já indexado por
+     * `ip`). Visitas antigas (antes desta migration) ficam com `ip = NULL`
+     * pra sempre — sem backfill, ver a migration.
      */
-    public static function record(MonitorModel $monitor, string $path, bool $isScraper): void
+    public static function record(MonitorModel $monitor, string $path, bool $isScraper, ?string $ip = null): void
     {
         if (! config('monitor.track_visits', true)) {
             return;
@@ -80,6 +90,7 @@ class VisitRecorder
                 'monitor_id' => $monitor->id,
                 'paths' => [$path],
                 'scraper' => $isScraper,
+                'ip' => $ip,
             ]);
 
             session([self::SESSION_KEY => $visit->id]);

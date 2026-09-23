@@ -9,7 +9,7 @@ class MonitorVisit extends Model
 {
     protected $table = 'monitor_visits';
 
-    protected $fillable = ['monitor_id', 'paths', 'scraper'];
+    protected $fillable = ['monitor_id', 'paths', 'scraper', 'ip'];
 
     protected $casts = [
         'paths' => 'array',

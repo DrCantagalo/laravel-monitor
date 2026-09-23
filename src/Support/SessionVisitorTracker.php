@@ -148,7 +148,7 @@ class SessionVisitorTracker
                 // gravadas direto — o blob só guarda ua/flags/user_id/tags.
                 $user->recordHit($path, $notFound);
                 $this->recordIpIfChanged($user, $ip);
-                VisitRecorder::record($user, $path, $isScraper);
+                VisitRecorder::record($user, $path, $isScraper, $ip);
 
                 // touch(), não save(): `updated_at` é a "última atividade"
                 // (filtro de datas de getPages, DataPruner, last_activity
@@ -187,7 +187,7 @@ class SessionVisitorTracker
 
         $user->recordHit($path, $notFound);
         $this->recordIpIfChanged($user, $ip);
-        VisitRecorder::record($user, $path, $isScraper);
+        VisitRecorder::record($user, $path, $isScraper, $ip);
 
         $response->headers->setCookie(cookie(
             config('monitor.remember_cookie', 'monitor_id_token'),
