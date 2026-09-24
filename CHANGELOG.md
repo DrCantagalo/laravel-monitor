@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.47.0] - 2026-09-24
+### Added
+- **`getData` gains `config_version`**, read from `config('monitor.version')`
+  — the value frozen into the host project's **published**
+  `config/monitor.php`, i.e. whatever `monitor:install`/`monitor:update`
+  last wrote there. Sent alongside the existing `package_version` (which
+  keeps reading the real Composer-installed version via
+  `InstalledVersions`, unchanged): a client whose `package_version` runs
+  ahead of `config_version` ran `composer update` without following up
+  with `php artisan monitor:update`, meaning both the published config
+  and the package's pending migrations are still out of date. See README
+  "Aggregated dashboard totals (`getData`)".
+
+---
+
 ## [0.46.0] - 2026-09-23
 ### ⚠️ Behavior change
 - **`monitor.visits_retention_days` default changed from `90` to `0`
