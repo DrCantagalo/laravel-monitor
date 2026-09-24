@@ -196,6 +196,18 @@ class MonitorController extends Controller
             // instalado, pro dashboard exibir/comparar sem exigir um
             // handshake dedicado. Ver packageVersion().
             'package_version' => $this->packageVersion(),
+            // laravel-monitor 230 (v0.47.0): versão gravada na config
+            // publicada (`config/monitor.php` do projeto hospedeiro) —
+            // congelada em qualquer valor que `monitor:install`/
+            // `monitor:update` tenha escrito da última vez (ver
+            // `MonitorUpdateCommand::updateVersion()`). Deliberadamente
+            // mandada AO LADO de `package_version` (não em vez dela): as
+            // duas divergirem entre si é justamente o sinal de que o
+            // Composer foi atualizado mas `monitor:update` não rodou
+            // depois (config e possivelmente migrations do pacote
+            // pendentes) — colapsar as duas numa só perderia essa
+            // distinção.
+            'config_version' => config('monitor.version'),
         ]);
     }
 
