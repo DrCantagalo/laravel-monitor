@@ -120,7 +120,8 @@ loading a full `Monitor` row into PHP:
   "sessions_total": 21044,
   "unique_ips_total": 8117,
   "blocked_attempts_total": 342,
-  "package_version": "0.46.0"
+  "package_version": "0.47.0",
+  "config_version": "0.46.0"
 }
 ```
 
@@ -156,15 +157,26 @@ loading a full `Monitor` row into PHP:
   package somehow isn't registered in Composer's `installed.php` (e.g. a
   manual symlink outside the normal Composer flow) — fails open, never
   breaks `getData`.
+- **`config_version`** (since `0.47.0`): `config('monitor.version')` —
+  the frozen value from the host project's **published**
+  `config/monitor.php`, i.e. whatever `monitor:install`/`monitor:update`
+  last wrote into it (see `MonitorUpdateCommand`). Sent deliberately
+  *alongside* `package_version`, not instead of it: the two keys
+  diverging (`package_version` ahead of `config_version`) is exactly the
+  signal that the client ran `composer update` but never followed up
+  with `php artisan monitor:update` — which means both the published
+  config *and* the package's pending migrations are out of date (see
+  `MonitorUpdateCommand::confirmPendingMigrations()`). Clients on a
+  package version older than `0.47.0` don't send this key at all.
 - `visitors_total`/`visits_total`/`sessions_total`/`unique_ips_total`
   (added in `0.10.0`) share a short, fixed cache TTL
   (`config('monitor.data_totals_cache_ttl_seconds')`, default `45`
   seconds — same rationale as `block_results_cache_ttl_seconds`) and
   fail open to `0` if the underlying table/column isn't there yet on an
   older, not-yet-migrated install (logged via `Log::warning`).
-  `package_version` is **not** cached (a plain in-memory Composer lookup,
-  no I/O) and `blocked_attempts_total` has its own separate cache, see
-  "Blocked-attempt counter" below.
+  `package_version`/`config_version` are **not** cached (plain
+  in-memory lookups, no I/O) and `blocked_attempts_total` has its own
+  separate cache, see "Blocked-attempt counter" below.
 
 If your integration was reading the raw `data` array from `getData`,
 there is no drop-in replacement — it was removed entirely rather than
