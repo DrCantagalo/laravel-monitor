@@ -23,6 +23,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class MonitorController extends Controller
@@ -49,15 +50,17 @@ class MonitorController extends Controller
         // actions só-leitura (getData, getPages, getVisitorsByIp,
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
         // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits,
-        // getIpTags — getIpMonitors/getMonitorVisits desde a laravel-monitor
-        // 152/v0.46.0, getUserMonitors desde a 237/v0.48.0 (substituindo
-        // getUserVisits), getIpTags desde a 239/v0.49.0 — nunca pra
+        // getIpTags, getTableStats — getIpMonitors/getMonitorVisits desde a
+        // laravel-monitor 152/v0.46.0, getUserMonitors desde a 237/v0.48.0
+        // (substituindo getUserVisits), getIpTags desde a 239/v0.49.0,
+        // getTableStats desde a 242/v0.50.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
         // setIpLabels/setIpTags, que exigem o local_token permanente (são
         // escrita).
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
+            'getTableStats',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -105,6 +108,9 @@ class MonitorController extends Controller
 
             case 'getIpTags':
                 return $this->getIpTags($request);
+
+            case 'getTableStats':
+                return $this->getTableStats($request);
 
             case 'setIpKind':
                 return $this->setIpKind($request);
@@ -1473,6 +1479,114 @@ class MonitorController extends Controller
     }
 
     /**
+     * Todas as tabelas que este pacote cria/mantém (via
+     * `src/database/migrations`) — usado por `getTableStats`.
+     * `monitor_blocked_paths`/`monitor_path_reviews` NÃO entram: foram
+     * fundidas em `monitor_paths` pela migration
+     * `2026_09_07_000000_merge_monitor_blocked_paths_and_path_reviews_into_monitor_paths`
+     * e não existem mais como tabelas próprias.
+     */
+    protected const STATS_TABLES = [
+        'monitors',
+        'monitor_visits',
+        'monitor_visit_ips',
+        'monitor_page_hits',
+        'monitor_ip_stats',
+        'monitor_blocked_ips',
+        'monitor_paths',
+        'monitor_block_results',
+        'monitor_ip_labels',
+    ];
+
+    /**
+     * laravel-monitor 242 (v0.50.0): visão operacional de "o quanto cada
+     * tabela do pacote está pesando" — pra um consumidor decidir quando
+     * vale rodar `pruneData`/`clearData`/`monitor:prune`, sem precisar
+     * acessar o banco diretamente. Uma linha por tabela em
+     * `STATS_TABLES` + um `total` agregando todas.
+     *
+     * `Schema::hasTable()` antes de cada `COUNT(*)`: uma tabela nova
+     * deste pacote (ex: `monitor_ip_labels`, 2026-09-25) pode ainda não
+     * ter migrado numa instalação desatualizada — pula em vez de
+     * derrubar a action inteira com um erro de "table not found".
+     *
+     * `size_bytes` (dado+índice) só é resolvido no MySQL, via
+     * `information_schema.tables` — é onde o pacote tipicamente roda em
+     * produção. Em qualquer outro driver (sqlite nos testes deste
+     * próprio pacote, postgres, etc.) fica `null`: não existe um
+     * equivalente barato/portável de `information_schema.tables.
+     * DATA_LENGTH/INDEX_LENGTH` entre drivers, e estimar via
+     * `PRAGMA`/`pg_relation_size` deixaria a resposta inconsistente
+     * entre drivers sem necessidade real (o pacote não promete esse
+     * dado fora do MySQL).
+     *
+     * Cache curto via `ListingsCache` (mesmo TTL/versão das outras
+     * listagens) — `information_schema` é uma query cara em tabelas
+     * grandes, não vale rodar a cada refresh do dashboard.
+     */
+    protected function getTableStats(Request $request)
+    {
+        $cacheKey = $this->listingsCacheKey('table-stats', []);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () {
+            return $this->buildTableStatsResult();
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    protected function buildTableStatsResult(): array
+    {
+        $connection = DB::connection();
+        $driver = $connection->getDriverName();
+        $database = $connection->getDatabaseName();
+
+        $tables = [];
+        $totalRows = 0;
+        $totalSizeBytes = 0;
+        $hasSizeBytes = false;
+
+        foreach (self::STATS_TABLES as $table) {
+            if (! Schema::hasTable($table)) {
+                continue;
+            }
+
+            $rows = (int) DB::table($table)->count();
+            $sizeBytes = null;
+
+            if ($driver === 'mysql') {
+                $row = DB::selectOne(
+                    'select (data_length + index_length) as size_bytes from information_schema.tables where table_schema = ? and table_name = ?',
+                    [$database, $table]
+                );
+
+                if ($row && $row->size_bytes !== null) {
+                    $sizeBytes = (int) $row->size_bytes;
+                    $totalSizeBytes += $sizeBytes;
+                    $hasSizeBytes = true;
+                }
+            }
+
+            $tables[] = [
+                'table' => $table,
+                'rows' => $rows,
+                'size_bytes' => $sizeBytes,
+            ];
+
+            $totalRows += $rows;
+        }
+
+        return [
+            'data' => $tables,
+            'total' => [
+                'rows' => $totalRows,
+                'size_bytes' => $hasSizeBytes ? $totalSizeBytes : null,
+            ],
+        ];
+    }
+
+    /**
      * laravel-monitor 239 (v0.49.0): classifica um ou vários IPs como
      * `bot`/`human`, ou volta a indefinido (`kind: null`) — anotação pura,
      * ver README "IP classification". `ips` aceita um array ou (conveniência)
@@ -1966,28 +2080,36 @@ class MonitorController extends Controller
     }
 
     /**
-     * Cleanup parcial, complementar ao truncate total de clearData:
-     * apaga só linhas de `Monitor`/`monitor_ip_stats` mais antigas que
-     * `older_than_days`, opcionalmente restrito aos IPs confirmado-
-     * bloqueados (`only_blocked`, ver `monitor_blocked_ips`).
+     * Cleanup parcial, complementar ao truncate total de clearData: apaga
+     * linhas de `Monitor`/`monitor_ip_stats`/`monitor_visits` mais antigas
+     * que `older_than_days`.
      *
-     * Antes da task 81, este filtro usava o sinal *automático* da
-     * heurística (`IpStat.flagged`/`Monitor.data.flags.scraper`) — não
-     * cumulativo, reflete só a última requisição daquele IP, sem nenhuma
-     * revisão humana — pra decidir o que apagar permanentemente. Trocado
-     * pra `monitor_blocked_ips` (IP de fato confirmado/bloqueado pelo
-     * usuário), evitando deleção de dado em cima de um falso positivo não
-     * revisado. Parâmetro renomeado de `only_scraper_flagged` pra
-     * `only_blocked` (reflete a nova semântica).
+     * **Breaking (laravel-monitor 242, v0.50.0)**: esta action HTTP não
+     * aceita mais `only_blocked` — sempre roda a varredura completa
+     * (`DataPruner::prune((int) $olderThanDays, false)`), igual ao antigo
+     * `only_blocked=false`. Um cliente desatualizado que ainda mande
+     * `only_blocked` no body é aceito normalmente e o parâmetro é apenas
+     * ignorado (nunca gera 422) — não podia quebrar um consumidor no meio
+     * de um deploy. A restrição a "só IPs confirmado-bloqueados"
+     * (`monitor_blocked_ips`) continua existindo, mas agora só via CLI:
+     * `php artisan monitor:prune --older-than-days=N --only-blocked` (ver
+     * `Console\Commands\MonitorPruneCommand`) — `DataPruner::prune()`
+     * mantém seu parâmetro `$onlyBlocked` intacto, só o argumento
+     * repassado por esta action HTTP virou uma constante.
+     *
+     * Antes da task 81, o filtro (então chamado `only_scraper_flagged`)
+     * usava o sinal *automático* da heurística
+     * (`IpStat.flagged`/`Monitor.data.flags.scraper`) — trocado pra
+     * `monitor_blocked_ips` (IP de fato confirmado/bloqueado). Ver
+     * CHANGELOG v0.7.0/v0.50.0 pro histórico completo do parâmetro.
      *
      * Lógica de fato (chunked/indexado, invalidação de cache) delegada a
      * `Support\DataPruner` (task 134) — reusada também pelo comando
-     * `monitor:prune`, sem mudar comportamento/response desta rota.
+     * `monitor:prune`.
      */
     protected function pruneData(Request $request)
     {
         $olderThanDays = $request->input('older_than_days');
-        $onlyBlocked = filter_var($request->input('only_blocked', false), FILTER_VALIDATE_BOOLEAN);
 
         if (! is_numeric($olderThanDays) || (int) $olderThanDays < 0) {
             return response()->json([
@@ -1996,7 +2118,9 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $result = DataPruner::prune((int) $olderThanDays, $onlyBlocked);
+        // Sempre varredura completa (nunca restrita a IPs bloqueados) — ver
+        // docblock acima. `only_blocked`, se vier no body, é ignorado.
+        $result = DataPruner::prune((int) $olderThanDays, false);
 
         return response()->json([
             'success' => true,

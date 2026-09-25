@@ -1531,6 +1531,51 @@ released cache. `updateBlockedIps`, `unblockIp`, `flagScraperPath`, and
 `unflagPath` all bump it, since every one of them changes blocked-state
 data these three actions read.
 
+## Table stats (`getTableStats`)
+
+Since `0.50.0`: a read-only, no-pagination snapshot of how much data this
+package's own tables currently hold — one row per table it creates
+(`monitors`, `monitor_visits`, `monitor_visit_ips`, `monitor_page_hits`,
+`monitor_ip_stats`, `monitor_blocked_ips`, `monitor_paths`,
+`monitor_block_results`, `monitor_ip_labels`) plus a `total` summing all
+of them. Meant to feed a "storage" panel on the dashboard and help decide
+when it's worth running `pruneData`/`clearData`/`monitor:prune` — without
+needing direct database access.
+
+Same auth as `getData` (permanent `local_token` **or** the ephemeral read
+token from `issueReadToken`). Response:
+
+```json
+{
+  "success": true,
+  "data": [
+    {"table": "monitors", "rows": 1204, "size_bytes": 933888},
+    {"table": "monitor_visits", "rows": 5031, "size_bytes": 2113536},
+    {"table": "monitor_ip_labels", "rows": 42, "size_bytes": 16384}
+  ],
+  "total": {"rows": 6277, "size_bytes": 3063808}
+}
+```
+
+- **`rows`**: an exact `COUNT(*)` for that table.
+- **`size_bytes`**: data + index size for that table (`DATA_LENGTH +
+  INDEX_LENGTH` from `information_schema.tables`), **MySQL only** — `null`
+  on every other driver (SQLite, PostgreSQL, ...), since there's no
+  equally cheap/portable equivalent across drivers and the package
+  doesn't promise this figure outside MySQL. `total.size_bytes` is
+  likewise `null` unless every table's own `size_bytes` was resolved.
+- A table this package knows about but that hasn't migrated yet in the
+  consuming app (e.g. right after upgrading, before `php artisan
+  migrate`) is **skipped**, not an error — `Schema::hasTable()` gates
+  every row, so `getTableStats` never 500s just because an installation
+  is a migration behind.
+
+Cached the same way as `getVisitorsByIp`/`getBlockedIps` (`Cache::remember`
++ the same shared `monitor:listings:version` counter, TTL
+`config('monitor.listings_cache_ttl_minutes')`, default 5 minutes) —
+`clearData` and `pruneData` (see below) both invalidate it, so the numbers
+never stay stale longer than one cleanup call.
+
 ## Partial cleanup (`pruneData`)
 
 `GET /monitor/handler?action=pruneData` — same auth as `clearData`/
@@ -1544,29 +1589,36 @@ partial, filtered delete:
   missing or invalid): deletes `Monitor` rows whose `updated_at` is
   older than `now() - older_than_days` days, and `monitor_ip_stats`
   rows whose `last_seen` is older than the same cutoff.
-- `only_blocked` (optional boolean, default `false`): when `true`,
-  restricts the delete to rows belonging to an IP **currently blocked**
-  in `monitor_blocked_ips` — matched via `monitor_visit_ips` on `Monitor`, the
-  `ip` column on `IpStat` — instead of every row past the cutoff.
-  > ⚠️ **Breaking change in v0.7.0**: this parameter was named
-  > `only_scraper_flagged` and matched `data.flags.scraper`/
-  > `IpStat.flagged` instead — the automatic, non-cumulative heuristic
-  > signal from the *last* request seen from that IP, never reviewed by
-  > anyone. That made `pruneData` capable of permanently deleting rows
-  > for an IP on an unreviewed false positive. It now matches
-  > `monitor_blocked_ips` (an IP the user actually confirmed/blocked)
-  > instead.
-  > ⚠️ **Behavior change in v0.38.0**: "blocked" here used to mean *any*
-  > row in `monitor_blocked_ips`, including a temporary block whose
-  > `blocked_until` had already expired — that row intentionally lives on
-  > after expiry (it feeds the escalating block duration on the *next*
-  > offense, see "Manual IP blocking"/`ScraperBlocker`), but treating it
-  > as still-blocked for pruning purposes meant an IP that served its
-  > temporary block and went back to being a normal visitor kept having
-  > its tracking wiped every automatic cleanup cycle. `only_blocked` now
-  > only matches a currently-active block (permanent, or temporary and
-  > not yet expired) — same check `MonitorMethod` itself uses to decide
-  > whether to block a request (`BlockedIp::active()`).
+
+> ⚠️ **Breaking change in `0.50.0`**: this HTTP action no longer accepts
+> `only_blocked` — it always runs the full sweep described above (the old
+> `only_blocked=false` behavior), regardless of what the request sends.
+> If a request body still includes `only_blocked` (an out-of-date
+> consumer mid-deploy), it's **silently ignored**, never rejected with
+> `422`. Restricting the delete to rows belonging to a currently-blocked
+> IP is now a **CLI-only** capability — see `monitor:prune --only-blocked`
+> below, whose behavior (and the `$onlyBlocked` parameter on
+> `Support\DataPruner::prune()` it calls) is unchanged.
+> ⚠️ **Breaking change in v0.7.0**: this parameter was named
+> `only_scraper_flagged` and matched `data.flags.scraper`/
+> `IpStat.flagged` instead — the automatic, non-cumulative heuristic
+> signal from the *last* request seen from that IP, never reviewed by
+> anyone. That made `pruneData` capable of permanently deleting rows
+> for an IP on an unreviewed false positive. It was changed to match
+> `monitor_blocked_ips` (an IP the user actually confirmed/blocked)
+> instead.
+> ⚠️ **Behavior change in v0.38.0**: "blocked" (CLI `--only-blocked`,
+> and the HTTP action's `only_blocked` before `0.50.0`) used to mean
+> *any* row in `monitor_blocked_ips`, including a temporary block whose
+> `blocked_until` had already expired — that row intentionally lives on
+> after expiry (it feeds the escalating block duration on the *next*
+> offense, see "Manual IP blocking"/`ScraperBlocker`), but treating it
+> as still-blocked for pruning purposes meant an IP that served its
+> temporary block and went back to being a normal visitor kept having
+> its tracking wiped every automatic cleanup cycle. It now only matches
+> a currently-active block (permanent, or temporary and not yet
+> expired) — same check `MonitorMethod` itself uses to decide whether to
+> block a request (`BlockedIp::active()`).
 
 Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
 "visits_deleted": 3}`. `visits_deleted` (its value was already computed by
@@ -1574,17 +1626,24 @@ Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
 surfaced it until `0.46.0` — fixed here) now also reflects the
 `only_blocked=false` cutoff sweep described in "Visit retention" below.
 
-Bumps the `getPages`/`getVisitorsByIp` listing cache version counters
-(`invalidatePagesCache`/`invalidateListingsCache`) whenever something
-was actually deleted from the corresponding table, same mechanism as
-`flagScraperPath`/`updateBlockedIps` etc.
+Bumps the `getPages`/`getVisitorsByIp`/`getTableStats` listing cache
+version counters (`invalidatePagesCache`/`invalidateListingsCache`)
+whenever something was actually deleted from any of `monitors`,
+`monitor_ip_stats` or `monitor_visits` (since `0.50.0` — `monitors`
+alone is now enough to invalidate, not just `ip_stats`/`visits`, so
+`getTableStats`'s row counts don't go stale after a prune that only
+touched `Monitor` rows), same mechanism as `flagScraperPath`/
+`updateBlockedIps` etc.
 
 ### `monitor:prune` (since `0.27.0`)
 
-Artisan equivalent of `pruneData` above — same options, same underlying
+Artisan equivalent of `pruneData` above, same underlying
 `Support\DataPruner` (chunked/indexed, never `::all()`/`cursor()` over the
 whole `Monitor` table), same cache invalidation — meant to run from the
-consuming app's own scheduler instead of a manual HTTP request:
+consuming app's own scheduler instead of a manual HTTP request. Since
+`0.50.0` this command is also the **only** way to restrict the prune to
+confirmed-blocked IPs (`--only-blocked`) — the HTTP action dropped that
+option, see the breaking-change note above:
 
 ```
 php artisan monitor:prune --only-blocked --older-than-days=0
@@ -1593,9 +1652,10 @@ php artisan monitor:prune --only-blocked --older-than-days=0
 - `--older-than-days=` (required, non-negative integer — command fails
   with a non-zero exit code if missing or invalid): same cutoff semantics
   as `pruneData`'s `older_than_days`.
-- `--only-blocked` (optional flag, default off): same semantics as
-  `pruneData`'s `only_blocked` — restrict the delete to rows belonging to
-  a confirmed/blocked IP (`monitor_blocked_ips`).
+- `--only-blocked` (optional flag, default off, **CLI-only since
+  `0.50.0`**): restrict the delete to rows belonging to a
+  confirmed/blocked IP (`monitor_blocked_ips`) instead of every row past
+  the cutoff.
 
 **Automatic since `0.32.0`** — you no longer need to schedule anything
 for this: `Support\DataPruner::maybeCleanup()` runs `prune(0, true)`

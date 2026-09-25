@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.50.0] - 2026-09-25
+### Added
+- **New read action `getTableStats`**: one row per table this package
+  owns (`monitors`, `monitor_visits`, `monitor_visit_ips`,
+  `monitor_page_hits`, `monitor_ip_stats`, `monitor_blocked_ips`,
+  `monitor_paths`, `monitor_block_results`, `monitor_ip_labels`) with an
+  exact `COUNT(*)` (`rows`) and, on MySQL only, data+index size from
+  `information_schema.tables` (`size_bytes`, `null` on every other
+  driver), plus a `total` summing both across all tables. A table that
+  hasn't migrated yet in the consuming app is skipped
+  (`Schema::hasTable()` gate), not a `500`. Read-token eligible (same
+  auth as `getData`/`getIpTags`). Cached like `getVisitorsByIp`
+  (`monitor.listings_cache_ttl_minutes`, same shared
+  `monitor:listings:version` counter), invalidated by `clearData` and
+  `pruneData`. See README "Table stats".
+- `Support\DataPruner::prune()` now also bumps the listings cache
+  version when `monitors_deleted > 0` (before: only on
+  `ip_stats`/`visits` deletes) — needed so `getTableStats`'s `monitors`
+  row count doesn't go stale after a prune that only removed `Monitor`
+  rows. No behavior change for the other listings that already relied on
+  this counter (`getVisitorsByIp`/`getBlockedIps`/`getBlockedPaths`) —
+  they simply get invalidated slightly more often, which was always
+  safe.
+
+### ⚠️ Breaking
+- **`pruneData` (HTTP action) no longer accepts `only_blocked`**: it now
+  always runs a full sweep by `older_than_days`
+  (`DataPruner::prune((int) $olderThanDays, false)`), the old
+  `only_blocked=false` behavior. A request that still sends
+  `only_blocked` (an out-of-date consumer mid-deploy) is **not**
+  rejected — the parameter is simply ignored, and the response stays
+  `200`/`success: true`. Restricting the prune to confirmed-blocked IPs
+  is now **CLI-only**: `php artisan monitor:prune --only-blocked` is
+  unaffected — `Support\DataPruner::prune(int $olderThanDays, bool
+  $onlyBlocked)`'s signature/behavior didn't change, only the HTTP
+  action's own argument to it became a constant. The package has no
+  divulged stable release yet, so this was judged acceptable rather than
+  adding a deprecation window. See README "Partial cleanup (`pruneData`)".
+
 ## [0.49.0] - 2026-09-25
 ### Added
 - **IP classification (bot/human) + custom tags** — annotation only, no

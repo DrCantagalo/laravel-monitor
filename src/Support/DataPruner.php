@@ -186,7 +186,18 @@ class DataPruner
 
         $visitsDeleted = $visits['deleted'] + $cutoffVisits['deleted'];
 
-        if ($ipStatsDeleted > 0 || $visitsDeleted > 0) {
+        // laravel-monitor 242 (v0.50.0): passou a incluir
+        // `monitors['deleted']` (antes só ip_stats/visits) — a nova
+        // listagem `getTableStats` (MonitorController) reflete a contagem
+        // de linhas de `monitors` também, e usa o MESMO cache versionado
+        // via `listingsCacheKey()`, então um prune que só apaga `monitors`
+        // (ex: `only_blocked=false` sem nenhum IpStat/visit elegível)
+        // precisa invalidar esse cache igual. Sem custo extra pras outras
+        // listagens (getVisitorsByIp/getBlockedIps/getBlockedPaths): elas
+        // já são invalidadas com mais frequência do que precisam noutros
+        // pontos do código, invalidar aqui também só significa um cache
+        // miss a mais, nunca um dado errado.
+        if ($monitors['deleted'] > 0 || $ipStatsDeleted > 0 || $visitsDeleted > 0) {
             ListingsCache::invalidate();
         }
 
