@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.48.0] - 2026-09-25
+### Added
+- **New `getUserMonitors` action** (`user_id`, `page`, `per_page`): given a
+  `user_id`, a paginated listing of that user's `Monitor` rows
+  (devices/browsers), filtered via `Monitor::forUserId()`. Same response
+  shape as `getIpMonitors` (`id`, `created_at`, `updated_at`, sanitized
+  `data`, `ips`, `visits_count`), sharing its `hydrateMonitorRows` helper
+  (renamed from `hydrateIpMonitorRows`) — lets a dashboard navigate
+  user → Monitors → a specific Monitor's full visit history
+  (`getMonitorVisits`), the same way `getIpMonitors` already does from an
+  IP. `user_id` missing/empty returns `422`. Registered in the read-token
+  allowlist. See README "User listing (`getUsers`, `getUserMonitors`)".
+
+### ⚠️ Breaking
+- **Removed `getUserVisits`**, replaced by `getUserMonitors` above. The
+  package has no divulged stable version yet and only the maintainer's own
+  dashboard consumes it, so breaking the shape now (rather than keeping a
+  parallel/deprecated action) was judged acceptable. Differences for
+  anyone still calling it directly:
+  - The response no longer rebuilds `data.page`/`data.ips` from
+    `monitor_page_hits`/`monitor_visit_ips`, and no longer attaches each
+    row's last 20 `visits`. It returns the same lean shape as
+    `getIpMonitors` instead (`ips`, `visits_count`) — use the new
+    `getMonitorVisits` action (since `0.46.0`) to page through a specific
+    Monitor's full visit history on demand.
+  - Default `per_page` changed from `25` to `20` (matching
+    `getIpMonitors`); the cache key prefix changed from `user-visits` to
+    `user-monitors` (existing cached `getUserVisits` entries simply expire
+    unread, no invalidation needed).
+- `getUsers` is unaffected — same response shape as before.
+
+---
+
 ## [0.47.0] - 2026-09-24
 ### Added
 - **`getData` gains `config_version`**, read from `config('monitor.version')`

@@ -47,13 +47,14 @@ class MonitorController extends Controller
         // Token de leitura efêmero (issueReadToken) só é aceito pras
         // actions só-leitura (getData, getPages, getVisitorsByIp,
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
-        // getUserVisits, getBlockResults, getIpMonitors, getMonitorVisits
-        // — as duas últimas desde a laravel-monitor 152/v0.46.0) — nunca
-        // pra clearData/updateBlockedIps/updateRules/issueReadToken, que
-        // exigem o local_token permanente.
+        // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits
+        // — getIpMonitors/getMonitorVisits desde a laravel-monitor 152/
+        // v0.46.0, getUserMonitors desde a 237/v0.48.0, substituindo
+        // getUserVisits) — nunca pra clearData/updateBlockedIps/
+        // updateRules/issueReadToken, que exigem o local_token permanente.
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
-            'getUsers', 'getUserVisits', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits',
+            'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -87,8 +88,8 @@ class MonitorController extends Controller
             case 'getUsers':
                 return $this->getUsers($request);
 
-            case 'getUserVisits':
-                return $this->getUserVisits($request);
+            case 'getUserMonitors':
+                return $this->getUserMonitors($request);
 
             case 'getBlockResults':
                 return $this->getBlockResults($request);
@@ -1090,14 +1091,15 @@ class MonitorController extends Controller
      * `422` se ausente/inválido) e mesmo lookup indexado via
      * `monitor_visit_ips.ip` (nunca escaneia `Monitor` inteiro). Ordenado
      * por `updated_at` desc (atividade mais recente primeiro), `id` desc
-     * como desempate determinístico (mesmo padrão de `getUserVisits`).
+     * como desempate determinístico (mesmo padrão de `getUserMonitors`
+     * abaixo).
      *
      * `data` sai sanitizado (`DataSanitizer::sanitize`, tira `id-token`
      * legado) e a coluna `id_token` (a credencial de remember-me) nunca é
      * selecionada. `ips` (todos os IPs já vistos daquele Monitor, não só o
      * pesquisado) e `visits_count` são resolvidos com uma query agregada
      * cada por página (`whereIn` nos ids da página atual), nunca uma por
-     * linha — mesmo padrão de `hydrateUserVisitRows`.
+     * linha — ver `hydrateMonitorRows`, compartilhado com `getUserMonitors`.
      */
     protected function getIpMonitors(Request $request)
     {
@@ -1140,7 +1142,7 @@ class MonitorController extends Controller
             ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
 
         return [
-            'data' => $this->hydrateIpMonitorRows($paginator->items()),
+            'data' => $this->hydrateMonitorRows($paginator->items()),
             'meta' => [
                 'page' => $paginator->currentPage(),
                 'per_page' => $paginator->perPage(),
@@ -1151,14 +1153,16 @@ class MonitorController extends Controller
     }
 
     /**
-     * Suporte de `getIpMonitors`: dado o lote de `Monitor` já paginado,
-     * resolve `ips`/`visits_count` de cada um com uma query agregada por
-     * página (não uma por linha) — mesmo padrão de `hydrateUserVisitRows`.
+     * Suporte de `getIpMonitors` e `getUserMonitors` (renomeado de
+     * `hydrateIpMonitorRows` na laravel-monitor 237/v0.48.0 quando a
+     * segunda passou a reaproveitar este método): dado o lote de `Monitor`
+     * já paginado, resolve `ips`/`visits_count` de cada um com uma query
+     * agregada por página (não uma por linha).
      *
      * @param  array<int, Monitor>  $monitors
      * @return array<int, array<string, mixed>>
      */
-    protected function hydrateIpMonitorRows(array $monitors): array
+    protected function hydrateMonitorRows(array $monitors): array
     {
         if (empty($monitors)) {
             return [];
@@ -1196,16 +1200,83 @@ class MonitorController extends Controller
     }
 
     /**
+     * laravel-monitor 237 (v0.48.0): dado um `user_id`, lista PAGINADA dos
+     * `Monitor` (dispositivos/navegadores) já tagueados com esse usuário —
+     * mesma forma de resposta de `getIpMonitors` (via `hydrateMonitorRows`,
+     * compartilhado), mas filtrando por `Monitor::forUserId()` em vez do
+     * lookup por IP. Complementa `getUsers` (listagem agregada por
+     * usuário): daqui o dashboard navega usuário → Monitors → detalhe do
+     * Monitor → visitas (`getMonitorVisits`), no mesmo padrão que
+     * `getIpMonitors` já oferece a partir de um IP.
+     *
+     * Substitui `getUserVisits` (removida nesta mesma versão — breaking,
+     * ver CHANGELOG): aquela devolvia cada `Monitor` do usuário já com
+     * `data.page`/`data.ips` reconstruídos e as últimas 20 visitas
+     * anexadas; esta devolve o mesmo shape enxuto de `getIpMonitors`
+     * (`ips`, `visits_count`), deixando a jornada completa de cada
+     * `Monitor` para `getMonitorVisits` sob demanda — evita carregar
+     * potencialmente centenas de visitas por linha só pra listar os
+     * dispositivos de um usuário.
+     *
+     * `user_id` ausente/vazio → `422` (mesma mensagem que `getUserVisits`
+     * usava). Cast pra int antes de `Monitor::forUserId()`: ver comentário
+     * em `scopeForUserId()` (`Models/Monitor.php`) sobre por que o valor
+     * cru vindo da query string quebraria o filtro fora do MySQL.
+     */
+    protected function getUserMonitors(Request $request)
+    {
+        $rawUserId = $request->input('user_id');
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        if ($rawUserId === null || $rawUserId === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'user_id is required',
+            ], 422);
+        }
+
+        $userId = (int) $rawUserId;
+
+        $cacheKey = $this->listingsCacheKey('user-monitors', [$userId, $page, $perPage]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($userId, $page, $perPage) {
+            return $this->buildUserMonitorsResult($userId, $page, $perPage);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    protected function buildUserMonitorsResult(int $userId, int $page, int $perPage): array
+    {
+        $paginator = Monitor::forUserId($userId)
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
+
+        return [
+            'data' => $this->hydrateMonitorRows($paginator->items()),
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    /**
      * laravel-monitor 152 (v0.46.0): dado um `monitor_id`, lista PAGINADA
      * da jornada completa (`monitor_visits`) daquele dispositivo/navegador
-     * — ao contrário de `hydrateUserVisitRows`/`getUserVisits`, que só
-     * anexa as ÚLTIMAS 20 visitas por linha, esta action existe pra
+     * — ao contrário de `getIpMonitors`/`getUserMonitors`, que só expõem
+     * `visits_count` (um número) por linha, esta action existe pra
      * paginar o histórico completo de um Monitor específico sob demanda
      * (ex: expandir "ver todas as visitas" no dashboard).
      *
      * Validação: `monitor_id` ausente/vazio, não-inteiro, ou sem `Monitor`
      * correspondente — todos `422` com mensagem própria (mesmo espírito de
-     * `getUserVisits`, que também `422` quando `user_id` está ausente).
+     * `getUserMonitors`, que também `422` quando `user_id` está ausente).
      */
     protected function getMonitorVisits(Request $request)
     {
@@ -1425,117 +1496,6 @@ class MonitorController extends Controller
                 'last_page' => $paginator->lastPage(),
             ],
         ];
-    }
-
-    /**
-     * Detalhe de um `user_id`: as linhas `Monitor` (dispositivos/
-     * navegadores) já taggeadas com esse usuário, paginado — dados que já
-     * existem em `data` de cada linha (páginas, IPs, timestamps), nada
-     * novo capturado/rastreado por esta action.
-     */
-    protected function getUserVisits(Request $request)
-    {
-        $rawUserId = $request->input('user_id');
-        $page = max(1, (int) $request->input('page', 1));
-        $perPage = max(1, min(100, (int) $request->input('per_page', 25)));
-
-        if ($rawUserId === null || $rawUserId === '') {
-            return response()->json([
-                'success' => false,
-                'message' => 'user_id is required',
-            ], 422);
-        }
-
-        // Cast pra int: user_id sempre vem de Auth::id() (int) do lado de
-        // quem gravou, mas chega aqui como string (query param HTTP).
-        // Fora do MySQL, Monitor::scopeForUserId() NÃO faz esse cast
-        // internamente (json_extract do SQLite devolve o tipo nativo, e
-        // '3' string nunca bate com 3 inteiro lá) - repassar a string crua
-        // faria getUserVisits sempre devolver 0 linhas em qualquer host
-        // que não seja MySQL.
-        $userId = (int) $rawUserId;
-
-        $cacheKey = $this->listingsCacheKey('user-visits', [$userId, $page, $perPage]);
-        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
-
-        $result = Cache::remember($cacheKey, $ttl, function () use ($userId, $page, $perPage) {
-            $paginator = Monitor::forUserId($userId)
-                ->orderByDesc('updated_at')
-                ->orderByDesc('id')
-                ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
-
-            return [
-                'data' => $this->hydrateUserVisitRows($paginator->items()),
-                'meta' => [
-                    'page' => $paginator->currentPage(),
-                    'per_page' => $paginator->perPage(),
-                    'total' => $paginator->total(),
-                    'last_page' => $paginator->lastPage(),
-                ],
-            ];
-        });
-
-        return response()->json(['success' => true] + $result);
-    }
-
-    /**
-     * Desde 0.42.0 `data.page`/`data.ips` não existem mais no blob — vivem
-     * em `monitor_page_hits`/`monitor_visit_ips`. Pra não quebrar quem lê o
-     * shape antigo de `getUserVisits` (o dashboard de cantagalo.it usa
-     * `row.data.page`/`row.data.ips`), reconstrói os dois campos a partir
-     * das tabelas filhas (2 queries `whereIn` por página, não uma por
-     * linha) e anexa `visits`: as últimas visitas do monitor, com a
-     * jornada (`paths`, em ordem de acesso) — o motivo de `monitor_visits`
-     * existir. Uma query por monitor da página (no máximo `per_page`, e o
-     * resultado inteiro é cacheado por `listings_cache_ttl_minutes`).
-     *
-     * @param  array<int, Monitor>  $monitors
-     * @return array<int, array<string, mixed>>
-     */
-    protected function hydrateUserVisitRows(array $monitors): array
-    {
-        if (empty($monitors)) {
-            return [];
-        }
-
-        $ids = array_map(fn (Monitor $monitor) => $monitor->id, $monitors);
-
-        $pages = [];
-        DB::table('monitor_page_hits')
-            ->whereIn('monitor_id', $ids)
-            ->orderBy('id')
-            ->get(['monitor_id', 'path', 'hits'])
-            ->each(function ($row) use (&$pages) {
-                $pages[$row->monitor_id][$row->path] = (int) $row->hits;
-            });
-
-        $ips = [];
-        DB::table('monitor_visit_ips')
-            ->whereIn('monitor_id', $ids)
-            ->orderBy('id')
-            ->get(['monitor_id', 'ip'])
-            ->each(function ($row) use (&$ips) {
-                $ips[$row->monitor_id][] = $row->ip;
-            });
-
-        return array_map(function (Monitor $monitor) use ($pages, $ips) {
-            $row = $monitor->toArray();
-            // laravel-monitor 152 (v0.46.0): sanitiza antes de somar
-            // page/ips — tira `id-token` legado do blob de linhas antigas
-            // (ver DataSanitizer). A coluna `id_token` em si nunca aparece
-            // aqui: o select de getUserVisits só pede id/data/created_at/
-            // updated_at.
-            $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
-            $row['data']['page'] = $pages[$monitor->id] ?? [];
-            $row['data']['ips'] = $ips[$monitor->id] ?? [];
-            $row['visits'] = $monitor->visits()
-                ->orderByDesc('id')
-                ->limit(20)
-                ->get(['id', 'ip', 'paths', 'scraper', 'created_at', 'updated_at'])
-                ->toArray();
-
-            return $row;
-        }, $monitors);
     }
 
     /**

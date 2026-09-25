@@ -5,8 +5,8 @@ namespace Drcantagalo\LaravelMonitor\Support;
 /**
  * laravel-monitor 152 (v0.46.0): ponto único de sanitização do blob `data`
  * de um `Monitor` antes de expô-lo em qualquer response de leitura
- * (`getUserVisits`/`hydrateUserVisitRows`, `getIpMonitors`) — extraído pra
- * não duplicar a mesma regra nos dois lugares.
+ * (`getIpMonitors`/`getUserMonitors`, via `hydrateMonitorRows`) — extraído
+ * pra não duplicar a mesma regra em cada lugar.
  *
  * Hoje só tira `id-token`: até a laravel-monitor 141 (v0.42.0) o token de
  * remember-me vivia em `data['id-token']` (ver migration
@@ -22,7 +22,7 @@ namespace Drcantagalo\LaravelMonitor\Support;
  * nenhuma — isso não é responsabilidade desta classe (que só sanitiza o
  * blob `data`), e sim de cada `select()`/`toArray()` que monta a response
  * nunca incluir essa coluna no primeiro lugar (ver `getIpMonitors`/
- * `getUserVisits`, que selecionam só `id`, `data`, `created_at`,
+ * `getUserMonitors`, que selecionam só `id`, `data`, `created_at`,
  * `updated_at`).
  */
 class DataSanitizer

@@ -182,7 +182,7 @@ If your integration was reading the raw `data` array from `getData`,
 there is no drop-in replacement — it was removed entirely rather than
 turned into a paginated sample, since no known consumer needed row-level
 detail from this specific action (row-level detail is what `getPages`/
-`getVisitorsByIp`/`getUserVisits` are for). See CHANGELOG `[0.10.0]` for
+`getVisitorsByIp`/`getUserMonitors` are for). See CHANGELOG `[0.10.0]` for
 the full rationale.
 
 ## Remember-me (returning visitor recognition)
@@ -348,7 +348,7 @@ table.
   same type `$id` was passed in as (in practice always an int, from
   `Auth::id()`).
 
-## User listing (`getUsers`, `getUserVisits`)
+## User listing (`getUsers`, `getUserMonitors`)
 
 Same auth as `getData`/`getPages`/`getVisitorsByIp` (permanent
 `local_token` **or** the ephemeral read token from `issueReadToken`) —
@@ -376,18 +376,28 @@ what did each of them do".
     used to always give `1` for a user who only ever visits from the
     same browser. (`0.12.0`–`0.41.0` summed `data.visits` from the JSON
     blob instead, which is no longer written.)
-- **`getUserVisits`**: given `user_id` (required, `422` if missing),
-  paginated listing of that user's `Monitor` rows (via
-  `Monitor::forUserId($id)`, newest first) — `id`, `data`,
-  `created_at`, `updated_at`, plus (since `0.42.0`) `visits`: that
-  device's last 20 rows of `monitor_visits` (`id`, `paths` in access
-  order, `scraper`, `created_at`, `updated_at`). Since `0.42.0`
-  `data.page` and `data.ips` are no longer stored in the blob, so this
-  action **rebuilds** them into each row's `data` from
-  `monitor_page_hits` (`{path: hits}`) and `monitor_visit_ips` (list of
-  IPs), keeping the response shape existing dashboards read
-  (`row.data.page`, `row.data.ips`). Same `page`/`per_page` params as
-  `getUsers`.
+- **`getUserMonitors`** (since `0.48.0`, replacing `getUserVisits` —
+  see "⚠️ Breaking" in CHANGELOG `[0.48.0]`): given a `user_id`
+  (`{"success": false, "message": "user_id is required"}`, `422`, if
+  missing/empty), a **paginated** listing of that user's `Monitor` rows
+  (devices/browsers), via `Monitor::forUserId($id)` — the exact same
+  response shape as `getIpMonitors` below (`id`, `created_at`,
+  `updated_at`, `data` sanitized, `ips`, `visits_count`), sharing its
+  `hydrateMonitorRows` helper. Params: `page` (default `1`), `per_page`
+  (default `20`, max `100`). Ordered by `updated_at` descending, `id`
+  descending as a deterministic tiebreaker — same pattern as
+  `getIpMonitors`. From here, the dashboard navigates user → Monitors →
+  a specific Monitor's full visit history (`getMonitorVisits`), the same
+  way `getIpMonitors` already lets it navigate from an IP.
+  - `user_id` is cast to `int` before calling `Monitor::forUserId()` —
+    see "Querying by user_id" above for why passing the raw query-string
+    value through would silently return zero rows on any non-MySQL host.
+  - Unlike the `getUserVisits` action it replaces, this does **not**
+    rebuild `data.page`/`data.ips` or attach each row's last 20 visits —
+    it returns the same lean shape as `getIpMonitors` (`ips`,
+    `visits_count`), leaving the full per-Monitor journey to
+    `getMonitorVisits` on demand. Avoids loading potentially hundreds of
+    visits per row just to list a user's devices.
 - **`name`/`email`**: the package never queries a host app's `users`
   table (arbitrary schema, out of scope for a host-agnostic package).
   Instead, `getUsers` opportunistically reads `data['name']`/
@@ -407,7 +417,7 @@ action, staleness here is bounded by the TTL alone, same as `getPages`.
 
 ### Sanitizing the `data` blob (since `0.46.0`)
 
-Every response that exposes a `Monitor`'s `data` blob (`getUserVisits`
+Every response that exposes a `Monitor`'s `data` blob (`getUserMonitors`
 above, `getIpMonitors` below) runs it through
 `Support\DataSanitizer::sanitize()` first — one shared helper, so the rule
 lives in exactly one place instead of being duplicated per action. Today
@@ -437,8 +447,9 @@ application's backend — only a short-lived, read-only token does.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
   `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
-  `getUserVisits`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`
-  — the last two since `0.46.0`)**.
+  `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`
+  — `getIpMonitors`/`getMonitorVisits` since `0.46.0`, `getUserMonitors`
+  since `0.48.0`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -1368,13 +1379,13 @@ ephemeral read token from `issueReadToken`).
     "meta": {"page": 1, "per_page": 20, "total": 1, "last_page": 1}
   }
   ```
-  - `data` (the blob) is **sanitized** the same way as `getUserVisits` —
+  - `data` (the blob) is **sanitized** the same way as `getUserMonitors` —
     see "Sanitizing the `data` blob" below.
   - `ips`: **every** IP that `Monitor` has ever been seen from (not just
     the one searched for), and `visits_count`: `COUNT(*)` of
     `monitor_visits` for that `Monitor` — both resolved with one grouped
-    `whereIn` query per page (not one query per row), same pattern as
-    `getUserVisits`/`hydrateUserVisitRows`.
+    `whereIn` query per page (not one query per row), same shared
+    `hydrateMonitorRows` helper `getUserMonitors` uses.
   - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
 - **`getMonitorVisits`** (since `0.46.0`): given a `monitor_id`
   (`{"success": false, "message": "monitor_id is required"}` /
@@ -1382,10 +1393,10 @@ ephemeral read token from `issueReadToken`).
   missing, non-integer, or not an existing `Monitor` id, respectively), a
   **paginated** listing of that device/browser's **full** visit history
   (`monitor_visits`), newest first (`id` descending). Unlike
-  `getUserVisits` (which only attaches each row's **last 20** visits),
-  this action lets you page through the complete journey history of one
-  specific `Monitor` on demand (e.g. an "see all visits" expansion in the
-  dashboard). Params: `page` (default `1`), `per_page` (default `20`,
+  `getIpMonitors`/`getUserMonitors` (which only expose `visits_count`, a
+  number, per row), this action lets you page through the complete
+  journey history of one specific `Monitor` on demand (e.g. an "see all
+  visits" expansion in the dashboard). Params: `page` (default `1`), `per_page` (default `20`,
   max `50`). Response:
   ```json
   {
@@ -1406,8 +1417,8 @@ ephemeral read token from `issueReadToken`).
   - `ip`: the IP that **opened** that specific visit — see "Visits"
     below (`monitor_visits.ip`, new in `0.46.0`); `null` for a visit
     recorded before this column existed (not backfilled).
-  - `paths`: the full journey, in access order, same field as
-    `getUserVisits`'s attached `visits`.
+  - `paths`: the full journey for that visit, in access order (same
+    shape as each entry of `monitor_visits` — see "Visits" below).
   - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
 - **`getBlockedIps`** / **`getBlockedPaths`**: plain paginated listing
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
