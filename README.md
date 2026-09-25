@@ -1197,6 +1197,82 @@ just block (via `updateBlockedIps`) if it is one.
 See "Paginated visitor/blocklist listing" below for the read/pagination
 action on top of this table (`getVisitorsByIp`).
 
+## IP classification (`monitor_ip_labels`)
+
+Since `0.49.0`: an optional bot/human classification + free-form tags +
+note per IP, stored in its own table (`monitor_ip_labels`, one row per
+`ip`, unique). **This is annotation only** — it never affects blocking,
+scraper detection, or path triage. An IP is an unstable identity (dynamic
+pools, CGNAT, recycled addresses — the same reasoning behind removing
+`monitor_ip_stats.safe` in `0.29.0`, see "Per-IP stats" above); a wrong
+label here can only mislabel, never wrongly allow or block anyone.
+
+Every IP starts **undefined** by the *absence* of a row, not a row with
+null fields — a row with no `kind`, no `tags`, and no `note` is deleted
+rather than kept around empty (every write action below does this
+automatically).
+
+- **`kind`**: `bot`, `human`, or `null` (undefined). Set via `setIpKind`.
+- **`tags`**: a short list of free-form strings, normalized on every
+  write (trimmed, lowercased, deduplicated, capped at 20 tags of 40
+  characters each — longer/duplicate entries are silently dropped, not
+  rejected). Set via `setIpLabels` (full replace, one IP) or `setIpTags`
+  (add/remove one tag, one or many IPs).
+- **`note`**: an optional free-text note. Set via `setIpLabels`.
+- **`source`**: `manual` (default) or `ai` (since `0.49.0`, written by
+  the AI IP-triage flow — see home-page task 241). Refers to **`kind`**
+  specifically, not to tags/note. **Guaranteed by the package itself,
+  not just the consumer**: a `source=ai` write never overwrites a `kind`
+  already set with `source=manual` (that IP is silently skipped and
+  reported back, not an error), and `source=ai` tag writes are always a
+  merge (add-only) — they can never remove an existing tag. A manual
+  write always wins and always records `source=manual`.
+- **`classified_at`**: when `kind` was last (re)written by `setIpKind`.
+  Not touched by `setIpLabels`/`setIpTags` (those don't touch `kind`
+  either).
+
+**Never touched by `pruneData`, the automatic prune (`DataPruner`), or
+`clearData`**: those purge `monitor_ip_stats`/`Monitor`/`monitor_visits`
+by age or truncate everything, but a human's (or the AI's) classification
+of an IP must survive that — it isn't tracking data, it's a decision
+someone made about that IP, and it should stay put until someone
+explicitly changes it.
+
+### Write actions (`local_token` only, same auth as `updateBlockedIps`)
+
+- **`setIpKind`**: `ips` (array) or `ip` (single string, same param
+  either way), `kind` (`bot`/`human`/`null`, `422` if anything else),
+  `source` (`manual` default | `ai`). Invalid/non-IP entries in `ips` are
+  silently dropped (same best-effort pattern as `flagScraperPaths`);
+  `422` only if none of the given IPs are valid. Response: `{"success":
+  true, "applied": ["1.2.3.4"], "ignored": [{"ip": "5.6.7.8", "reason":
+  "manual classification protected"}]}`.
+- **`setIpLabels`**: `ip` (single, `422` if missing/invalid), `tags`
+  (array, replaces the full set — normalized as described above), `note`
+  (string or omitted/null to clear). Always `source=manual`; doesn't
+  touch `kind`/`classified_at`. This is the detail-view "edit
+  classification" form's save action.
+- **`setIpTags`**: `ips`/`ip` (same as `setIpKind`), `tag` (single
+  string, normalized; `422` if empty after normalization), `op` (`add`
+  default | `remove`), `source` (`manual` default | `ai`). `op=remove`
+  with `source=ai` is rejected with `422` (`"source=ai cannot remove
+  tags"`) — the AI triage flow only ever adds. This is the bulk-action
+  case ("add tag to selected IPs" in the dashboard) as well as what the
+  AI triage job calls per classified bot.
+
+### Read action
+
+- **`getIpTags`**: every tag currently in use across `monitor_ip_labels`
+  + how many IPs carry it, sorted by count descending — feeds the tag
+  autocomplete in the dashboard. No pagination (the tag vocabulary is
+  small by nature, unlike the IP count). Same auth as `getData`
+  (permanent `local_token` **or** the ephemeral read token). Response:
+  `{"success": true, "data": [{"tag": "amazon", "count": 12}, ...]}`.
+
+See "Paginated visitor/blocklist listing" below for how classification
+surfaces in `getVisitorsByIp`, and "User listing" above for how it
+surfaces in `getIpMonitors`/`getUserMonitors`'s `ips` field.
+
 ## Paginated page listing (`getPages`)
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the
@@ -1281,17 +1357,24 @@ ephemeral read token from `issueReadToken`).
   `monitor_ip_stats` (one row per unique IP, maintained by
   `IpStat::recordVisit()` on every tracked request — see "Per-IP stats"
   above). Params: `page` (default `1`), `per_page` (default `20`, max
-  `100`), `filter` (`all` default, `flagged`, `clean`, `blocked` — an
-  IP counts as `blocked` if it has an active row in
+  `100`), `filter` (`all` default, `flagged`, `clean`, `blocked`, and
+  since `0.49.0` the sub-filters `clean_bots`, `clean_humans`,
+  `clean_unclassified`, `clean_ai_queue` — see "IP classification"
+  above; an IP counts as `blocked` if it has an active row in
   `monitor_blocked_ips` (`BlockedIp::active()`: permanent, or temporary
   and not yet expired); unknown value returns `422`), `date_from`/
   `date_to` (optional, filters by the
   row's `last_seen` — "this IP was active in this window", same
-  approximation as `getPages`). Response: `{"success": true, "data":
+  approximation as `getPages`), and since `0.49.0` `tag`/`kind`
+  (optional, combinable with any `filter` above — e.g. `filter=blocked`
+  `kind=bot` lists blocked bots). Response: `{"success": true, "data":
   [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
   "last_seen": "...", "flagged": false, "flagged_signals": null,
-  "blocked": false}, ...], "meta": {"page", "per_page",
-  "total", "last_page"}}`.
+  "blocked": false, "kind": null, "tags": [], "note": null, "source":
+  null, "classified_at": null}, ...], "meta": {"page", "per_page",
+  "total", "last_page"}}`. The `kind`/`tags`/`note`/`source`/
+  `classified_at` fields (since `0.49.0`) come from `monitor_ip_labels`
+  — see "IP classification" above.
   - Regardless of which `filter` is requested, results are always
     ordered with `flagged = true` rows first (the "possible scraper"
     work queue), falling back to the existing `visit_count desc`
@@ -1372,7 +1455,10 @@ ephemeral read token from `issueReadToken`).
         "created_at": "2026-09-10T12:00:00.000000Z",
         "updated_at": "2026-09-23T08:15:00.000000Z",
         "data": {"ua": "Mozilla/5.0 ...", "flags": {"scraper": false, "scraper_signals": []}},
-        "ips": ["203.0.113.9", "203.0.113.14"],
+        "ips": [
+          {"ip": "203.0.113.9", "kind": "bot", "tags": ["amazon"], "note": null, "source": "ai", "classified_at": "2026-09-24T10:00:00.000000Z"},
+          {"ip": "203.0.113.14", "kind": null, "tags": [], "note": null, "source": null, "classified_at": null}
+        ],
         "visits_count": 7
       }
     ],
@@ -1386,6 +1472,12 @@ ephemeral read token from `issueReadToken`).
     `monitor_visits` for that `Monitor` — both resolved with one grouped
     `whereIn` query per page (not one query per row), same shared
     `hydrateMonitorRows` helper `getUserMonitors` uses.
+    **Breaking since `0.49.0`**: each `ips` entry used to be a plain IP
+    string; it's now an object carrying that IP's classification from
+    `monitor_ip_labels` (`kind`/`tags`/`note`/`source`/`classified_at`,
+    same fields as `getVisitorsByIp` — see "IP classification" above),
+    so the dashboard can show a Monitor's IPs' classification without an
+    extra call per IP.
   - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
 - **`getMonitorVisits`** (since `0.46.0`): given a `monitor_id`
   (`{"success": false, "message": "monitor_id is required"}` /

@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.49.0] - 2026-09-25
+### Added
+- **IP classification (bot/human) + custom tags** — annotation only, no
+  effect on blocking/scraper detection/path triage (see README "IP
+  classification"). New table `monitor_ip_labels` (`ip` unique, `kind`
+  nullable `bot`/`human`, `tags` json, `note` text, `source`
+  `manual`/`ai`, `classified_at`). A row only exists when there's
+  something to store — no `kind`, no `tags`, no `note` means the row is
+  deleted, not kept empty.
+- **New write actions** (`local_token` only, same as `updateBlockedIps`):
+  - `setIpKind` (`ips`/`ip`, `kind` = `bot`/`human`/`null`, `source`
+    default `manual`): classifies one or several IPs at once.
+    `source=ai` never overwrites a `kind` already set with
+    `source=manual` — that IP is skipped and reported under `ignored`,
+    not an error for the whole call.
+  - `setIpLabels` (`ip`, `tags`, `note`): full replace of one IP's tags
+    + note (the detail-view editor). Always `source=manual` — doesn't
+    touch `kind`/`classified_at`.
+  - `setIpTags` (`ips`/`ip`, `tag`, `op` = `add`/`remove`, `source`
+    default `manual`): adds or removes a single tag across one or
+    several IPs at once (the bulk-action case). `source=ai` can only
+    `op=add` (merge, never removes an existing tag) — `op=remove` with
+    `source=ai` is rejected with `422`.
+- **New read action `getIpTags`**: every tag currently in use + how many
+  IPs carry it, for the dashboard's tag autocomplete. Read-token
+  eligible.
+- **`getVisitorsByIp`**: each row (and each `BlockedIp` row under
+  `filter=blocked`) now also carries `kind`, `tags`, `note`, `source`,
+  `classified_at` from `monitor_ip_labels` (`null`/`[]` when the IP has
+  no row — still undefined). Four new `filter` values: `clean_bots`,
+  `clean_humans`, `clean_unclassified` (the manual work queue), and
+  `clean_ai_queue` (the AI-triage queue used by home-page 241 — clean
+  IPs with no `kind`, or `source=ai`-classified IPs with activity newer
+  than their `classified_at`; `source=manual` never enters this queue).
+  New optional params `tag` and `kind`, combinable with any `filter`
+  (e.g. list blocked bots).
+
+### ⚠️ Breaking
+- **`ips` in `getIpMonitors`/`getUserMonitors` changed shape**: each
+  entry used to be a plain IP string; it's now an object
+  `{ip, kind, tags, note, source, classified_at}` (same fields
+  `getVisitorsByIp` gained above), so the dashboard can show a Monitor's
+  classification without an extra call per IP. The package has no
+  divulged stable version yet and only the maintainer's own dashboard
+  consumes it, so breaking the shape now (rather than a parallel field)
+  was judged acceptable.
+
+### Notes
+- `pruneData`/the automatic prune/`clearData` **never** touch
+  `monitor_ip_labels` — `DataPruner` purges `monitor_ip_stats` by
+  `last_seen`, and a user's annotation on an IP must not disappear just
+  because that IP went quiet or got truncated. See README "IP
+  classification".
+
 ## [0.48.0] - 2026-09-25
 ### Added
 - **New `getUserMonitors` action** (`user_id`, `page`, `per_page`): given a

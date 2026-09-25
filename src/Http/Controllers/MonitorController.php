@@ -7,6 +7,7 @@ use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorIpLabel;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
@@ -47,14 +48,16 @@ class MonitorController extends Controller
         // Token de leitura efêmero (issueReadToken) só é aceito pras
         // actions só-leitura (getData, getPages, getVisitorsByIp,
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
-        // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits
-        // — getIpMonitors/getMonitorVisits desde a laravel-monitor 152/
-        // v0.46.0, getUserMonitors desde a 237/v0.48.0, substituindo
-        // getUserVisits) — nunca pra clearData/updateBlockedIps/
-        // updateRules/issueReadToken, que exigem o local_token permanente.
+        // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits,
+        // getIpTags — getIpMonitors/getMonitorVisits desde a laravel-monitor
+        // 152/v0.46.0, getUserMonitors desde a 237/v0.48.0 (substituindo
+        // getUserVisits), getIpTags desde a 239/v0.49.0 — nunca pra
+        // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
+        // setIpLabels/setIpTags, que exigem o local_token permanente (são
+        // escrita).
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
-            'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits',
+            'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -99,6 +102,18 @@ class MonitorController extends Controller
 
             case 'getMonitorVisits':
                 return $this->getMonitorVisits($request);
+
+            case 'getIpTags':
+                return $this->getIpTags($request);
+
+            case 'setIpKind':
+                return $this->setIpKind($request);
+
+            case 'setIpLabels':
+                return $this->setIpLabels($request);
+
+            case 'setIpTags':
+                return $this->setIpTags($request);
 
             case 'clearData':
                 return $this->clearData($request);
@@ -815,7 +830,13 @@ class MonitorController extends Controller
     /**
      * Enum de valores aceitos pelo parâmetro `filter` de getVisitorsByIp.
      */
-    protected const VISITORS_FILTERS = ['all', 'flagged', 'clean', 'blocked'];
+    protected const VISITORS_FILTERS = [
+        'all', 'flagged', 'clean', 'blocked',
+        // laravel-monitor 239 (v0.49.0): sub-filtros de 'clean' pela
+        // classificação bot/human/tags de monitor_ip_labels — ver
+        // README "IP classification".
+        'clean_bots', 'clean_humans', 'clean_unclassified', 'clean_ai_queue',
+    ];
 
     /**
      * Lista paginada/filtrável de visitantes por IP, a partir de
@@ -833,6 +854,12 @@ class MonitorController extends Controller
         $filter = (string) $request->input('filter', 'all');
         $dateFrom = $request->input('date_from');
         $dateTo = $request->input('date_to');
+        // laravel-monitor 239 (v0.49.0): filtros extras, combináveis com
+        // qualquer $filter acima (não só os clean_* que já implicam kind).
+        $tag = $request->input('tag');
+        $tag = is_string($tag) && $tag !== '' ? mb_strtolower(trim($tag)) : null;
+        $kind = $request->input('kind');
+        $kind = in_array($kind, MonitorIpLabel::KINDS, true) ? $kind : null;
 
         if (! in_array($filter, self::VISITORS_FILTERS, true)) {
             return response()->json([
@@ -842,12 +869,12 @@ class MonitorController extends Controller
         }
 
         $cacheKey = $this->listingsCacheKey('visitors', [
-            $page, $perPage, $filter, $dateFrom, $dateTo,
+            $page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind,
         ]);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
-        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo) {
-            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo);
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind) {
+            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind);
         });
 
         return response()->json(['success' => true] + $result);
@@ -876,10 +903,10 @@ class MonitorController extends Controller
      * Desde a task 142: `filter=blocked` não parte mais de `IpStat`, ver
      * `buildBlockedVisitorsResult()`.
      */
-    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
+    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null): array
     {
         if ($filter === 'blocked') {
-            return $this->buildBlockedVisitorsResult($page, $perPage, $dateFrom, $dateTo);
+            return $this->buildBlockedVisitorsResult($page, $perPage, $dateFrom, $dateTo, $tag, $kind);
         }
 
         $query = IpStat::query();
@@ -907,8 +934,34 @@ class MonitorController extends Controller
             // "possível" (task 91).
             'flagged' => $query->where('flagged', true)->whereNotIn('ip', $blockedIps),
             'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
+            // laravel-monitor 239 (v0.49.0) — sub-filtros de 'clean' pela
+            // classificação em monitor_ip_labels. clean_unclassified é a
+            // fila de trabalho manual; clean_ai_queue é a fila da triagem
+            // IA (home-page 241): clean sem kind OU classificado pela IA
+            // mas com atividade nova desde então (last_seen > classified_at)
+            // — reavalia só quem voltou a aparecer, sem reprocessar
+            // (e cobrar) sempre os mesmos IPs. source=manual nunca entra
+            // em clean_ai_queue.
+            'clean_bots' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
+                ->whereIn('ip', MonitorIpLabel::where('kind', 'bot')->pluck('ip')),
+            'clean_humans' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
+                ->whereIn('ip', MonitorIpLabel::where('kind', 'human')->pluck('ip')),
+            'clean_unclassified' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
+                ->whereNotIn('ip', MonitorIpLabel::whereNotNull('kind')->pluck('ip')),
+            'clean_ai_queue' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
+                ->whereNotIn('ip', MonitorIpLabel::whereNotNull('kind')->where(function ($q) {
+                    $q->where('source', '!=', 'ai')->orWhereColumn('classified_at', '>=', DB::raw('(select last_seen from monitor_ip_stats where monitor_ip_stats.ip = monitor_ip_labels.ip)'));
+                })->pluck('ip')),
             default => null,
         };
+
+        if ($kind !== null && ! in_array($filter, ['clean_bots', 'clean_humans'], true)) {
+            $query->whereIn('ip', MonitorIpLabel::where('kind', $kind)->pluck('ip'));
+        }
+
+        if ($tag !== null) {
+            $query->whereIn('ip', MonitorIpLabel::query()->whereJsonContains('tags', $tag)->pluck('ip'));
+        }
 
         $paginator = $query
             // flagged=true primeiro (fila de revisão real), resto depois
@@ -920,7 +973,9 @@ class MonitorController extends Controller
             ->orderByDesc('visit_count')
             ->paginate($perPage, ['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'], 'page', $page);
 
-        $items = collect($paginator->items())->map(function (IpStat $stat) use ($blockedIps) {
+        $labels = $this->labelsForIps(collect($paginator->items())->pluck('ip'));
+
+        $items = collect($paginator->items())->map(function (IpStat $stat) use ($blockedIps, $labels) {
             return [
                 'ip' => $stat->ip,
                 'visit_count' => $stat->visit_count,
@@ -929,7 +984,7 @@ class MonitorController extends Controller
                 'flagged' => $stat->flagged,
                 'flagged_signals' => $stat->flagged_signals,
                 'blocked' => $blockedIps->contains($stat->ip),
-            ];
+            ] + $this->labelFields($labels->get($stat->ip));
         })->values();
 
         return [
@@ -975,7 +1030,7 @@ class MonitorController extends Controller
      * `lifetime_offense_count` pra escada de escalonamento do
      * `ScraperBlocker`), só deixa de aparecer nesta listagem.
      */
-    protected function buildBlockedVisitorsResult(int $page, int $perPage, ?string $dateFrom, ?string $dateTo): array
+    protected function buildBlockedVisitorsResult(int $page, int $perPage, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null): array
     {
         $query = BlockedIp::active();
 
@@ -985,6 +1040,18 @@ class MonitorController extends Controller
 
         if ($dateTo) {
             $query->where('last_offense_at', '<=', $dateTo);
+        }
+
+        // laravel-monitor 239 (v0.49.0): kind/tag combináveis com esta aba
+        // também (ex: listar bots bloqueados) — mesmo padrão whereIn contra
+        // monitor_ip_labels usado em buildVisitorsResult, já que esta
+        // listagem parte de BlockedIp, não de IpStat.
+        if ($kind !== null) {
+            $query->whereIn('ip', MonitorIpLabel::where('kind', $kind)->pluck('ip'));
+        }
+
+        if ($tag !== null) {
+            $query->whereIn('ip', MonitorIpLabel::query()->whereJsonContains('tags', $tag)->pluck('ip'));
         }
 
         $paginator = $query
@@ -997,7 +1064,9 @@ class MonitorController extends Controller
             ? collect()
             : IpStat::whereIn('ip', $ips)->get(['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'])->keyBy('ip');
 
-        $items = collect($paginator->items())->map(function (BlockedIp $blocked) use ($ipStats) {
+        $labels = $this->labelsForIps($ips);
+
+        $items = collect($paginator->items())->map(function (BlockedIp $blocked) use ($ipStats, $labels) {
             $stat = $ipStats->get($blocked->ip);
 
             return [
@@ -1013,7 +1082,7 @@ class MonitorController extends Controller
                 'lifetime_offense_count' => $blocked->lifetime_offense_count,
                 'last_offense_at' => optional($blocked->last_offense_at)->toIso8601String(),
                 'source' => $blocked->source,
-            ];
+            ] + $this->labelFields($labels->get($blocked->ip));
         })->values();
 
         return [
@@ -1024,6 +1093,44 @@ class MonitorController extends Controller
                 'total' => $paginator->total(),
                 'last_page' => $paginator->lastPage(),
             ],
+        ];
+    }
+
+    /**
+     * Busca em lote as linhas de `monitor_ip_labels` pra uma coleção de
+     * IPs (usado por `buildVisitorsResult`/`buildBlockedVisitorsResult`) —
+     * uma query por página, nunca uma por linha, mesmo padrão de
+     * `hydrateMonitorRows`.
+     *
+     * @param  \Illuminate\Support\Collection<int, string>  $ips
+     * @return \Illuminate\Support\Collection<string, MonitorIpLabel>
+     */
+    protected function labelsForIps($ips)
+    {
+        $ips = collect($ips)->filter()->unique()->values();
+
+        if ($ips->isEmpty()) {
+            return collect();
+        }
+
+        return MonitorIpLabel::whereIn('ip', $ips)->get()->keyBy('ip');
+    }
+
+    /**
+     * Shape flat (`kind`/`tags`/`note`/`source`/`classified_at`) somado às
+     * outras listagens por IP — `null`/`[]` (nunca omitido) quando o IP não
+     * tem linha em `monitor_ip_labels` (indefinido).
+     *
+     * @return array<string, mixed>
+     */
+    protected function labelFields(?MonitorIpLabel $label): array
+    {
+        return [
+            'kind' => $label?->kind,
+            'tags' => $label?->tags ?? [],
+            'note' => $label?->note,
+            'source' => $label?->source,
+            'classified_at' => optional($label?->classified_at)->toIso8601String(),
         ];
     }
 
@@ -1179,6 +1286,15 @@ class MonitorController extends Controller
                 $ipsByMonitor[$row->monitor_id][] = $row->ip;
             });
 
+        // laravel-monitor 239 (v0.49.0) — breaking: cada entrada de `ips`
+        // passa de string crua pra objeto {ip, kind, tags, note, source,
+        // classified_at} (mesmo shape flat de labelFields() + o próprio
+        // ip), pra expor a classificação de cada IP direto na linha de
+        // Monitor sem uma chamada extra por IP. Uma query só por página
+        // (whereIn), não uma por Monitor/IP.
+        $allIps = collect($ipsByMonitor)->flatten();
+        $labels = $this->labelsForIps($allIps);
+
         $visitsCounts = [];
         DB::table('monitor_visits')
             ->whereIn('monitor_id', $ids)
@@ -1189,10 +1305,13 @@ class MonitorController extends Controller
                 $visitsCounts[$row->monitor_id] = (int) $row->visits_count;
             });
 
-        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts) {
+        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts, $labels) {
             $row = $monitor->toArray();
             $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
-            $row['ips'] = $ipsByMonitor[$monitor->id] ?? [];
+            $row['ips'] = array_map(
+                fn (string $ip) => ['ip' => $ip] + $this->labelFields($labels->get($ip)),
+                $ipsByMonitor[$monitor->id] ?? []
+            );
             $row['visits_count'] = $visitsCounts[$monitor->id] ?? 0;
 
             return $row;
@@ -1327,6 +1446,264 @@ class MonitorController extends Controller
         });
 
         return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * laravel-monitor 239 (v0.49.0): tags existentes em `monitor_ip_labels`
+     * + contagem de IPs por tag, pro autocomplete do dashboard (sem passar
+     * a lista inteira em todo `getVisitorsByIp`). Sem paginação — dataset
+     * pequeno por natureza (vocabulário de tags, não IPs).
+     */
+    protected function getIpTags(Request $request)
+    {
+        $tags = [];
+
+        MonitorIpLabel::whereNotNull('tags')->pluck('tags')->each(function ($rowTags) use (&$tags) {
+            foreach ((array) $rowTags as $tag) {
+                $tags[$tag] = ($tags[$tag] ?? 0) + 1;
+            }
+        });
+
+        arsort($tags);
+
+        return response()->json([
+            'success' => true,
+            'data' => collect($tags)->map(fn ($count, $tag) => ['tag' => $tag, 'count' => $count])->values(),
+        ]);
+    }
+
+    /**
+     * laravel-monitor 239 (v0.49.0): classifica um ou vários IPs como
+     * `bot`/`human`, ou volta a indefinido (`kind: null`) — anotação pura,
+     * ver README "IP classification". `ips` aceita um array ou (conveniência)
+     * uma única string. `source` (`manual` default | `ai`, usado pela
+     * triagem IA da home-page 241) só marca a origem da escrita — não muda
+     * o que é gravado além disso.
+     *
+     * **Regra atômica**: uma escrita com `source=ai` nunca sobrescreve um
+     * `kind` já classificado com `source=manual` — aquele IP simplesmente é
+     * ignorado (relatado em `ignored`, não é erro da chamada). Escrita
+     * manual sempre vence e regrava `source=manual`, mesmo por cima de uma
+     * classificação `ai` anterior. `lockForUpdate()` dentro de uma
+     * transaction por IP fecha a janela entre o SELECT e o UPDATE/INSERT —
+     * sem isso, duas escritas concorrentes (um humano e a triagem IA no
+     * mesmo IP) poderiam ambas ler o estado anterior e a proteção "manual
+     * nunca perde pra ai" viraria uma corrida.
+     */
+    protected function setIpKind(Request $request)
+    {
+        $ips = $this->normalizeIpsInput($request->input('ips', $request->input('ip')));
+        $kind = $request->input('kind');
+        $source = $request->input('source', 'manual') === 'ai' ? 'ai' : 'manual';
+
+        if ($kind !== null && ! in_array($kind, MonitorIpLabel::KINDS, true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'kind must be "bot", "human", or null',
+            ], 422);
+        }
+
+        if (empty($ips)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $applied = [];
+        $ignored = [];
+
+        foreach ($ips as $ip) {
+            DB::transaction(function () use ($ip, $kind, $source, &$applied, &$ignored) {
+                $label = MonitorIpLabel::where('ip', $ip)->lockForUpdate()->first();
+
+                if ($source === 'ai' && $label && $label->kind !== null && $label->source === 'manual') {
+                    $ignored[] = ['ip' => $ip, 'reason' => 'manual classification protected'];
+
+                    return;
+                }
+
+                $label ??= new MonitorIpLabel(['ip' => $ip]);
+                $label->kind = $kind;
+                $label->source = $source;
+                $label->classified_at = now();
+
+                $this->saveOrPruneLabel($label);
+
+                $applied[] = $ip;
+            });
+        }
+
+        $this->invalidateListingsCache();
+
+        return response()->json([
+            'success' => true,
+            'applied' => $applied,
+            'ignored' => $ignored,
+        ]);
+    }
+
+    /**
+     * laravel-monitor 239 (v0.49.0): edição completa (replace, não merge)
+     * de tags + note de UM IP — a ação por trás do bloco de classificação
+     * editável no detalhe do IP (home-page 240). Sempre `source=manual`
+     * (não é chamada pela triagem IA — ver `setIpTags` abaixo pro merge de
+     * `source=ai`).
+     */
+    protected function setIpLabels(Request $request)
+    {
+        $ip = (string) $request->input('ip', '');
+
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $rawTags = $request->input('tags', []);
+
+        if (! is_array($rawTags)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'tags must be an array',
+            ], 422);
+        }
+
+        $note = $request->input('note');
+        $note = is_string($note) && $note !== '' ? $note : null;
+
+        // Não mexe em kind/classified_at: tags/note são uma dimensão
+        // independente da classificação bot/human (ver setIpKind) — só
+        // sobrescreve o que esta action realmente edita.
+        $label = MonitorIpLabel::firstOrNew(['ip' => $ip]);
+        $label->tags = MonitorIpLabel::normalizeTags($rawTags);
+        $label->note = $note;
+
+        $this->saveOrPruneLabel($label);
+        $this->invalidateListingsCache();
+
+        return response()->json([
+            'success' => true,
+            'ip' => $ip,
+            'tags' => $label->tags ?? [],
+            'note' => $label->note,
+        ]);
+    }
+
+    /**
+     * laravel-monitor 239 (v0.49.0): adiciona ou remove UMA tag em um ou
+     * vários IPs de uma vez (lote) — complementar a `setIpLabels` (replace
+     * completo de um IP só). Usada tanto pela ação em lote do dashboard
+     * ("add tag to selected") quanto pela triagem IA (home-page 241,
+     * sempre `op=add`).
+     *
+     * **Regra**: `source=ai` só pode `op=add` (merge — nunca remove uma tag
+     * existente). `op=remove` com `source=ai` é rejeitado (`422`) — a
+     * garantia vive no pacote, não só no consumidor.
+     */
+    protected function setIpTags(Request $request)
+    {
+        $ips = $this->normalizeIpsInput($request->input('ips', $request->input('ip')));
+        $rawTag = $request->input('tag');
+        $tag = is_string($rawTag) ? MonitorIpLabel::normalizeTags([$rawTag]) : [];
+        $op = $request->input('op', 'add') === 'remove' ? 'remove' : 'add';
+        $source = $request->input('source', 'manual') === 'ai' ? 'ai' : 'manual';
+
+        if (empty($ips)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        if (empty($tag)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid tag provided',
+            ], 422);
+        }
+
+        if ($op === 'remove' && $source === 'ai') {
+            return response()->json([
+                'success' => false,
+                'message' => 'source=ai cannot remove tags',
+            ], 422);
+        }
+
+        $tag = $tag[0];
+        $applied = [];
+
+        foreach ($ips as $ip) {
+            DB::transaction(function () use ($ip, $tag, $op, &$applied) {
+                $label = MonitorIpLabel::where('ip', $ip)->lockForUpdate()->first()
+                    ?? new MonitorIpLabel(['ip' => $ip, 'tags' => []]);
+
+                $tags = $label->tags ?? [];
+
+                $tags = $op === 'add'
+                    ? MonitorIpLabel::normalizeTags([...$tags, $tag])
+                    : array_values(array_filter($tags, fn ($t) => $t !== $tag));
+
+                $label->tags = $tags;
+
+                $this->saveOrPruneLabel($label);
+
+                $applied[] = $ip;
+            });
+        }
+
+        $this->invalidateListingsCache();
+
+        return response()->json([
+            'success' => true,
+            'applied' => $applied,
+            'tag' => $tag,
+            'op' => $op,
+        ]);
+    }
+
+    /**
+     * `ips`/`ip` aceitos indistintamente por `setIpKind`/`setIpTags`: uma
+     * única string ou um array de strings. Valida com `FILTER_VALIDATE_IP`
+     * (mesmo critério de `getVisitorPaths`/`getIpMonitors`) e descarta
+     * silenciosamente entradas inválidas — best-effort, mesmo padrão de
+     * `flagScraperPaths`.
+     *
+     * @return array<int, string>
+     */
+    protected function normalizeIpsInput($input): array
+    {
+        $ips = is_array($input) ? $input : [$input];
+
+        $valid = [];
+
+        foreach ($ips as $ip) {
+            if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP)) {
+                $valid[] = $ip;
+            }
+        }
+
+        return array_values(array_unique($valid));
+    }
+
+    /**
+     * Uma linha de `monitor_ip_labels` sem `kind`, sem `tags` e sem `note`
+     * não deve existir (todo IP começa indefinido por AUSÊNCIA de linha) —
+     * usado por todo write path (`setIpKind`/`setIpLabels`/`setIpTags`)
+     * pra nunca deixar uma linha vazia pra trás.
+     */
+    protected function saveOrPruneLabel(MonitorIpLabel $label): void
+    {
+        if ($label->isEmpty()) {
+            if ($label->exists) {
+                $label->delete();
+            }
+
+            return;
+        }
+
+        $label->save();
     }
 
     /**
