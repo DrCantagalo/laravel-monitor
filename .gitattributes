@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Arquivos de desenvolvimento fora do pacote distribuído (dist do Composer
+# vem do `git archive` da tag): a suíte Testbench vive no repo, mas não
+# chega no vendor/ de quem instala.
+/tests            export-ignore
+/phpunit.xml      export-ignore
+/.gitattributes   export-ignore
