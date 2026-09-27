@@ -447,9 +447,11 @@ application's backend — only a short-lived, read-only token does.
 - The token returned by `issueReadToken` is accepted as a bearer **only
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
   `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
-  `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`
+  `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`,
+  `getIpTags`, `getTableStats`, `getAccessLog`
   — `getIpMonitors`/`getMonitorVisits` since `0.46.0`, `getUserMonitors`
-  since `0.48.0`)**.
+  since `0.48.0`, `getIpTags` since `0.49.0`, `getTableStats` since
+  `0.50.0`, `getAccessLog` since `0.51.0`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -1575,6 +1577,94 @@ Cached the same way as `getVisitorsByIp`/`getBlockedIps` (`Cache::remember`
 `config('monitor.listings_cache_ttl_minutes')`, default 5 minutes) —
 `clearData` and `pruneData` (see below) both invalidate it, so the numbers
 never stay stale longer than one cleanup call.
+
+## Access log (`monitor_access_logs`, since `0.51.0`)
+
+Transparency guarantee: **every read of your data leaves a line in a log
+that lives only on your own server**, which only you can edit or delete.
+Motivation: a client site's admins might otherwise worry that the people
+running the hosted dashboard (`monitor.cantagalo.it`) can read their data
+without any trace. Password/MFA protection on the dashboard side was
+considered and deliberately **not** built yet — this log is the
+transparency measure that ships instead. It's purely additive: nothing
+about how `getData`/`getPages`/etc. behave changes.
+
+A new append-only table, `monitor_access_logs`, gets one row per:
+
+- **`issueReadToken` call** (`kind: "read_token_issued"`) — this happens
+  every time the hosted dashboard is opened for this site. Note: the
+  caller here is always **our** server (cantagalo.it) minting a token on
+  the end user's behalf, so `ip`/`user_agent` on this row are ours, not
+  the dashboard user's — they don't identify who actually opened the
+  dashboard.
+- **the first valid use of each read token** (`kind:
+  "read_token_first_use"`) — the first request that actually uses the
+  token returned by `issueReadToken`. This one *is* evidence from the
+  browser side (`ip`/`user_agent`/`origin` never pass through our
+  server), and is the row that answers "who really opened this". Exactly
+  one row per token: later requests with the same token don't add more.
+  `token_ref` (a short hash of the token, never the token itself) links
+  this row back to its `read_token_issued` row.
+- **every read action called with the permanent `local_token`** (`kind:
+  "local_token_read"`) — the proxy/fallback path and the AI triage job
+  both read this way. Without this row, someone who wanted to read
+  quietly could just use the permanent token and leave the log empty.
+
+`declared_by` (optional, on `issueReadToken` and on local_token reads):
+a short string the dashboard's server *says* identifies who asked for
+this access — the logged-in dashboard user's email, or e.g. `"AI triage
+run #42"`. It's stored and shown as-is, labeled **"declared by
+dashboard"** wherever it's displayed — unlike the browser's IP on the
+first-use row, this is **not independently verified**, just what the
+dashboard chose to send.
+
+A failure to write this log never breaks the request it's logging (same
+fail-open pattern as the rest of the package for a not-yet-migrated
+table).
+
+**Remote access is read-only.** A new action, `getAccessLog` (paginated,
+most recent first, same auth as `getData` — permanent `local_token` **or**
+an ephemeral read token), lets the dashboard show these rows. Calling it
+never adds a row of its own — otherwise every time someone opened the log
+it would grow by one. No remote action can edit or delete rows here:
+`clearData` and `pruneData` (and the `Support\DataPruner::prune()` they
+both call) never touch `monitor_access_logs`.
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": 42, "accessed_at": "2026-09-27T14:02:11.000000Z",
+      "kind": "read_token_first_use", "action": "getData",
+      "ip": "203.0.113.7", "user_agent": "Mozilla/5.0 ...",
+      "origin": "https://monitor.cantagalo.it", "token_ref": "a1b2c3d4e5f60718",
+      "declared_by": null
+    }
+  ],
+  "meta": {"page": 1, "per_page": 20, "total": 137, "last_page": 7}
+}
+```
+
+**Retention**: `config('monitor.access_log_retention_days')` (default
+`90`, `0` = never delete) is applied automatically, on the client's own
+server, with no cron required — it's part of the same automatic trigger
+that already prunes tracking data (`Support\DataPruner::maybeCleanup()`,
+gated by `data_prune_interval_hours`), through a dedicated method
+(`DataPruner::pruneAccessLogs()`) that neither `monitor:prune` nor the
+`pruneData` HTTP action can reach. This value only ever comes from the
+local config — there's no remote action that can change it.
+
+**`monitor:access-log`** (local, artisan-only command — the actual
+source of truth, since the hosted dashboard is, in principle, capable of
+filtering what it shows):
+
+```
+php artisan monitor:access-log                  # last 50 entries
+php artisan monitor:access-log --days=7         # only the last 7 days
+php artisan monitor:access-log --limit=200
+php artisan monitor:access-log --purge          # asks for confirmation, then deletes everything
+```
 
 ## Partial cleanup (`pruneData`)
 

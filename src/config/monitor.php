@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.50.0',
+    'version' => '0.51.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -254,5 +254,16 @@ return [
     // rastreada (Monitor::newVisit/IpStat::recordVisit), fora do esquema
     // versionado de getPages/getVisitorsByIp.
     'data_totals_cache_ttl_seconds' => 45,
+
+    // Retenção, em dias, de `monitor_access_logs` (transparência de
+    // leitura, laravel-monitor 249 — ver README "Access log") — apagada
+    // automaticamente pelo mesmo gatilho de `Support\DataPruner::maybeCleanup()`
+    // usado pelo tracking normal (`data_prune_interval_hours` acima),
+    // nunca por `pruneData`/`monitor:prune` (`DataPruner::pruneAccessLogs()`
+    // é um método separado, não alcançável por eles). `0` desliga (guarda
+    // pra sempre). O valor vem só desta config local — não existe action
+    // remota que o altere. `monitor:access-log --purge` continua
+    // disponível pra limpeza manual, independente deste valor.
+    'access_log_retention_days' => 90,
 
 ];

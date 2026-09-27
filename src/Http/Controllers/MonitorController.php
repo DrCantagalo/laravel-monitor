@@ -7,9 +7,11 @@ use Drcantagalo\LaravelMonitor\Models\BlockedIp;
 use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorAccessLog;
 use Drcantagalo\LaravelMonitor\Models\MonitorIpLabel;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
+use Drcantagalo\LaravelMonitor\Support\AccessLogger;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Support\DataSanitizer;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
@@ -28,6 +30,21 @@ use Illuminate\Support\Str;
 
 class MonitorController extends Controller
 {
+    /**
+     * laravel-monitor 249: mesma lista de actions de `$isValidReadToken`
+     * em `handle()`, MENOS `getAccessLog` — usada pra decidir quando uma
+     * leitura feita com o local_token permanente gera uma linha
+     * `local_token_read` em `monitor_access_logs`. `getAccessLog` fica de
+     * fora de propósito (item 3 da task: "ela própria não gera linha no
+     * log", pra não inflar o próprio log a cada vez que alguém o
+     * consulta).
+     */
+    protected const ACCESS_LOGGED_ACTIONS = [
+        'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
+        'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
+        'getTableStats',
+    ];
+
     /**
      * Handler principal para ações do monitor
      */
@@ -50,17 +67,18 @@ class MonitorController extends Controller
         // actions só-leitura (getData, getPages, getVisitorsByIp,
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
         // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits,
-        // getIpTags, getTableStats — getIpMonitors/getMonitorVisits desde a
-        // laravel-monitor 152/v0.46.0, getUserMonitors desde a 237/v0.48.0
-        // (substituindo getUserVisits), getIpTags desde a 239/v0.49.0,
-        // getTableStats desde a 242/v0.50.0 — nunca pra
+        // getIpTags, getTableStats, getAccessLog — getIpMonitors/
+        // getMonitorVisits desde a laravel-monitor 152/v0.46.0,
+        // getUserMonitors desde a 237/v0.48.0 (substituindo getUserVisits),
+        // getIpTags desde a 239/v0.49.0, getTableStats desde a 242/v0.50.0,
+        // getAccessLog desde a 249/v0.51.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
         // setIpLabels/setIpTags, que exigem o local_token permanente (são
         // escrita).
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-            'getTableStats',
+            'getTableStats', 'getAccessLog',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -70,6 +88,28 @@ class MonitorController extends Controller
                 'success' => false,
                 'message' => 'Unauthorized',
             ], 401);
+        }
+
+        // laravel-monitor 249: registro de transparência em
+        // monitor_access_logs — dois dos três caminhos cobertos aqui (o
+        // terceiro, emissão do token, é gravado dentro de issueReadToken()
+        // abaixo, onde o TTL/token recém-gerado já está disponível).
+        // getAccessLog nunca gera linha própria (item 3 da task 249),
+        // tratado dentro dos dois helpers abaixo.
+        if ($isValidReadToken && ! $isLocalToken) {
+            $this->maybeLogReadTokenFirstUse($token, $action, $request);
+        }
+
+        if ($isLocalToken && in_array($action, self::ACCESS_LOGGED_ACTIONS, true)) {
+            AccessLogger::record(
+                AccessLogger::KIND_LOCAL_TOKEN_READ,
+                $action,
+                $request->ip(),
+                $request->userAgent(),
+                $this->requestOrigin($request),
+                null,
+                $request->input('declared_by')
+            );
         }
 
         switch ($action) {
@@ -111,6 +151,9 @@ class MonitorController extends Controller
 
             case 'getTableStats':
                 return $this->getTableStats($request);
+
+            case 'getAccessLog':
+                return $this->getAccessLog($request);
 
             case 'setIpKind':
                 return $this->setIpKind($request);
@@ -184,11 +227,125 @@ class MonitorController extends Controller
 
         Cache::put("monitor:read-token:{$token}", true, $expiresAt);
 
+        // laravel-monitor 249: quem chama isto é sempre o SERVIDOR do
+        // cantagalo.it (abrindo o dashboard em nome de um usuário), então
+        // `$request->ip()`/`userAgent()` aqui são os nossos, não os de quem
+        // abriu o dashboard — a evidência do lado do navegador vem depois,
+        // em `maybeLogReadTokenFirstUse()`. `declared_by` (opcional): quem
+        // o dashboard diz que pediu esse acesso (e-mail do usuário logado).
+        AccessLogger::record(
+            AccessLogger::KIND_READ_TOKEN_ISSUED,
+            'issueReadToken',
+            $request->ip(),
+            $request->userAgent(),
+            $this->requestOrigin($request),
+            AccessLogger::tokenRef($token),
+            $request->input('declared_by')
+        );
+
         return response()->json([
             'success' => true,
             'token' => $token,
             'expires_at' => $expiresAt->toIso8601String(),
         ]);
+    }
+
+    /**
+     * laravel-monitor 249: dispara no primeiro uso VÁLIDO de cada
+     * read-token pela action de leitura de fato (nunca em `getAccessLog`,
+     * que não se auto-registra) — a única evidência do lado do NAVEGADOR
+     * que não passa pelo nosso servidor (ao contrário de `issueReadToken`,
+     * sempre chamado pelo backend do cantagalo.it). `Cache::add` (atômico)
+     * como flag de "já registrado" garante exatamente uma linha por token,
+     * mesmo sob requests concorrentes.
+     *
+     * Chamada com `getAccessLog`: propositalmente um no-op (nem loga, nem
+     * consome a flag) — se o navegador chamar `getAccessLog` antes de
+     * qualquer outra action de leitura, o primeiro uso "de verdade" ainda
+     * não aconteceu, e continua pendente pra próxima action não-
+     * `getAccessLog` com esse mesmo token.
+     */
+    protected function maybeLogReadTokenFirstUse(string $token, string $action, Request $request): void
+    {
+        if ($action === 'getAccessLog') {
+            return;
+        }
+
+        $ttlMinutes = config('monitor.read_token_ttl_minutes', 15);
+        $firstUseKey = "monitor:read-token:{$token}:first-use-logged";
+
+        if (! Cache::add($firstUseKey, true, now()->addMinutes($ttlMinutes))) {
+            return;
+        }
+
+        AccessLogger::record(
+            AccessLogger::KIND_READ_TOKEN_FIRST_USE,
+            $action,
+            $request->ip(),
+            $request->userAgent(),
+            $this->requestOrigin($request),
+            AccessLogger::tokenRef($token)
+        );
+    }
+
+    /**
+     * Origem da request pro log de acessos (laravel-monitor 249) — header
+     * `Origin` (fetch/XHR CORS, o caso comum do dashboard chamando direto
+     * do navegador via read-token) com fallback pra `Referer` (chamadas
+     * sem preflight CORS, ex. server-to-server com local_token).
+     */
+    private function requestOrigin(Request $request): ?string
+    {
+        return $request->header('Origin') ?: $request->header('Referer');
+    }
+
+    /**
+     * laravel-monitor 249: listagem PAGINADA (mais recentes primeiro) de
+     * `monitor_access_logs` — a metade "remota" da garantia de
+     * transparência (a outra é `monitor:access-log`, local, sem exigir
+     * confiança no dashboard). Mesma auth de leitura de `getData`/
+     * `getTableStats` (local_token OU read-token). Deliberadamente SEM
+     * cache (ao contrário de getBlockResults/getTableStats): é uma tela de
+     * auditoria de baixo tráfego, e cachear atrasaria justamente a
+     * visibilidade de um acesso recém-acontecido.
+     *
+     * Esta action NUNCA gera uma linha própria em `monitor_access_logs`
+     * (ver `ACCESS_LOGGED_ACTIONS`/`maybeLogReadTokenFirstUse` — os dois
+     * caminhos de registro excluem `getAccessLog` explicitamente), senão
+     * cada consulta ao log infları-o-ia sozinha.
+     */
+    protected function getAccessLog(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        try {
+            $paginator = MonitorAccessLog::query()
+                ->orderByDesc('accessed_at')
+                ->orderByDesc('id')
+                ->paginate($perPage, [
+                    'id', 'accessed_at', 'kind', 'action', 'ip', 'user_agent', 'origin', 'token_ref', 'declared_by',
+                ], 'page', $page);
+
+            return response()->json([
+                'success' => true,
+                'data' => $paginator->items(),
+                'meta' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ]);
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_access_logs não encontrada ao listar getAccessLog (rode `php artisan migrate` ou `php artisan monitor:update`?). Erro original: '.$e->getMessage());
+
+            return response()->json([
+                'success' => true,
+                'data' => [],
+                'meta' => ['page' => $page, 'per_page' => $perPage, 'total' => 0, 'last_page' => 1],
+            ]);
+        }
     }
 
     /**

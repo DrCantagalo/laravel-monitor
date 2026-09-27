@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.51.0] - 2026-09-27
+### Added
+- **New table `monitor_access_logs`** and read-only transparency
+  guarantee: every read of a client's data now leaves a line in a log
+  that lives only on the client's own server (`kind`: `read_token_issued`
+  when the hosted dashboard is opened, `read_token_first_use` — the
+  browser-side evidence, IP/user-agent that never pass through our
+  server, one row per token — on the first real use of each ephemeral
+  read token, and `local_token_read` on every read action called with
+  the permanent `local_token`, i.e. the proxy/fallback and AI-triage
+  paths). See README "Access log".
+- Optional `declared_by` on `issueReadToken` and on local_token reads —
+  a short, truncated string the dashboard's server *says* identifies who
+  asked for the access (dashboard user's email, or e.g. `"AI triage run
+  #42"`); stored and shown as-is, explicitly labeled as **not
+  independently verified**.
+- **New read action `getAccessLog`**: paginated, most-recent-first
+  listing of `monitor_access_logs`. Same auth as `getData` (permanent
+  `local_token` or an ephemeral read token). Deliberately never generates
+  a row of its own.
+- **New config `access_log_retention_days`** (default `90`, `0` =
+  never): automatic retention of `monitor_access_logs`, applied by
+  `Support\DataPruner::maybeCleanup()` (the same trigger that already
+  prunes tracking data) through a new, separate
+  `DataPruner::pruneAccessLogs()` — **not** reachable from `pruneData`
+  (HTTP) or `monitor:prune` (CLI). No remote action can change this
+  table.
+- **New command `monitor:access-log`** (`--days=`, `--limit=`,
+  `--purge`): the local source of truth for the access log, independent
+  of whatever the hosted dashboard chooses to display via
+  `getAccessLog`.
+- `clearData` and `pruneData` (HTTP and CLI, including
+  `DataPruner::prune()`) are explicitly guaranteed to never touch
+  `monitor_access_logs` — covered by a dedicated test.
+
 ## [0.50.0] - 2026-09-25
 ### Added
 - **New read action `getTableStats`**: one row per table this package

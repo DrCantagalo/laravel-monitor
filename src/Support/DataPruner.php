@@ -108,12 +108,43 @@ class DataPruner
             $maxRows = (int) config('monitor.data_prune_max_rows_per_run', 1000);
 
             $result = self::prune(0, true, $maxRows);
+            self::pruneAccessLogs();
 
             if ($result['done']) {
                 Cache::forever(self::CACHE_KEY, time());
             }
         } finally {
             Cache::forget(self::LOCK_KEY);
+        }
+    }
+
+    /**
+     * laravel-monitor 249: retenção automática de `monitor_access_logs`
+     * (`monitor.access_log_retention_days`, default 90, `0` = nunca
+     * apagar) — deliberadamente um método SEPARADO, chamado só a partir
+     * daqui (`maybeCleanup()`), nunca de `prune()`: nem o comando
+     * `monitor:prune` nem a rota HTTP `pruneData` (uso manual/
+     * administrativo do CLIENTE) podem apagar o log de acessos — só a
+     * retenção automática local ou `monitor:access-log --purge` (também
+     * local, com confirmação) fazem isso. Sem `$maxRows`/chunking: o log
+     * de acessos cresce bem mais devagar que o tracking (uma linha por
+     * emissão/primeiro-uso/leitura administrativa, não por request de
+     * visitante), delete direto é seguro.
+     */
+    public static function pruneAccessLogs(): int
+    {
+        $days = (int) config('monitor.access_log_retention_days', 90);
+
+        if ($days <= 0) {
+            return 0;
+        }
+
+        try {
+            return DB::table('monitor_access_logs')->where('accessed_at', '<', now()->subDays($days))->delete();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_access_logs não encontrada ao podar o log de acessos (rode `php artisan migrate` ou `php artisan monitor:update`?). Erro original: '.$e->getMessage());
+
+            return 0;
         }
     }
 
