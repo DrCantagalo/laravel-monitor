@@ -73,8 +73,8 @@ class MonitorController extends Controller
         // getIpTags desde a 239/v0.49.0, getTableStats desde a 242/v0.50.0,
         // getAccessLog desde a 249/v0.51.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
-        // setIpLabels/setIpTags, que exigem o local_token permanente (são
-        // escrita).
+        // setIpLabels/setIpTags/spreadIpLabel (esta desde a 257/v0.52.0),
+        // que exigem o local_token permanente (são escrita).
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
@@ -157,6 +157,9 @@ class MonitorController extends Controller
 
             case 'setIpKind':
                 return $this->setIpKind($request);
+
+            case 'spreadIpLabel':
+                return $this->spreadIpLabel($request);
 
             case 'setIpLabels':
                 return $this->setIpLabels($request);
@@ -1104,7 +1107,12 @@ class MonitorController extends Controller
             // mas com atividade nova desde então (last_seen > classified_at)
             // — reavalia só quem voltou a aparecer, sem reprocessar
             // (e cobrar) sempre os mesmos IPs. source=manual nunca entra
-            // em clean_ai_queue.
+            // em clean_ai_queue — e, desde a laravel-monitor 257 (v0.52.0,
+            // `spreadIpLabel`), source=spread também não, pelo mesmo
+            // `source != 'ai'` abaixo (qualquer source que não seja 'ai'
+            // já fica de fora da re-triagem, sem precisar listar cada
+            // valor): um kind propagado por vizinhança é tão deliberado
+            // quanto um manual, não deve voltar pra fila da IA sozinho.
             'clean_bots' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
                 ->whereIn('ip', MonitorIpLabel::where('kind', 'bot')->pluck('ip')),
             'clean_humans' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
@@ -1653,6 +1661,14 @@ class MonitorController extends Controller
         'monitor_paths',
         'monitor_block_results',
         'monitor_ip_labels',
+        // laravel-monitor 257 (v0.52.0): só entra aqui (volume/tamanho,
+        // getTableStats) — NUNCA em clearData/pruneData/DataPruner::prune(),
+        // que continuam restritos a `monitors` e suas tabelas filhas.
+        // `monitor_access_logs` só é podada por
+        // `DataPruner::pruneAccessLogs()` (gatilho automático, via
+        // `access_log_retention_days`) ou `monitor:access-log --purge` —
+        // ver README "Access log".
+        'monitor_access_logs',
     ];
 
     /**
@@ -1760,6 +1776,13 @@ class MonitorController extends Controller
      * sem isso, duas escritas concorrentes (um humano e a triagem IA no
      * mesmo IP) poderiam ambas ler o estado anterior e a proteção "manual
      * nunca perde pra ai" viraria uma corrida.
+     *
+     * laravel-monitor 257 (v0.52.0): a mesma proteção agora também cobre
+     * `source=spread` (ver `spreadIpLabel` abaixo) — um `kind` propagado
+     * por vizinhança (`monitor_visit_ips`) é uma decisão tão deliberada
+     * quanto uma manual (a origem em si foi classificada manualmente ou
+     * pela IA e depois espalhada de propósito), então `source=ai` também
+     * não pode sobrescrevê-la sem revisão humana.
      */
     protected function setIpKind(Request $request)
     {
@@ -1788,8 +1811,11 @@ class MonitorController extends Controller
             DB::transaction(function () use ($ip, $kind, $source, &$applied, &$ignored) {
                 $label = MonitorIpLabel::where('ip', $ip)->lockForUpdate()->first();
 
-                if ($source === 'ai' && $label && $label->kind !== null && $label->source === 'manual') {
-                    $ignored[] = ['ip' => $ip, 'reason' => 'manual classification protected'];
+                if ($source === 'ai' && $label && $label->kind !== null && in_array($label->source, ['manual', 'spread'], true)) {
+                    $ignored[] = [
+                        'ip' => $ip,
+                        'reason' => $label->source === 'manual' ? 'manual classification protected' : 'spread classification protected',
+                    ];
 
                     return;
                 }
@@ -1811,6 +1837,202 @@ class MonitorController extends Controller
             'success' => true,
             'applied' => $applied,
             'ignored' => $ignored,
+        ]);
+    }
+
+    /**
+     * laravel-monitor 257 (v0.52.0): propaga a classificação (`kind`) e as
+     * tags de um IP de origem já classificado para seus "vizinhos" — outros
+     * IPs vistos nos MESMOS `Monitor` (dispositivo/navegador) que a
+     * origem, via `monitor_visit_ips`. Ideia: se um `Monitor` (o mesmo
+     * navegador/dispositivo, reconhecido pelo `remember_cookie`) já foi
+     * visto tanto com o IP de origem quanto com outro IP, é um sinal forte
+     * de que esse outro IP é o MESMO ator por trás de um IP dinâmico
+     * (troca de rede, IPv6 rotativo, etc) — vale herdar a classificação.
+     *
+     * **Só 1 hop, nunca recursivo**: vizinhos são calculados uma vez a
+     * partir dos `Monitor` da origem — nunca a partir dos `Monitor` dos
+     * próprios vizinhos (isso encadearia numa bola de neve incontrolável
+     * a partir de qualquer IP com histórico longo o bastante).
+     *
+     * **Nunca sobrescreve uma classificação manual**: um vizinho com
+     * `kind` definido E `source=manual` é pulado por inteiro (`tags`
+     * também intocadas — manual é totalmente protegido, mesmo raciocínio
+     * de `setIpKind`). Um vizinho com bloqueio vigente
+     * (`BlockedIp::active()`) também é pulado — não faz sentido
+     * (re)classificar quem já foi confirmado como scraper e bloqueado.
+     * Qualquer outro vizinho (`source=ai`, `source=spread` de uma rodada
+     * anterior, ou sem linha nenhuma em `monitor_ip_labels`) É elegível.
+     *
+     * Tags são sempre MERGE (nunca replace) — `MonitorIpLabel::normalizeTags`
+     * já aplica `MAX_TAGS`/`MAX_TAG_LENGTH` no resultado combinado.
+     *
+     * Grava `source=spread`, `classified_at=now()` e acrescenta um rastro
+     * em `note` (`"spread from {origin}"`) — auditável (dá pra achar todo
+     * IP espalhado a partir de um IP com `source=spread`) e reversível
+     * (um humano pode sempre reclassificar/limpar via `setIpKind`/
+     * `setIpLabels`). Um `note` humano já existente NUNCA é apagado — o
+     * rastro é acrescentado entre parênteses, não sobrescreve.
+     *
+     * **`ip_spread_max_targets`** (config, default 50): se o número de
+     * vizinhos encontrados (antes de filtrar manual/bloqueado — é o
+     * tamanho bruto do "IP compartilhado" que importa aqui) exceder esse
+     * teto, a action inteira é recusada com `422` (nada é aplicado
+     * parcialmente) — protege contra um IP de origem que por acaso é um
+     * CGNAT/proxy compartilhado, onde "vizinhos" seria toda uma rede de
+     * usuários não relacionados e espalhar a classificação seria
+     * perigoso, não útil.
+     *
+     * `dry_run=true` (default `false`): calcula e retorna `targets`
+     * (vizinhos elegíveis, com `kind`/`source` ATUAIS, antes da escrita) e
+     * `skipped` (vizinhos pulados + motivo: `manual` ou `blocked`) — SEM
+     * gravar nada. `dry_run=false` aplica dentro de uma única
+     * `DB::transaction`, com `lockForUpdate()` por IP (mesma janela de
+     * corrida que `setIpKind` fecha) e reavalia manual/bloqueado sob o
+     * lock antes de escrever, e então chama `invalidateListingsCache()`.
+     */
+    protected function spreadIpLabel(Request $request)
+    {
+        $ip = (string) $request->input('ip', '');
+
+        if ($ip === '' || ! filter_var($ip, FILTER_VALIDATE_IP)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid IP provided',
+            ], 422);
+        }
+
+        $origin = MonitorIpLabel::where('ip', $ip)->first();
+
+        if (! $origin || $origin->kind === null) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Origin IP has no kind set — nothing to spread',
+            ], 422);
+        }
+
+        $dryRun = $request->boolean('dry_run', false);
+
+        $monitorIds = DB::table('monitor_visit_ips')->where('ip', $ip)->pluck('monitor_id');
+
+        // 1 hop só: sempre a partir dos monitor_id da ORIGEM, nunca dos
+        // monitor_id de um vizinho já encontrado.
+        $neighborIps = $monitorIds->isEmpty()
+            ? collect()
+            : DB::table('monitor_visit_ips')
+                ->whereIn('monitor_id', $monitorIds)
+                ->where('ip', '!=', $ip)
+                ->distinct()
+                ->pluck('ip');
+
+        $maxTargets = (int) config('monitor.ip_spread_max_targets', 50);
+        $neighborCount = $neighborIps->count();
+
+        if ($neighborCount > $maxTargets) {
+            return response()->json([
+                'success' => false,
+                'message' => "Too many neighbor IPs found ({$neighborCount}) — refusing to spread (limit: {$maxTargets})",
+                'neighbors_found' => $neighborCount,
+            ], 422);
+        }
+
+        $blockedNeighborIps = $neighborIps->isEmpty()
+            ? collect()
+            : BlockedIp::active()->whereIn('ip', $neighborIps)->pluck('ip');
+
+        $labels = $this->labelsForIps($neighborIps);
+
+        $targets = [];
+        $skipped = [];
+
+        foreach ($neighborIps as $neighborIp) {
+            $label = $labels->get($neighborIp);
+
+            if ($label && $label->kind !== null && $label->source === 'manual') {
+                $skipped[] = ['ip' => $neighborIp, 'reason' => 'manual'];
+
+                continue;
+            }
+
+            if ($blockedNeighborIps->contains($neighborIp)) {
+                $skipped[] = ['ip' => $neighborIp, 'reason' => 'blocked'];
+
+                continue;
+            }
+
+            $targets[] = [
+                'ip' => $neighborIp,
+                'kind' => $label?->kind,
+                'source' => $label?->source,
+            ];
+        }
+
+        if ($dryRun) {
+            return response()->json([
+                'success' => true,
+                'dry_run' => true,
+                'origin' => ['ip' => $ip, 'kind' => $origin->kind, 'source' => $origin->source],
+                'targets' => $targets,
+                'skipped' => $skipped,
+            ]);
+        }
+
+        $originKind = $origin->kind;
+        $originTags = $origin->tags ?? [];
+        $applied = [];
+
+        DB::transaction(function () use ($targets, $ip, $originKind, $originTags, &$applied, &$skipped) {
+            foreach ($targets as $target) {
+                $neighborIp = $target['ip'];
+                $label = MonitorIpLabel::where('ip', $neighborIp)->lockForUpdate()->first();
+
+                // Reavalia manual/bloqueado sob o lock — fecha a mesma
+                // janela de corrida que `setIpKind` fecha (o cálculo de
+                // $targets acima roda fora da transaction).
+                if ($label && $label->kind !== null && $label->source === 'manual') {
+                    $skipped[] = ['ip' => $neighborIp, 'reason' => 'manual'];
+
+                    continue;
+                }
+
+                if (BlockedIp::active()->where('ip', $neighborIp)->exists()) {
+                    $skipped[] = ['ip' => $neighborIp, 'reason' => 'blocked'];
+
+                    continue;
+                }
+
+                $label ??= new MonitorIpLabel(['ip' => $neighborIp]);
+                $label->kind = $originKind;
+                $label->tags = MonitorIpLabel::normalizeTags(array_merge($label->tags ?? [], $originTags));
+                $label->source = 'spread';
+                $label->classified_at = now();
+
+                $trace = "spread from {$ip}";
+
+                // Não duplica o rastro se este exato IP de origem já foi
+                // gravado antes (ex: rodar spreadIpLabel de novo depois de
+                // nova atividade) — só acrescenta uma vez, sem crescer sem
+                // limite a cada rodada repetida.
+                if ($label->note === null || $label->note === '') {
+                    $label->note = $trace;
+                } elseif (! str_contains($label->note, $trace)) {
+                    $label->note = "{$label->note} ({$trace})";
+                }
+
+                $this->saveOrPruneLabel($label);
+
+                $applied[] = $neighborIp;
+            }
+        });
+
+        $this->invalidateListingsCache();
+
+        return response()->json([
+            'success' => true,
+            'dry_run' => false,
+            'origin' => ['ip' => $ip, 'kind' => $origin->kind, 'source' => $origin->source],
+            'applied' => $applied,
+            'skipped' => $skipped,
         ]);
     }
 

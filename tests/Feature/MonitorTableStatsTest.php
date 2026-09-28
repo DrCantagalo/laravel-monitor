@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorAccessLog;
 use Drcantagalo\LaravelMonitor\Models\MonitorIpLabel;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -42,17 +43,51 @@ class MonitorTableStatsTest extends TestCase
         $this->assertSame(2, $rows['monitors']['rows']);
         $this->assertSame(1, $rows['monitor_ip_labels']['rows']);
         $this->assertSame(0, $rows['monitor_visits']['rows']);
+        // getTableStats está em ACCESS_LOGGED_ACTIONS (desde a 242/v0.50.0)
+        // — a própria chamada com local_token grava 1 linha
+        // local_token_read em monitor_access_logs ANTES de rodar
+        // buildTableStatsResult(), então a primeira chamada já vê 1, não 0
+        // (ver test_monitor_access_logs_counts_toward_stats_and_total logo
+        // abaixo pra um cenário com uma linha pré-existente).
+        $this->assertSame(1, $rows['monitor_access_logs']['rows']);
 
-        // Todas as 9 tabelas do pacote presentes (nenhuma
+        // Todas as 10 tabelas do pacote presentes (nenhuma
         // monitor_blocked_paths/monitor_path_reviews — fundidas em
-        // monitor_paths).
+        // monitor_paths). monitor_access_logs desde a laravel-monitor 257
+        // (v0.52.0) — só entra aqui pra transparência de volume, nunca em
+        // clearData/pruneData (ver MonitorAccessLogTest).
         $this->assertEqualsCanonicalizing([
             'monitors', 'monitor_visits', 'monitor_visit_ips', 'monitor_page_hits',
             'monitor_ip_stats', 'monitor_blocked_ips', 'monitor_paths',
-            'monitor_block_results', 'monitor_ip_labels',
+            'monitor_block_results', 'monitor_ip_labels', 'monitor_access_logs',
         ], $rows->keys()->all());
 
-        $this->assertSame(3, $response->json('total.rows'));
+        // 2 monitors + 1 monitor_ip_labels + 1 monitor_access_logs (a
+        // própria chamada, ver acima) = 4.
+        $this->assertSame(4, $response->json('total.rows'));
+    }
+
+    public function test_monitor_access_logs_counts_toward_stats_and_total(): void
+    {
+        MonitorAccessLog::create([
+            'accessed_at' => now(),
+            'kind' => 'local_token_read',
+            'action' => 'getData',
+            'ip' => '203.0.113.5',
+        ]);
+
+        $response = $this->callHandler(['action' => 'getTableStats']);
+
+        $response->assertOk();
+
+        $rows = collect($response->json('data'))->keyBy('table');
+
+        // 1 linha pré-existente + 1 gerada pela própria chamada de
+        // getTableStats (ACCESS_LOGGED_ACTIONS, ver comentário no teste
+        // acima) = 2.
+        $this->assertSame(2, $rows['monitor_access_logs']['rows']);
+        $this->assertArrayHasKey('size_bytes', $rows['monitor_access_logs']);
+        $this->assertSame(2, $response->json('total.rows'));
     }
 
     public function test_size_bytes_is_null_on_sqlite_but_rows_are_still_reported(): void
@@ -82,7 +117,20 @@ class MonitorTableStatsTest extends TestCase
 
         $tables = collect($response->json('data'))->pluck('table')->all();
         $this->assertNotContains('monitor_ip_labels', $tables);
-        $this->assertCount(8, $tables);
+        $this->assertCount(9, $tables);
+    }
+
+    public function test_a_missing_monitor_access_logs_table_is_skipped_gracefully(): void
+    {
+        Schema::drop('monitor_access_logs');
+
+        $response = $this->callHandler(['action' => 'getTableStats']);
+
+        $response->assertOk();
+
+        $tables = collect($response->json('data'))->pluck('table')->all();
+        $this->assertNotContains('monitor_access_logs', $tables);
+        $this->assertCount(9, $tables);
     }
 
     public function test_result_is_cached_and_a_direct_db_write_is_not_reflected_until_invalidated(): void

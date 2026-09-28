@@ -1221,14 +1221,16 @@ automatically).
   rejected). Set via `setIpLabels` (full replace, one IP) or `setIpTags`
   (add/remove one tag, one or many IPs).
 - **`note`**: an optional free-text note. Set via `setIpLabels`.
-- **`source`**: `manual` (default) or `ai` (since `0.49.0`, written by
-  the AI IP-triage flow — see home-page task 241). Refers to **`kind`**
+- **`source`**: `manual` (default), `ai` (since `0.49.0`, written by
+  the AI IP-triage flow — see home-page task 241), or `spread` (since
+  `0.52.0`, written by `spreadIpLabel` — see below). Refers to **`kind`**
   specifically, not to tags/note. **Guaranteed by the package itself,
   not just the consumer**: a `source=ai` write never overwrites a `kind`
-  already set with `source=manual` (that IP is silently skipped and
-  reported back, not an error), and `source=ai` tag writes are always a
-  merge (add-only) — they can never remove an existing tag. A manual
-  write always wins and always records `source=manual`.
+  already set with `source=manual` **or `source=spread`** (that IP is
+  silently skipped and reported back, not an error), and `source=ai` tag
+  writes are always a merge (add-only) — they can never remove an
+  existing tag. A manual write always wins and always records
+  `source=manual`.
 - **`classified_at`**: when `kind` was last (re)written by `setIpKind`.
   Not touched by `setIpLabels`/`setIpTags` (those don't touch `kind`
   either).
@@ -1261,6 +1263,51 @@ explicitly changes it.
   tags"`) — the AI triage flow only ever adds. This is the bulk-action
   case ("add tag to selected IPs" in the dashboard) as well as what the
   AI triage job calls per classified bot.
+- **`spreadIpLabel`** (since `0.52.0`): propagates an already-classified
+  IP's `kind` and tags to its **neighbors** — other IPs seen on the
+  *same* `Monitor` rows (device/browser, via `monitor_visit_ips`) as the
+  origin IP. **Only one hop**: neighbors are computed once from the
+  origin's own `Monitor` rows, never recursively from a neighbor's own
+  `Monitor` rows — this cannot chain into a snowball across unrelated
+  IPs. Params: `ip` (the origin, `422` if missing/invalid or if it has
+  no `kind` set — nothing to spread), `dry_run` (bool, default `false`).
+  - **Never overwrites a manual classification**: a neighbor with `kind`
+    set and `source=manual` is skipped entirely — tags and note
+    untouched too, manual is fully protected. A neighbor with an active
+    block (`BlockedIp::active()`) is also skipped. Any other neighbor
+    (`source=ai`, `source=spread` from an earlier run, or no row at all)
+    is eligible.
+  - Tags are always a **merge** (never a replace) into the neighbor's
+    existing tags, still normalized/capped by the same `MAX_TAGS`
+    (`20`)/`MAX_TAG_LENGTH` (`40`) as everywhere else.
+  - Writes `source=spread`, `classified_at=now()`, and appends a trace to
+    `note` (`"spread from <origin ip>"`) so every spread write is
+    auditable (find every IP a given origin spread to) and reversible (a
+    human can always reclassify/clear it via `setIpKind`/`setIpLabels`
+    afterwards). An existing human `note` is never erased — the trace is
+    appended in parentheses, not overwritten.
+  - **`ip_spread_max_targets`** config (default `50`): if the number of
+    neighbors found exceeds this limit, the **whole action is refused**
+    with `422` (`neighbors_found` in the response) and **nothing is
+    applied**, even partially — this guards against an origin IP that
+    happens to be a shared/CGNAT address, where "neighbors" would be an
+    entire unrelated network and spreading would mislabel it.
+  - `dry_run=true`: computes and returns `targets` (eligible neighbors,
+    each `{"ip", "kind", "source"}` — their state *before* any write) and
+    `skipped` (each `{"ip", "reason"}`, `reason` is `manual` or
+    `blocked`) **without writing anything**.
+  - `dry_run=false`: applies within a single `DB::transaction`, with
+    `lockForUpdate()` per IP (same race-closing pattern as `setIpKind`,
+    re-checking manual/blocked under the lock before writing) and calls
+    the same listings-cache invalidation as the other write actions.
+    Response: `{"success": true, "dry_run": false, "origin": {"ip":
+    "1.2.3.4", "kind": "bot", "source": "manual"}, "applied":
+    ["5.6.7.8"], "skipped": [{"ip": "9.9.9.9", "reason": "manual"}]}`.
+  - Interacts with `clean_ai_queue` (see "Paginated visitor/blocklist
+    listing" below) and with `setIpKind`'s `source=ai` protection exactly
+    like `source=manual` does — a spread classification is as deliberate
+    a decision as a manual one and the AI triage flow must never silently
+    overwrite it.
 
 ### Read action
 

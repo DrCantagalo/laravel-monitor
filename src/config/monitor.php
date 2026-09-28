@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.51.0',
+    'version' => '0.52.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -265,5 +265,14 @@ return [
     // remota que o altere. `monitor:access-log --purge` continua
     // disponível pra limpeza manual, independente deste valor.
     'access_log_retention_days' => 90,
+
+    // Teto de vizinhos (`monitor_visit_ips`, outros IPs vistos nos mesmos
+    // `Monitor` da origem) que `spreadIpLabel` (laravel-monitor 257,
+    // v0.52.0 — ver README "IP classification") aceita propagar de uma
+    // vez. Acima disso a action inteira é recusada (`422`, nada aplicado
+    // parcialmente) — guardrail contra um IP de origem que por acaso é
+    // CGNAT/proxy compartilhado, onde "vizinhos" seria uma rede inteira de
+    // usuários não relacionados.
+    'ip_spread_max_targets' => 50,
 
 ];

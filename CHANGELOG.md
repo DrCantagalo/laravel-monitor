@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.52.0] - 2026-09-28
+### Added
+- **`getTableStats` now includes `monitor_access_logs`**: the
+  `monitor_access_logs` table (added in `0.51.0`) was missing from
+  `STATS_TABLES`, so it never showed up in the volume/size transparency
+  report even though it can grow like any other tracked table. This is
+  purely a *reporting* change — `clearData`/`pruneData` (HTTP and CLI)
+  are unaffected and still never touch `monitor_access_logs`; it
+  continues to be pruned only by `DataPruner::pruneAccessLogs()` (the
+  automatic trigger, driven by `access_log_retention_days`) or
+  `monitor:access-log --purge`. Like every other optional table in
+  `STATS_TABLES`, a missing `monitor_access_logs` table (not yet
+  migrated) is skipped gracefully rather than erroring out.
+- **New write action `spreadIpLabel`**: propagates an already-classified
+  IP's `kind` and tags to its **neighbors** — other IPs seen on the same
+  `Monitor` rows (device/browser) as the origin IP, via
+  `monitor_visit_ips`. **Only one hop**, never recursive — neighbors are
+  computed once from the origin's own `Monitor` rows, never chased
+  through a neighbor's own `Monitor` rows. Params: `ip` (origin, `422` if
+  missing/invalid or if it has no `kind` set), `dry_run` (bool, default
+  `false`).
+  - A neighbor with `kind` set and `source=manual` is skipped entirely
+    (tags/note untouched too — manual stays fully protected), and so is
+    a neighbor with an active block (`BlockedIp::active()`). Any other
+    neighbor (`source=ai`, `source=spread` from an earlier run, or no row
+    at all) is eligible.
+  - Tags are always **merged** (never replaced) into the neighbor's
+    existing tags, still bound by the existing `MAX_TAGS`/
+    `MAX_TAG_LENGTH`.
+  - Writes `source=spread`, `classified_at=now()`, and appends a
+    `"spread from <origin ip>"` trace to `note` (an existing human note
+    is never erased, only appended to) — auditable and reversible.
+  - **New config `ip_spread_max_targets`** (default `50`): if the number
+    of neighbors found exceeds this limit, the **whole action is
+    refused** (`422`, with `neighbors_found`) and nothing is applied,
+    even partially — guards against an origin IP that happens to be a
+    shared/CGNAT address, where "neighbors" would be an entire unrelated
+    network.
+  - `dry_run=true` computes and returns `targets`/`skipped` without
+    writing anything; `dry_run=false` applies inside a single
+    `DB::transaction` with `lockForUpdate()` per IP (re-checking
+    manual/blocked under the lock, same race-closing pattern as
+    `setIpKind`) and invalidates the listings cache.
+- **`source=spread` is now protected exactly like `source=manual`**
+  wherever that protection already existed: `clean_ai_queue` (see
+  "Paginated visitor/blocklist listing") excludes `source=spread` IPs
+  from the AI re-triage queue, and `setIpKind`'s `source=ai` path never
+  overwrites a `kind` already set with `source=spread` (the IP is
+  reported back in `ignored` with reason `"spread classification
+  protected"`, mirroring `"manual classification protected"`).
+
+See README "IP classification" for the full write/read reference.
+
 ## [0.51.0] - 2026-09-27
 ### Added
 - **New table `monitor_access_logs`** and read-only transparency
