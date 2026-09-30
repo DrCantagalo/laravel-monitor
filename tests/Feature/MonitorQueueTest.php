@@ -159,6 +159,41 @@ class MonitorQueueTest extends TestCase
         $response->assertJsonPath('recheck', 1);
     }
 
+    /**
+     * laravel-monitor 260 (v0.53.1, hotfix): a query do grupo `recheck`
+     * usava `->get()->count()`, que seleciona `*` (todas as colunas de
+     * `monitor_labels`) numa query com `groupBy('ml.monitor_id')` — MySQL
+     * com `sql_mode=only_full_group_by` recusa (erro 1055), já que nem
+     * toda coluna selecionada está no GROUP BY nem é agregada. SQLite (o
+     * driver dos testes) não aplica essa regra, por isso o bug passou
+     * despercebido; este teste inspeciona o SQL gerado em vez de confiar
+     * no comportamento do driver, pra pegar a regressão em qualquer banco.
+     */
+    public function test_counts_action_recheck_query_only_selects_grouped_column(): void
+    {
+        config(['monitor.ai_recheck_min_new_hits' => 5]);
+        $recheckMonitor = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $recheckMonitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()->subDay()]);
+        $this->pageHit($recheckMonitor, 'new-path', 10, now());
+
+        $queries = [];
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$queries) {
+            $queries[] = $query->sql;
+        });
+
+        $response = $this->callHandler(['action' => 'getMonitorQueueCounts']);
+
+        $response->assertOk();
+        $response->assertJsonPath('recheck', 1);
+
+        $groupByQueries = array_filter($queries, fn ($sql) => str_contains($sql, 'group by') && str_contains($sql, 'monitor_labels'));
+        $this->assertNotEmpty($groupByQueries, 'Expected a grouped query against monitor_labels to run.');
+
+        foreach ($groupByQueries as $sql) {
+            $this->assertStringNotContainsString('select *', $sql, 'GROUP BY query must not select *, only the grouped column — breaks under MySQL only_full_group_by.');
+        }
+    }
+
     public function test_rejects_unauthenticated_request(): void
     {
         $response = $this->postJson('/monitor/handler', ['action' => 'getMonitorQueue', 'group' => 'unclassified']);

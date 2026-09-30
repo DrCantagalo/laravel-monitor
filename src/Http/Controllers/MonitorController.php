@@ -2487,7 +2487,7 @@ class MonitorController extends Controller
                 ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('ml.monitor_id', $excludedIds))
                 ->groupBy('ml.monitor_id')
                 ->havingRaw('SUM(mph.hits) >= ?', [$minHits])
-                ->get()
+                ->pluck('ml.monitor_id')
                 ->count();
 
             return ['unclassified' => $unclassified, 'recheck' => $recheck];

@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.53.1] - 2026-09-30
+### Fixed
+- **`getMonitorQueueCounts` returned HTTP 500 on MySQL** with
+  `sql_mode=only_full_group_by` (the default in most managed MySQL
+  setups). The `recheck` count ran `->get()->count()` on a query grouped
+  by `ml.monitor_id`, which selects every column of `monitor_labels` —
+  MySQL rejects this because those columns are neither grouped nor
+  aggregated (error 1055). SQLite, used by the package's own test suite,
+  doesn't enforce this rule, so the regression shipped in `0.53.0`
+  unnoticed. Fixed by selecting only the grouped column
+  (`->pluck('ml.monitor_id')->count()`), the same pattern already used by
+  the sibling query in `buildMonitorQueueResult()`.
+
 ## [0.53.0] - 2026-09-30
 ### ⚠️ Breaking — IP classification moved from IP to Monitor
 - **Bot/human classification + tags + note now belong to the `Monitor`
