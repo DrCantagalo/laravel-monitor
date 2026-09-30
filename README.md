@@ -448,10 +448,12 @@ application's backend — only a short-lived, read-only token does.
   for read-only actions (`getData`, `getPages`, `getVisitorsByIp`,
   `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
   `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`,
-  `getIpTags`, `getTableStats`, `getAccessLog`
+  `getIpTags`, `getTableStats`, `getAccessLog`, `getMonitorQueue`,
+  `getMonitorQueueCounts`, `getConfig`
   — `getIpMonitors`/`getMonitorVisits` since `0.46.0`, `getUserMonitors`
   since `0.48.0`, `getIpTags` since `0.49.0`, `getTableStats` since
-  `0.50.0`, `getAccessLog` since `0.51.0`)**.
+  `0.50.0`, `getAccessLog` since `0.51.0`, `getMonitorQueue`/
+  `getMonitorQueueCounts` since `0.53.0`, `getConfig` since `0.54.0`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -1686,6 +1688,119 @@ Cached the same way as `getVisitorsByIp`/`getBlockedIps` (`Cache::remember`
 `config('monitor.listings_cache_ttl_minutes')`, default 5 minutes) —
 `clearData` and `pruneData` (see below) both invalidate it, so the numbers
 never stay stale longer than one cleanup call.
+
+## Effective config (`getConfig`, since `0.54.0`)
+
+Read-only, no-pagination snapshot of the client's current effective
+`config/monitor.php`, for the dashboard's "Data" tab. Meant to answer
+"what is this installation's config actually set to right now, and is it
+up to date" without shell/database access to the client's server.
+
+**Read-only by design**: this package does not have, and will never have,
+an action that writes config on the client's server. `getConfig` only
+ever reads.
+
+Same auth as `getData`/`getTableStats` (permanent `local_token` **or**
+the ephemeral read token from `issueReadToken`), and cached the same way
+as `getVisitorsByIp`/`getBlockedIps`/`getTableStats` (`Cache::remember`,
+TTL `config('monitor.listings_cache_ttl_minutes')`, default 5 minutes,
+same shared `monitor:listings:version` counter — bumped by the same
+mutations as `getTableStats`).
+
+```json
+{
+  "success": true,
+  "meta": {
+    "package_version": "0.54.0",
+    "config_version": "0.53.0",
+    "version_diverged": true,
+    "config_published": true,
+    "config_cached": false
+  },
+  "config": {
+    "visits_retention_days": {
+      "value": 0, "default": 0, "customized": false,
+      "missing_from_file": false, "env": null
+    },
+    "ignore_ips": {
+      "value": "2 IPs", "default": "0 IPs", "customized": true,
+      "missing_from_file": true, "env": "MONITOR_IGNORE_IPS"
+    }
+  }
+}
+```
+
+- **`meta.package_version`**: same value as `getData`'s `package_version`
+  (the version actually installed, via Composer's `InstalledVersions`).
+- **`meta.config_version`**: same value as `getData`'s `config_version`
+  (`config('monitor.version')`, frozen at whatever `monitor:install`/
+  `monitor:update` last wrote into the client's published
+  `config/monitor.php`).
+- **`meta.version_diverged`**: `true` when both of the above are known
+  and don't match — Composer was updated but `monitor:update` wasn't run
+  afterward (config, and possibly migrations, may be pending).
+- **`meta.config_published`**: whether `config/monitor.php` is published
+  at all in this project (`vendor:publish --tag=monitor-config` /
+  `monitor:install` ran at some point). When `false`, every key below is
+  `missing_from_file: true` — the client is 100% on package defaults.
+- **`meta.config_cached`**: `app()->configurationIsCached()` — whether
+  the host app is currently running with `php artisan config:cache`.
+
+**`config`**: one entry per key in a **fixed whitelist** the package
+ships (never the full `config('monitor')` array — a key only appears
+here if deliberately added to this list in a package release):
+
+- Retention/prune: `visits_retention_days`, `access_log_retention_days`,
+  `data_prune_interval_hours`, `data_prune_max_rows_per_run`,
+  `blocked_ips_cleanup_interval_hours`.
+- Scraper detection: `scraper_frequency_window_seconds`,
+  `scraper_frequency_threshold`, `scraper_signal_threshold`,
+  `scraper_cumulative_visits_threshold`, `scraper_known_bot_user_agents`
+  (masked — see below).
+- Auto-block: `auto_block_signal_threshold`,
+  `auto_block_strike_decay_cooldown_days`,
+  `auto_block_permanent_after_lifetime_offenses`.
+- AI triage: `ai_recheck_min_new_hits`.
+- Cache: `listings_cache_ttl_minutes`, `pages_cache_ttl_minutes`,
+  `data_totals_cache_ttl_seconds`, `block_results_cache_ttl_seconds`,
+  `blocked_ip_cache_ttl`.
+- Tracking: `track_visits`, `track_authenticated_user`,
+  `visit_max_paths`, `denylist_format`, `denylist_export_interval_hours`,
+  `ignore_ips` (masked), `denylist_path` (masked).
+
+Identity/infra keys (`dashboard_origin`, `remember_cookie`,
+`remember_cookie_days`, `skip_session_key`, `local_token`,
+`read_token_ttl_minutes`, `dashboard.enabled`, `version`) are
+**deliberately never included** — `getConfig` is about behavior, not
+about how to reach or authenticate against this installation.
+
+Each entry has:
+
+- **`value`**: the effective value, via `config('monitor.<key>')`
+  (already merged with the package's own default for any key missing
+  from the published file).
+- **`default`**: the package's own default, read straight from its own
+  `src/config/monitor.php` (never from `config()`, which would already
+  be merged).
+- **`customized`**: `true` when `value` differs from `default`.
+- **`missing_from_file`**: `true` when the key is absent from the
+  client's *published* `config/monitor.php` file (not just from
+  `config()`, which already merges package defaults in for missing
+  keys) — meaning the client is silently on the package default for
+  that key, and a `monitor:update` is likely pending to persist it.
+- **`env`**: the name of the `.env` variable the key reads from, or
+  `null` when the key isn't backed by one.
+
+**Masking** — two keys never expose their raw value, only a
+package/client-safe summary, regardless of `customized`/comparisons
+still being computed on the real underlying value:
+
+- **`ignore_ips`**: `value`/`default` are a string like `"2 IPs"` — the
+  actual IP/CIDR list is never returned.
+- **`denylist_path`**: `value`/`default` are just the filename
+  (`basename()`), never the absolute path on the client's server.
+- **`scraper_known_bot_user_agents`**: `value`/`default` are the *count*
+  of substrings in the list, never the list itself.
 
 ## Access log (`monitor_access_logs`, since `0.51.0`)
 

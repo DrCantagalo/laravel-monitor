@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.54.0] - 2026-09-30
+### Added
+- **New read-only action `getConfig`**, for the dashboard's "Data" tab to
+  show the client's current effective `config/monitor.php`. Same auth as
+  `getData`/`getTableStats` (permanent `local_token` or the ephemeral
+  read token from `issueReadToken`) and cached the same way as
+  `getVisitorsByIp`/`getBlockedIps`/`getTableStats`. This package does
+  not have, and will never have, an action that *writes* config on the
+  client's server — `getConfig` only ever reads.
+  - Restricted to a **fixed whitelist** of behaviorally-relevant keys
+    (never the full `config('monitor')` array): retention/prune,
+    scraper detection, auto-block, AI triage, cache TTLs, and tracking
+    settings. Identity/infra keys (`dashboard_origin`, cookie names,
+    `skip_session_key`, `local_token`, `read_token_ttl_minutes`,
+    `dashboard.enabled`) are deliberately excluded.
+  - Two keys are masked instead of returned raw: `ignore_ips` (only a
+    count, e.g. `"2 IPs"`) and `denylist_path` (only the filename, via
+    `basename()`) — neither the IP list nor the absolute server path is
+    ever exposed. `scraper_known_bot_user_agents` is reduced to a count
+    too.
+  - Each key reports `value` (effective, via `config()`), `default`
+    (the package's own default, read straight from its own
+    `src/config/monitor.php`), `customized` (`value` differs from
+    `default`), `missing_from_file` (the key is absent from the
+    client's *published* `config/monitor.php` — a `monitor:update` is
+    likely pending), and `env` (the `.env` variable name the key reads
+    from, if any).
+  - `meta` reports `package_version` / `config_version` (same values as
+    `getData`'s fields of the same name) plus a `version_diverged` flag,
+    and `config_cached` (`app()->configurationIsCached()`).
+  - See README, "Effective config (`getConfig`)".
+
 ## [0.53.1] - 2026-09-30
 ### Fixed
 - **`getMonitorQueueCounts` returned HTTP 500 on MySQL** with

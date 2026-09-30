@@ -24,6 +24,7 @@ use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -42,7 +43,7 @@ class MonitorController extends Controller
     protected const ACCESS_LOGGED_ACTIONS = [
         'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
         'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts',
+        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig',
     ];
 
     /**
@@ -68,12 +69,12 @@ class MonitorController extends Controller
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
         // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits,
         // getIpTags, getTableStats, getAccessLog, getMonitorQueue,
-        // getMonitorQueueCounts — getIpMonitors/getMonitorVisits desde a
-        // laravel-monitor 152/v0.46.0, getUserMonitors desde a 237/v0.48.0
-        // (substituindo getUserVisits), getIpTags desde a 239/v0.49.0,
-        // getTableStats desde a 242/v0.50.0, getAccessLog desde a
-        // 249/v0.51.0, getMonitorQueue/getMonitorQueueCounts desde a
-        // 258/v0.53.0 — nunca pra
+        // getMonitorQueueCounts, getConfig — getIpMonitors/getMonitorVisits
+        // desde a laravel-monitor 152/v0.46.0, getUserMonitors desde a
+        // 237/v0.48.0 (substituindo getUserVisits), getIpTags desde a
+        // 239/v0.49.0, getTableStats desde a 242/v0.50.0, getAccessLog
+        // desde a 249/v0.51.0, getMonitorQueue/getMonitorQueueCounts desde
+        // a 258/v0.53.0, getConfig desde a 262/v0.54.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
         // setIpLabels/setIpTags/setMonitorKind/setMonitorTags (estas duas
         // desde a 258/v0.53.0, substituindo `spreadIpLabel` removida nesta
@@ -81,7 +82,7 @@ class MonitorController extends Controller
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-            'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts',
+            'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -154,6 +155,9 @@ class MonitorController extends Controller
 
             case 'getTableStats':
                 return $this->getTableStats($request);
+
+            case 'getConfig':
+                return $this->getConfig($request);
 
             case 'getAccessLog':
                 return $this->getAccessLog($request);
@@ -1873,6 +1877,194 @@ class MonitorController extends Controller
                 'size_bytes' => $hasSizeBytes ? $totalSizeBytes : null,
             ],
         ];
+    }
+
+    /**
+     * laravel-monitor 262 (v0.54.0): whitelist FIXA (nunca
+     * `config('monitor')` inteiro) das chaves de `config/monitor.php` que
+     * têm valor comportamental de fato pro dashboard entender o estado do
+     * cliente — nunca inclui nada de identidade/infra (`dashboard_origin`,
+     * `remember_cookie`/`remember_cookie_days`, `skip_session_key`,
+     * `local_token`, `read_token_ttl_minutes`, `dashboard.enabled`), que
+     * ficam de fora de propósito. Valor: nome do env var que a chave lê
+     * (via `env()` em `src/config/monitor.php`), ou `null` quando a chave
+     * não tem uma. `ignore_ips`/`denylist_path` entram aqui MASCARADOS
+     * (ver `maskConfigValue()`) — nunca a lista de IPs nem o path absoluto
+     * do servidor cliente.
+     */
+    protected const CONFIG_WHITELIST = [
+        // Retenção/prune
+        'visits_retention_days' => null,
+        'access_log_retention_days' => null,
+        'data_prune_interval_hours' => null,
+        'data_prune_max_rows_per_run' => null,
+        'blocked_ips_cleanup_interval_hours' => null,
+
+        // Detecção de scraper
+        'scraper_frequency_window_seconds' => null,
+        'scraper_frequency_threshold' => null,
+        'scraper_signal_threshold' => null,
+        'scraper_cumulative_visits_threshold' => null,
+        // Mascarada: só a contagem (ver maskConfigValue()), nunca a lista.
+        'scraper_known_bot_user_agents' => null,
+
+        // Bloqueio automático
+        'auto_block_signal_threshold' => null,
+        'auto_block_strike_decay_cooldown_days' => null,
+        'auto_block_permanent_after_lifetime_offenses' => null,
+
+        // Triagem por IA
+        'ai_recheck_min_new_hits' => null,
+
+        // Cache
+        'listings_cache_ttl_minutes' => null,
+        'pages_cache_ttl_minutes' => null,
+        'data_totals_cache_ttl_seconds' => null,
+        'block_results_cache_ttl_seconds' => null,
+        'blocked_ip_cache_ttl' => null,
+
+        // Tracking
+        'track_visits' => null,
+        'track_authenticated_user' => null,
+        'visit_max_paths' => null,
+        'denylist_format' => null,
+        'denylist_export_interval_hours' => null,
+        // Mascarada: só "N IPs" (ver maskConfigValue()), nunca a lista.
+        'ignore_ips' => 'MONITOR_IGNORE_IPS',
+        // Mascarada: só o basename (ver maskConfigValue()), nunca o path
+        // absoluto do servidor do cliente.
+        'denylist_path' => null,
+    ];
+
+    /**
+     * laravel-monitor 262 (v0.54.0): config efetiva do cliente, pra aba
+     * "Data" do dashboard — **só-leitura**: este pacote nunca expõe (nem
+     * vai expor) uma action que ESCREVA config no servidor do cliente.
+     * Mesma auth/cache de `getTableStats` (local_token permanente OU
+     * token de leitura efêmero; `Cache::remember` com o mesmo TTL curto
+     * `listings_cache_ttl_minutes`, mesmo contador versionado
+     * `monitor:listings:version` de getVisitorsByIp/getBlockedIps/
+     * getTableStats).
+     */
+    protected function getConfig(Request $request)
+    {
+        $cacheKey = $this->listingsCacheKey('config', []);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () {
+            return $this->buildConfigResult();
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * `$template`: os defaults do PRÓPRIO pacote, lidos direto de
+     * `src/config/monitor.php` (nunca de `config('monitor.*')`, que já
+     * vem mesclado com a config publicada do cliente via
+     * `mergeConfigFrom()` — ver `MonitorServiceProvider::register()`) —
+     * mesma técnica de `MonitorUpdateCommand::handle()`.
+     *
+     * `$publishedKeys`: as chaves que EXISTEM DE FATO no
+     * `config/monitor.php` publicado no projeto do cliente
+     * (`config_path('monitor.php')`) — usado só pra `missing_from_file`
+     * abaixo. Se o arquivo nunca foi publicado (`vendor:publish
+     * --tag=monitor-config`/`monitor:install` nunca rodou), a lista fica
+     * vazia e TODA chave é reportada como `missing_from_file: true` — o
+     * que é o comportamento correto: sem o arquivo publicado, o cliente
+     * está 100% nos defaults do pacote, e um `monitor:update` não tem o
+     * que atualizar por não existir alvo (precisa de `vendor:publish`
+     * primeiro).
+     */
+    protected function buildConfigResult(): array
+    {
+        $templatePath = __DIR__.'/../../config/monitor.php';
+        $template = require $templatePath;
+
+        $publishedPath = config_path('monitor.php');
+        $configPublished = File::exists($publishedPath);
+        $publishedKeys = $configPublished ? array_keys(require $publishedPath) : [];
+
+        $entries = [];
+
+        foreach (self::CONFIG_WHITELIST as $key => $env) {
+            $rawValue = config("monitor.{$key}");
+            $rawDefault = $template[$key] ?? null;
+
+            [$displayValue, $displayDefault] = $this->maskConfigValue($key, $rawValue, $rawDefault);
+
+            $entries[$key] = [
+                'value' => $displayValue,
+                'default' => $displayDefault,
+                'customized' => $rawValue !== $rawDefault,
+                'missing_from_file' => ! in_array($key, $publishedKeys, true),
+                'env' => $env,
+            ];
+        }
+
+        // laravel-monitor 152/230 (v0.46.0/0.47.0): mesma distinção já
+        // usada em getData — `package_version` (InstalledVersions, o que
+        // o Composer de fato instalou) vs `config_version`
+        // (`config('monitor.version')`, congelada no que `monitor:install`/
+        // `monitor:update` escreveu da última vez na config publicada).
+        // As duas divergirem é o sinal de "Composer atualizado, mas
+        // `monitor:update` ainda não rodou" — `version_diverged` expõe
+        // isso como um bool pronto pro dashboard, sem ele precisar
+        // comparar strings de versão sozinho.
+        $packageVersion = $this->packageVersion();
+        $configVersion = config('monitor.version');
+
+        return [
+            'meta' => [
+                'package_version' => $packageVersion,
+                'config_version' => $configVersion,
+                'version_diverged' => $packageVersion !== null
+                    && $configVersion !== null
+                    && $packageVersion !== $configVersion,
+                'config_published' => $configPublished,
+                'config_cached' => app()->configurationIsCached(),
+            ],
+            'config' => $entries,
+        ];
+    }
+
+    /**
+     * Mascaramento de valores sensíveis (item 3 da task 262) — nunca a
+     * lista crua de IPs de `ignore_ips`, nunca o path absoluto do
+     * `denylist_path` do servidor do cliente. `$value`/`$default` aqui já
+     * são os valores CRUS (config efetiva / default do template); a
+     * comparação de `customized` em `buildConfigResult()` roda ANTES
+     * desta máscara, sobre os crus — duas listas com a mesma contagem mas
+     * itens diferentes (ex: `ignore_ips`) continuam corretamente
+     * reportadas como customizadas mesmo com o mesmo "N IPs" mascarado
+     * nos dois lados.
+     *
+     * @return array{0: mixed, 1: mixed} [$displayValue, $displayDefault]
+     */
+    protected function maskConfigValue(string $key, $value, $default): array
+    {
+        if ($key === 'ignore_ips') {
+            return [
+                sprintf('%d IPs', is_array($value) ? count($value) : 0),
+                sprintf('%d IPs', is_array($default) ? count($default) : 0),
+            ];
+        }
+
+        if ($key === 'scraper_known_bot_user_agents') {
+            return [
+                is_array($value) ? count($value) : 0,
+                is_array($default) ? count($default) : 0,
+            ];
+        }
+
+        if ($key === 'denylist_path') {
+            return [
+                is_string($value) && $value !== '' ? basename($value) : null,
+                is_string($default) && $default !== '' ? basename($default) : null,
+            ];
+        }
+
+        return [$value, $default];
     }
 
     /**
