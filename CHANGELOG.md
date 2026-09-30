@@ -4,6 +4,77 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.53.0] - 2026-09-30
+### ⚠️ Breaking — IP classification moved from IP to Monitor
+- **Bot/human classification + tags + note now belong to the `Monitor`
+  (visitor), not the IP.** New table `monitor_labels` (one row per
+  `Monitor`, FK `monitor_id` `cascadeOnDelete`) replaces
+  `monitor_ip_labels` (one row per `ip`), dropped by the upgrade
+  migration. Reason: an IP is not the visitor (CGNAT, IP reassignment,
+  residential proxies) — the classification is a conclusion drawn from a
+  *visitor's* data (user agent, hits, distinct paths, time window), so
+  without that visitor's `Monitor` row there should be nothing left to
+  classify. Before this version, a `source=manual` label survived an IP
+  that was never seen again, forever; now it's deleted the moment its
+  `Monitor` is, by `clearData`, `pruneData`, or the automatic prune —
+  `cascadeOnDelete` handles this for free, no extra code in any of the
+  three.
+- **Upgrade migration**: every `monitor_ip_labels` row is copied to every
+  `Monitor` ever seen from that `ip` (via `monitor_visit_ips`). A
+  `Monitor` that would inherit conflicting labels from more than one IP
+  resolves by `source=manual` always winning over any other source, then
+  by the most recent `classified_at` between two candidates of the same
+  protection tier. A `monitor_ip_labels` row whose IP was never seen by
+  any `Monitor` is discarded. Run `php artisan migrate --force` — see
+  README "Upgrading to `0.53.0`" for the full mechanics.
+- **The IP-level view is now DERIVED, never stored**: `getVisitorsByIp`,
+  `getBlockedIps`, and the `clean_bots`/`clean_humans`/
+  `clean_unclassified` filters compute `kind` on the fly from every
+  `Monitor` seen at that IP (`bot`/`human` only if they all agree,
+  `mixed` if they don't, `null` if none is classified) and `tags` as
+  their normalized union. `note`/`source`/`classified_at` are **removed**
+  from `getVisitorsByIp`/`getBlockedIps` responses (no single value makes
+  sense aggregated by IP); a new `counts` object (`{"human", "bot",
+  "unclassified"}`) is added instead.
+- **`getIpMonitors`/`getUserMonitors`/`getMonitorQueue` (`hydrateMonitorRows`)**:
+  `ips` reverts to a plain list of IP strings (was an object per IP with
+  its own classification since `0.49.0`) — the classification moved up to
+  sit directly on the row itself (`kind`/`tags`/`note`/`source`/
+  `classified_at`, one Monitor = one classification).
+- **`setIpKind`/`setIpLabels`/`setIpTags`** now write to every `Monitor`
+  ever seen from each IP, not to the IP itself. The `source=ai` vs.
+  `source=manual` protection is evaluated **per `Monitor`**, so a single
+  IP with several Monitors can have some applied and some ignored in the
+  same call. `setIpKind`/`setIpTags` responses are now granular by
+  Monitor: `{"applied": [{"ip", "monitor_id"}], "ignored": [{"ip",
+  "monitor_id", "reason"}]}` (was a flat list of IPs). `setIpLabels`
+  response gains `monitors_updated` (count).
+- **New write actions `setMonitorKind`/`setMonitorTags`**: classify or tag
+  a single `Monitor` directly by `monitor_id` — the Monitor detail view's
+  classification control. Always `source=manual`, no `source` param (the
+  AI flow only ever writes in bulk via `setIpKind`/`setIpTags`).
+- **Removed: `spreadIpLabel` action and `ip_spread_max_targets` config**
+  (both added in `0.52.0`). Writing a `kind` to an IP already reaches
+  every `Monitor` at that IP directly now (`setIpKind`), so the
+  neighbor-propagation trick `spreadIpLabel` existed for no longer
+  applies; `source=spread` is gone along with it.
+- **`clean_ai_queue` filter of `getVisitorsByIp` removed**, replaced by
+  two new read actions, **`getMonitorQueue`** (`group=unclassified` or
+  `group=recheck`, paginated) and **`getMonitorQueueCounts`** (unpaginated
+  counts for both groups) — the AI triage queue is now a queue of
+  **Monitors**, not IPs, since the classification moved to the `Monitor`.
+  `recheck` uses a new config, **`ai_recheck_min_new_hits`** (default
+  `20`): a `source=ai` Monitor qualifies once it accumulates at least that
+  many hits on paths whose `monitor_page_hits.created_at` is after its
+  `classified_at`. Each `recheck` row also carries a `recheck_summary`
+  (`{"before", "after"}`, each with `hits`/`distinct_paths`/`first_seen`/
+  `last_seen`) — the input the AI re-analysis agent uses to decide
+  whether to keep or change a label. See README "IP classification" for
+  the exclusion rule (flagged/blocked IPs never enter either group) and
+  the full response shapes.
+- **`getTableStats`**: `monitor_ip_labels` renamed to `monitor_labels` in
+  `STATS_TABLES`.
+
 ## [0.52.0] - 2026-09-28
 ### Added
 - **`getTableStats` now includes `monitor_access_logs`**: the

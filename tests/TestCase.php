@@ -30,6 +30,14 @@ abstract class TestCase extends BaseTestCase
             'driver' => 'sqlite',
             'database' => ':memory:',
             'prefix' => '',
+            // laravel-monitor 258 (v0.53.0): sem isso o SQLite de teste
+            // não força FOREIGN KEY (PRAGMA foreign_keys), então um
+            // `cascadeOnDelete()` (monitor_page_hits/monitor_visit_ips/
+            // monitor_visits/monitor_labels, todos com FK pra `monitors`)
+            // nunca dispara aqui mesmo estando correto — produção real
+            // (MySQL) sempre enforça, então sem isto os testes davam falso
+            // positivo pra qualquer cenário que dependesse do cascade.
+            'foreign_key_constraints' => true,
         ]);
     }
 

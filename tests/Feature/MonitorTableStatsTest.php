@@ -4,7 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorAccessLog;
-use Drcantagalo\LaravelMonitor\Models\MonitorIpLabel;
+use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -29,9 +29,9 @@ class MonitorTableStatsTest extends TestCase
 
     public function test_returns_one_entry_per_package_table_with_correct_row_counts(): void
     {
+        $monitor = Monitor::create(['data' => []]);
         Monitor::create(['data' => []]);
-        Monitor::create(['data' => []]);
-        MonitorIpLabel::create(['ip' => '1.1.1.1', 'tags' => ['amazon']]);
+        MonitorLabel::create(['monitor_id' => $monitor->id, 'tags' => ['amazon']]);
 
         $response = $this->callHandler(['action' => 'getTableStats']);
 
@@ -41,7 +41,7 @@ class MonitorTableStatsTest extends TestCase
         $rows = collect($response->json('data'))->keyBy('table');
 
         $this->assertSame(2, $rows['monitors']['rows']);
-        $this->assertSame(1, $rows['monitor_ip_labels']['rows']);
+        $this->assertSame(1, $rows['monitor_labels']['rows']);
         $this->assertSame(0, $rows['monitor_visits']['rows']);
         // getTableStats está em ACCESS_LOGGED_ACTIONS (desde a 242/v0.50.0)
         // — a própria chamada com local_token grava 1 linha
@@ -55,14 +55,15 @@ class MonitorTableStatsTest extends TestCase
         // monitor_blocked_paths/monitor_path_reviews — fundidas em
         // monitor_paths). monitor_access_logs desde a laravel-monitor 257
         // (v0.52.0) — só entra aqui pra transparência de volume, nunca em
-        // clearData/pruneData (ver MonitorAccessLogTest).
+        // clearData/pruneData (ver MonitorAccessLogTest). monitor_labels
+        // (renomeada de monitor_ip_labels) desde a 258 (v0.53.0).
         $this->assertEqualsCanonicalizing([
             'monitors', 'monitor_visits', 'monitor_visit_ips', 'monitor_page_hits',
             'monitor_ip_stats', 'monitor_blocked_ips', 'monitor_paths',
-            'monitor_block_results', 'monitor_ip_labels', 'monitor_access_logs',
+            'monitor_block_results', 'monitor_labels', 'monitor_access_logs',
         ], $rows->keys()->all());
 
-        // 2 monitors + 1 monitor_ip_labels + 1 monitor_access_logs (a
+        // 2 monitors + 1 monitor_labels + 1 monitor_access_logs (a
         // própria chamada, ver acima) = 4.
         $this->assertSame(4, $response->json('total.rows'));
     }
@@ -109,14 +110,14 @@ class MonitorTableStatsTest extends TestCase
 
     public function test_a_package_table_that_has_not_migrated_yet_is_skipped_gracefully(): void
     {
-        Schema::drop('monitor_ip_labels');
+        Schema::drop('monitor_labels');
 
         $response = $this->callHandler(['action' => 'getTableStats']);
 
         $response->assertOk();
 
         $tables = collect($response->json('data'))->pluck('table')->all();
-        $this->assertNotContains('monitor_ip_labels', $tables);
+        $this->assertNotContains('monitor_labels', $tables);
         $this->assertCount(9, $tables);
     }
 

@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Casts\AsArrayObject;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -107,6 +108,15 @@ class Monitor extends Model
     public function visits(): HasMany
     {
         return $this->hasMany(MonitorVisit::class);
+    }
+
+    /**
+     * laravel-monitor 258 (v0.53.0): classificação bot/human + tags + note
+     * agora pertence ao Monitor, não ao IP — ver Models/MonitorLabel.php.
+     */
+    public function label(): HasOne
+    {
+        return $this->hasOne(MonitorLabel::class);
     }
 
     /**
