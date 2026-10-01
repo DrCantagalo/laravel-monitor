@@ -1638,11 +1638,11 @@ class MonitorController extends Controller
     }
 
     /**
-     * Suporte de `getIpMonitors` e `getUserMonitors` (renomeado de
-     * `hydrateIpMonitorRows` na laravel-monitor 237/v0.48.0 quando a
-     * segunda passou a reaproveitar este método): dado o lote de `Monitor`
-     * já paginado, resolve `ips`/`visits_count` de cada um com uma query
-     * agregada por página (não uma por linha).
+     * Suporte de `getIpMonitors`, `getUserMonitors` e `getMonitorQueue`
+     * (renomeado de `hydrateIpMonitorRows` na laravel-monitor 237/v0.48.0
+     * quando a segunda passou a reaproveitar este método): dado o lote de
+     * `Monitor` já paginado, resolve `ips`/`visits_count`/nome/e-mail de
+     * cada um com queries agregadas por página (nunca uma por linha).
      *
      * @param  array<int, Monitor>  $monitors
      * @return array<int, array<string, mixed>>
@@ -1681,7 +1681,15 @@ class MonitorController extends Controller
                 $visitsCounts[$row->monitor_id] = (int) $row->visits_count;
             });
 
-        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts, $labels) {
+        // laravel-monitor 272 (v0.57.0): name/email expostos aqui passam a
+        // ser os resolvidos por user_id (resolveUserContacts(), mesma
+        // regra de getUsers), não mais o data.name/data.email cru do
+        // PRÓPRIO Monitor — um Monitor sem user_id continua sem contato
+        // resolvido (fica com o que já estava em `data`, tipicamente nada).
+        $userIds = array_map(fn (Monitor $monitor) => $monitor->data['user_id'] ?? null, $monitors);
+        $contacts = $this->resolveUserContacts($userIds);
+
+        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts, $labels, $contacts) {
             $row = $monitor->toArray();
             $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
             $row['ips'] = $ipsByMonitor[$monitor->id] ?? [];
@@ -1696,6 +1704,13 @@ class MonitorController extends Controller
             $row['note'] = $label?->note;
             $row['source'] = $label?->source;
             $row['classified_at'] = optional($label?->classified_at)->toIso8601String();
+
+            $userId = $monitor->data['user_id'] ?? null;
+            if ($userId !== null && $userId !== '') {
+                $contact = $contacts[(string) $userId] ?? ['name' => null, 'email' => null];
+                $row['data']['name'] = $contact['name'];
+                $row['data']['email'] = $contact['email'];
+            }
 
             return $row;
         }, $monitors);
@@ -2789,11 +2804,10 @@ class MonitorController extends Controller
      *
      * `name`/`email`: como não existe coluna própria pra isso (só
      * aparecem dentro do blob `data` quando o app hospedeiro chamou
-     * `Monitor::tag(['name' => .., 'email' => ..])`), são resolvidos com
-     * uma consulta extra por usuário da página atual (no máximo
-     * `per_page` linhas), pegando a linha mais recente
-     * (`forUserId($id)->orderByDesc('updated_at')->first()`) — nunca um
-     * lookup contra nenhuma tabela `users`.
+     * `Monitor::tag(['name' => .., 'email' => ..])`), são resolvidos em
+     * lote por `resolveUserContacts()` (laravel-monitor 272/v0.57.0) —
+     * uma query por campo pra todos os `user_id` da página atual (nunca
+     * um lookup contra nenhuma tabela `users`, nunca N+1).
      */
     protected function getUsers(Request $request)
     {
@@ -2824,19 +2838,10 @@ class MonitorController extends Controller
             ->orderByDesc('last_activity')
             ->paginate($perPage, ['*'], 'page', $page);
 
-        $items = collect($paginator->items())->map(function ($row) {
-            // orderByDesc('updated_at') sozinho empata quando 2+ linhas do
-            // mesmo usuário são gravadas dentro do mesmo segundo (comum em
-            // testes, e possível em produção sob concorrência) - sem um
-            // desempate determinístico, o SGBD podia devolver a linha mais
-            // ANTIGA das empatadas, fazendo name/email sumir mesmo com um
-            // Monitor::tag() recente. 'id' cresce com a inserção, então
-            // desempata pela ordem real de criação.
-            $latest = Monitor::forUserId($row->user_id)
-                ->orderByDesc('updated_at')
-                ->orderByDesc('id')
-                ->select('data')
-                ->first();
+        $contacts = $this->resolveUserContacts(collect($paginator->items())->pluck('user_id')->all());
+
+        $items = collect($paginator->items())->map(function ($row) use ($contacts) {
+            $contact = $contacts[(string) $row->user_id] ?? ['name' => null, 'email' => null];
 
             return [
                 'user_id' => $row->user_id,
@@ -2844,8 +2849,8 @@ class MonitorController extends Controller
                 'last_activity' => $row->last_activity
                     ? Carbon::parse($row->last_activity)->toIso8601String()
                     : null,
-                'name' => $latest ? data_get($latest, 'data.name') : null,
-                'email' => $latest ? data_get($latest, 'data.email') : null,
+                'name' => $contact['name'],
+                'email' => $contact['email'],
             ];
         })->values();
 
@@ -2858,6 +2863,94 @@ class MonitorController extends Controller
                 'last_page' => $paginator->lastPage(),
             ],
         ];
+    }
+
+    /**
+     * laravel-monitor 272 (v0.57.0): nome/e-mail estáveis entre Monitors
+     * do mesmo `user_id`. `data.user_id` é gravado em TODA request
+     * autenticada (`SessionVisitorTracker`), mas `data.name`/`data.email`
+     * só via `Monitor::tag()` no evento de login — só no Monitor ativo
+     * naquele instante. Um Monitor usado já logado (sessão herdada,
+     * dispositivo trocado no meio) fica com `user_id` e sem nome — sem
+     * isto, a lista de usuários e as listagens com `user_id`
+     * (`getUserMonitors`/`getIpMonitors`/`getMonitorQueue`, via
+     * `hydrateMonitorRows`) mostravam/escondiam nome/e-mail conforme o
+     * último dispositivo usado, em vez do usuário em si.
+     *
+     * `name` e `email` são resolvidos de forma INDEPENDENTE um do outro
+     * (podem vir de Monitors diferentes do mesmo `user_id`): cada um pega
+     * o campo do Monitor mais recente DAQUELE `user_id` que TEM aquele
+     * campo preenchido — `null` só quando nenhum Monitor do usuário nunca
+     * teve o campo.
+     *
+     * @param  array<int, mixed>  $userIds
+     * @return array<string, array{name: ?string, email: ?string}>
+     */
+    protected function resolveUserContacts(array $userIds): array
+    {
+        $userIds = array_values(array_unique(array_filter(
+            $userIds,
+            fn ($id) => $id !== null && $id !== ''
+        )));
+
+        if (empty($userIds)) {
+            return [];
+        }
+
+        $names = $this->resolveLatestUserField($userIds, 'name');
+        $emails = $this->resolveLatestUserField($userIds, 'email');
+
+        $contacts = [];
+        foreach ($userIds as $id) {
+            $key = (string) $id;
+            $contacts[$key] = [
+                'name' => $names[$key] ?? null,
+                'email' => $emails[$key] ?? null,
+            ];
+        }
+
+        return $contacts;
+    }
+
+    /**
+     * Suporte de `resolveUserContacts()`: UMA query pra todos os
+     * `$userIds`, não uma por usuário — filtra os Monitors daqueles
+     * usuários que têm `data.{$field}` preenchido, ordena do mais
+     * recente pro mais antigo (mesmo desempate `updated_at`/`id` de
+     * antes da 272, necessário porque 2+ linhas do mesmo usuário podem
+     * gravar no mesmo segundo) e, em PHP, fica só com a primeira
+     * ocorrência de cada `user_id` — que é a mais recente, já que a
+     * query veio ordenada.
+     *
+     * @param  array<int, mixed>  $userIds
+     * @return array<string, ?string>
+     */
+    protected function resolveLatestUserField(array $userIds, string $field): array
+    {
+        $resolved = [];
+
+        Monitor::query()
+            ->forUserIds($userIds)
+            ->whereNotNull("data->{$field}")
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->select('data')
+            ->get()
+            ->each(function (Monitor $monitor) use (&$resolved, $field) {
+                $userId = $monitor->data['user_id'] ?? null;
+
+                if ($userId === null || $userId === '') {
+                    return;
+                }
+
+                $key = (string) $userId;
+
+                if (! array_key_exists($key, $resolved)) {
+                    $resolved[$key] = $monitor->data[$field] ?? null;
+                }
+            });
+
+        return $resolved;
     }
 
     /**

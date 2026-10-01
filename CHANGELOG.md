@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.57.0] - 2026-10-01
+### Fixed
+- **Stable `name`/`email` across a user's Monitors.** `data.user_id` is
+  recorded on every authenticated request (`SessionVisitorTracker`), but
+  `data.name`/`data.email` only arrive via `Monitor::tag()` on the
+  consumer's login event — only on the Monitor active at that moment. A
+  Monitor used while already logged in (inherited session, device
+  switched mid-session) kept `user_id` but no name, so the resolved
+  contact flickered depending on which device was used last.
+  `getUsers`, and anywhere a listing exposes `user_id`
+  (`getUserMonitors`/`getIpMonitors`/`getMonitorQueue`, via the shared
+  `hydrateMonitorRows`) now resolve `name` and `email` independently from
+  the most recent Monitor of that `user_id` that actually has each field
+  set, in one batched query per field for the whole page (never N+1, never
+  a per-row lookup). No migration, `Monitor::tag()` unchanged.
+
 ## [0.56.0] - 2026-10-01
 ### ⚠️ Breaking — `getData`: `sessions_total` removed
 - **`sessions_total` is gone from the `getData` response.** Since

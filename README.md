@@ -422,14 +422,30 @@ what did each of them do".
     visits per row just to list a user's devices.
 - **`name`/`email`**: the package never queries a host app's `users`
   table (arbitrary schema, out of scope for a host-agnostic package).
-  Instead, `getUsers` opportunistically reads `data['name']`/
-  `data['email']` off that user's most recently updated `Monitor` row
-  — they only appear when the host app already called
+  They only appear when the host app already called
   `Monitor::tag(['name' => $user->name, 'email' => $user->email])` (see
   "Arbitrary visitor data" above; `name`/`email` are not in
   `PROTECTED_DATA_KEYS`) somewhere in its own request lifecycle, e.g.
   right after login. Without that call, both come back `null` and the
   dashboard falls back to displaying the raw `user_id`.
+  - **Stable across a user's Monitors (since `0.57.0`)**: `tag()` only
+    writes `name`/`email` onto the Monitor row active at that exact
+    moment (the one handling the login request), while `user_id` is
+    stamped onto *every* authenticated request
+    (`SessionVisitorTracker`). A user who switches device/browser, or
+    whose session is inherited without going through login again, gets
+    additional `Monitor` rows with `user_id` but no `name`/`email`. So
+    `getUsers`, and anywhere a listing exposes `user_id`
+    (`getUserMonitors`/`getIpMonitors`/`getMonitorQueue` below, via the
+    shared `hydrateMonitorRows`), resolve `name` and `email`
+    **independently of each other** — each is read off the most
+    recently updated `Monitor` row of that `user_id` that actually has
+    that field set (not necessarily the same row for both, and not
+    necessarily the row being listed). `null` only when no `Monitor` of
+    that user ever had the field. Resolved in `MonitorController::
+    resolveUserContacts()` with one batched query per field for the
+    whole page (`whereIn` over the page's `user_id`s), never a
+    per-row/per-user lookup.
 
 Cached the same way as `getVisitorsByIp`/`getBlockedIps`
 (`Cache::remember`, TTL `config('monitor.listings_cache_ttl_minutes')`,
@@ -1648,6 +1664,11 @@ ephemeral read token from `issueReadToken`).
     `0.53.0`**: the classification moved from the IP to the `Monitor`
     itself, so `ips` reverted to a plain list of strings and these five
     fields moved up to sit directly on the row.
+  - `data.name`/`data.email` (since `0.57.0`): when the row has a
+    `user_id`, these are the **resolved contact for that user**, not
+    this Monitor's own `data.name`/`data.email` — see "Stable across a
+    user's Monitors" under "User listing" above. Rows without a
+    `user_id` keep whatever was already in `data` untouched.
   - Cached the same way as `getVisitorsByIp`/`getBlockedIps` (see below).
 - **`getMonitorVisits`** (since `0.46.0`): given a `monitor_id`
   (`{"success": false, "message": "monitor_id is required"}` /

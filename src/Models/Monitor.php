@@ -153,4 +153,21 @@ class Monitor extends Model
 
         return $query->where('monitors_user_id', (string) $userId);
     }
+
+    /**
+     * laravel-monitor 272 (v0.57.0): mesma ideia de `scopeForUserId`, mas
+     * pra resolver nome/e-mail estáveis em lote (`MonitorController::
+     * resolveUserContacts()`) — um `whereIn` em vez de uma query por
+     * `user_id` da página. Mesmas duas ressalvas do scope singular: MySQL
+     * usa a coluna gerada indexada (valores castados pra string, igual
+     * acima), os demais drivers caem pro `data->user_id` cru sem cast.
+     */
+    public function scopeForUserIds($query, array $userIds)
+    {
+        if ($query->getConnection()->getDriverName() !== 'mysql') {
+            return $query->whereIn('data->user_id', $userIds);
+        }
+
+        return $query->whereIn('monitors_user_id', array_map('strval', $userIds));
+    }
 }
