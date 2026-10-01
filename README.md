@@ -1327,21 +1327,18 @@ makes on purpose (see the intro above).
   replacing the old `clean_ai_queue` filter of `getVisitorsByIp` (removed
   in this same version) — now listing **Monitors**, not IPs, since the
   classification moved to the `Monitor`. Params: `page`/`per_page` (same
-  as `getIpMonitors`), `group` (required, `unclassified` or `recheck`,
-  `422` on anything else).
-  - `unclassified`: Monitors with no `kind` at all (no `monitor_labels`
-    row, or one with `kind` null) — the plain manual/AI triage backlog.
-  - `recheck`: Monitors with `source=ai` that accumulated at least
-    `ai_recheck_min_new_hits` (config, default `20`) hits on paths whose
-    `monitor_page_hits.created_at` is *after* that Monitor's
-    `classified_at` — i.e. new paths that showed up since the last
-    classification, a proxy for "this visitor's behavior changed enough
-    to deserve another look" without reprocessing (and re-billing) every
-    already-classified Monitor on every run. Each row also carries a
-    `recheck_summary` (`{"before": {...}, "after": {...}}`, split the
-    same way, each side with `hits`/`distinct_paths`/`first_seen`/
-    `last_seen`) — the before/after input the AI re-analysis agent uses
-    to decide whether to keep or change the label.
+  as `getIpMonitors`), `group` (required, `new` or `unclassified`, `422`
+  on anything else — including the old `recheck`, removed in `0.55.0`,
+  see below).
+  - Both groups are Monitors with no `kind` at all (no `monitor_labels`
+    row, or one with `kind` null), split only by age: `new` (`created_at`
+    newer than `ai_triage_min_age_hours`, config, default `24` — purely
+    informational, never surfaced for triage) and `unclassified`
+    (`created_at` at or past that threshold — the actual manual/AI
+    triage backlog).
+  - **Breaking in `0.55.0`**: replaces the old `recheck` group (Monitors
+    with `source=ai` that accumulated new activity since
+    `classified_at`) — see "Upgrading to `0.55.0`" below for why.
   - Both groups exclude Monitors seen at an IP that's currently
     `flagged` (`monitor_ip_stats.flagged`) or actively blocked
     (`BlockedIp::active()`) — those already have their own work queue
@@ -1350,12 +1347,11 @@ makes on purpose (see the intro above).
   - Response shape is the same enxuto shape as `getIpMonitors`/
     `getUserMonitors` (via the shared `hydrateMonitorRows`, each row
     already carrying its own `kind`/`tags`/`note`/`source`/
-    `classified_at` — see "User listing" above), plus `recheck_summary`
-    on `group=recheck` rows. Cached the same way as
+    `classified_at` — see "User listing" above). Cached the same way as
     `getVisitorsByIp`/`getBlockedIps` (see "Paginated visitor/blocklist
     listing" below).
 - **`getMonitorQueueCounts`** (since `0.53.0`): `{"success": true,
-  "unclassified": 12, "recheck": 3}` — the same two groups as
+  "new": 7, "unclassified": 12}` — the same two groups as
   `getMonitorQueue`, unpaginated counts only, feeding the triage modal in
   the dashboard.
 
@@ -1380,6 +1376,36 @@ discarded — there's no visitor to inherit it. Run `php artisan migrate
 `ip_spread_max_targets`, is gone too — since writing a `kind` to an IP now
 already reaches every `Monitor` at that IP directly (`setIpKind`), the
 neighbor-propagation trick it existed for no longer applies.
+
+### Upgrading to `0.55.0`
+
+**Breaking**: the `recheck` group of `getMonitorQueue`/
+`getMonitorQueueCounts` is gone, replaced by `new` (a grace period, not a
+re-check). Reasoning: a `Monitor` is a device/browser — it doesn't
+"become" a bot or a human later. `recheck` (`0.53.0`) only existed
+because `unclassified` accepted a brand-new `Monitor` (as little as one
+hit) and the AI would classify it on thin evidence, then `recheck` tried
+to patch that by re-looking at Monitors that kept accumulating activity
+after being classified. The actual fix is not classifying too early in
+the first place, not reclassifying after the fact.
+
+- New config `ai_triage_min_age_hours` (default `24`, replaces
+  `ai_recheck_min_new_hits`): a `Monitor` with no `kind` stays in `new`
+  (informational only, never surfaced for triage) while younger than
+  this many hours, based on `created_at` — **not** last activity, since
+  ongoing activity must not be able to postpone triage forever. A
+  Monitor with only 1-2 hits that never comes back still gets classified
+  once the grace period passes, with whatever evidence it has. Once past
+  it, the Monitor moves to `unclassified`, same as before.
+- `recheck_summary` (the before/after hit breakdown each `recheck` row
+  used to carry) is gone with the group — there's nothing to summarize
+  for a grace-period Monitor.
+- Manual classification (`setMonitorKind`/`setMonitorTags`/`setIpKind`
+  etc.) is **not** affected by the grace period — it has always worked,
+  and keeps working, on any Monitor regardless of age.
+- No migration needed — `new`/`unclassified` are both derived on the fly
+  from `created_at` and the absence of `kind`, nothing is stored. Run
+  `php artisan monitor:update` to publish the new config key.
 
 ## Paginated page listing (`getPages`)
 
@@ -1760,7 +1786,7 @@ here if deliberately added to this list in a package release):
 - Auto-block: `auto_block_signal_threshold`,
   `auto_block_strike_decay_cooldown_days`,
   `auto_block_permanent_after_lifetime_offenses`.
-- AI triage: `ai_recheck_min_new_hits`.
+- AI triage: `ai_triage_min_age_hours`.
 - Cache: `listings_cache_ttl_minutes`, `pages_cache_ttl_minutes`,
   `data_totals_cache_ttl_seconds`, `block_results_cache_ttl_seconds`,
   `blocked_ip_cache_ttl`.

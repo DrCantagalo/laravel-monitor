@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.54.0',
+    'version' => '0.55.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -266,15 +266,18 @@ return [
     // disponível pra limpeza manual, independente deste valor.
     'access_log_retention_days' => 90,
 
-    // laravel-monitor 258 (v0.53.0): limiar de "atividade nova" (soma de
-    // monitor_page_hits.hits em paths cujo created_at é POSTERIOR ao
-    // classified_at do Monitor) que um Monitor com source=ai precisa
-    // acumular pra entrar no grupo `recheck` de getMonitorQueue/
-    // getMonitorQueueCounts (a re-triagem da fila da IA — ver README "IP
-    // classification"). Baixo demais reprocessa (e cobra) o mesmo Monitor
-    // a cada pouca atividade; alto demais deixa um Monitor que mudou de
-    // comportamento sem revisão por muito tempo. 20 é ponto de partida,
-    // não valor final.
-    'ai_recheck_min_new_hits' => 20,
+    // laravel-monitor 266 (v0.55.0): período de carência, em horas, antes
+    // de um Monitor sem `kind` entrar no grupo `unclassified` de
+    // getMonitorQueue/getMonitorQueueCounts — enquanto mais novo que isso
+    // (por `created_at`, não por última atividade), fica no grupo `new`,
+    // só informativo, nunca entra em triagem manual/IA. Substitui
+    // `ai_recheck_min_new_hits` (0.53.0-0.54.0): um Monitor é um
+    // dispositivo/navegador — não "vira" bot/human depois —, então a
+    // correção certa é não classificar cedo (evidência rasa, 1-2 hits),
+    // em vez de reclassificar depois. Baixo demais classifica Monitors
+    // com pouca evidência; alto demais atrasa a triagem de visitantes
+    // reais. 24 é ponto de partida, não valor final. Ver README "IP
+    // classification".
+    'ai_triage_min_age_hours' => 24,
 
 ];

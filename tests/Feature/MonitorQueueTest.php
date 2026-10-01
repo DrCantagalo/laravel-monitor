@@ -11,23 +11,40 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 
 /**
  * laravel-monitor 258 (v0.53.0): novas read actions `getMonitorQueue`
- * (`group=unclassified`|`group=recheck`) e `getMonitorQueueCounts` —
- * substituem o filtro `clean_ai_queue` de `getVisitorsByIp` (removido
- * nesta mesma versão), agora listando Monitors em vez de IPs. Ver README
- * "IP classification".
+ * (`group=unclassified`|`group=new` desde a 266/v0.55.0) e
+ * `getMonitorQueueCounts` — substituem o filtro `clean_ai_queue` de
+ * `getVisitorsByIp` (removido nesta mesma versão), agora listando
+ * Monitors em vez de IPs. Ver README "IP classification".
  */
 class MonitorQueueTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_unclassified_group_lists_monitors_without_any_kind(): void
+    /**
+     * laravel-monitor 266 (v0.55.0): `unclassified` só inclui Monitor sem
+     * `kind` mais velho que `ai_triage_min_age_hours` — um Monitor
+     * recém-criado (como `Monitor::create()` sem `created_at` explícito)
+     * cai em `new`, não em `unclassified`. Helper pra backdatar.
+     * `created_at` não está em `$fillable` (de propósito, pra não deixar
+     * o cliente forjar a idade de um Monitor via `data`), por isso usa
+     * `forceFill()` em vez de passar pelo `create()`.
+     */
+    protected function oldMonitor(): Monitor
     {
-        $unclassified = Monitor::create(['data' => []]);
+        $monitor = Monitor::create(['data' => []]);
+        $monitor->forceFill(['created_at' => now()->subDays(2)])->save();
 
-        $classified = Monitor::create(['data' => []]);
+        return $monitor;
+    }
+
+    public function test_unclassified_group_lists_monitors_without_any_kind_older_than_the_grace_period(): void
+    {
+        $unclassified = $this->oldMonitor();
+
+        $classified = $this->oldMonitor();
         MonitorLabel::create(['monitor_id' => $classified->id, 'kind' => 'bot', 'source' => 'manual']);
 
-        $tagOnly = Monitor::create(['data' => []]);
+        $tagOnly = $this->oldMonitor();
         MonitorLabel::create(['monitor_id' => $tagOnly->id, 'tags' => ['vpn']]);
 
         $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
@@ -43,7 +60,7 @@ class MonitorQueueTest extends TestCase
     {
         IpStat::create(['ip' => '1.1.1.1', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
 
-        $monitor = Monitor::create(['data' => []]);
+        $monitor = $this->oldMonitor();
         $monitor->recordIp('1.1.1.1');
 
         $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
@@ -55,7 +72,7 @@ class MonitorQueueTest extends TestCase
     {
         BlockedIp::create(['ip' => '1.1.1.1']);
 
-        $monitor = Monitor::create(['data' => []]);
+        $monitor = $this->oldMonitor();
         $monitor->recordIp('1.1.1.1');
 
         $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
@@ -63,77 +80,53 @@ class MonitorQueueTest extends TestCase
         $this->assertNotContains($monitor->id, collect($response->json('data'))->pluck('id')->all());
     }
 
-    protected function pageHit(Monitor $monitor, string $path, int $hits, $createdAt): void
+    /**
+     * laravel-monitor 266 (v0.55.0): contraparte do grupo `unclassified`
+     * — Monitor sem `kind` mais novo que o limiar de carência fica em
+     * `new`, nunca em `unclassified`, e nunca entra em triagem.
+     */
+    public function test_new_group_lists_monitors_without_any_kind_within_the_grace_period(): void
     {
-        \Illuminate\Support\Facades\DB::table('monitor_page_hits')->insert([
-            'monitor_id' => $monitor->id,
-            'path' => $path,
-            'hits' => $hits,
-            'not_found' => false,
-            'created_at' => $createdAt,
-            'updated_at' => $createdAt,
-        ]);
-    }
+        $new = Monitor::create(['data' => []]);
 
-    public function test_recheck_group_requires_ai_source_and_enough_new_hits(): void
-    {
-        config(['monitor.ai_recheck_min_new_hits' => 10]);
+        $old = $this->oldMonitor();
 
-        $eligible = Monitor::create(['data' => []]);
-        MonitorLabel::create(['monitor_id' => $eligible->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()->subDay()]);
-        $this->pageHit($eligible, 'new-path', 15, now());
+        $classified = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $classified->id, 'kind' => 'bot', 'source' => 'manual']);
 
-        $notEnoughHits = Monitor::create(['data' => []]);
-        MonitorLabel::create(['monitor_id' => $notEnoughHits->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()->subDay()]);
-        $this->pageHit($notEnoughHits, 'new-path', 3, now());
-
-        $manualMonitor = Monitor::create(['data' => []]);
-        MonitorLabel::create(['monitor_id' => $manualMonitor->id, 'kind' => 'bot', 'source' => 'manual', 'classified_at' => now()->subDay()]);
-        $this->pageHit($manualMonitor, 'new-path', 50, now());
-
-        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'recheck']);
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'new']);
 
         $response->assertOk();
         $ids = collect($response->json('data'))->pluck('id')->all();
-        $this->assertSame([$eligible->id], $ids);
+        $this->assertContains($new->id, $ids);
+        $this->assertNotContains($old->id, $ids);
+        $this->assertNotContains($classified->id, $ids);
     }
 
-    public function test_recheck_ignores_hits_created_before_classified_at(): void
+    public function test_new_group_respects_the_configured_grace_period(): void
     {
-        config(['monitor.ai_recheck_min_new_hits' => 10]);
+        config(['monitor.ai_triage_min_age_hours' => 1]);
 
         $monitor = Monitor::create(['data' => []]);
-        $classifiedAt = now();
-        MonitorLabel::create(['monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => $classifiedAt]);
+        $monitor->forceFill(['created_at' => now()->subHours(2)])->save();
 
-        // Hits antigos, de antes da classificação — não contam pro limiar.
-        $this->pageHit($monitor, 'old-path', 100, $classifiedAt->copy()->subDay());
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'new']);
+        $this->assertNotContains($monitor->id, collect($response->json('data'))->pluck('id')->all());
 
-        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'recheck']);
-
-        $this->assertSame([], collect($response->json('data'))->pluck('id')->all());
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
+        $this->assertContains($monitor->id, collect($response->json('data'))->pluck('id')->all());
     }
 
-    public function test_recheck_summary_splits_hits_before_and_after_classification(): void
+    public function test_new_group_excludes_monitors_seen_from_a_flagged_ip(): void
     {
-        config(['monitor.ai_recheck_min_new_hits' => 5]);
+        IpStat::create(['ip' => '1.1.1.1', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
 
         $monitor = Monitor::create(['data' => []]);
-        $classifiedAt = now();
-        MonitorLabel::create(['monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => $classifiedAt]);
+        $monitor->recordIp('1.1.1.1');
 
-        $this->pageHit($monitor, 'old-path', 4, $classifiedAt->copy()->subDay());
-        $this->pageHit($monitor, 'new-path-1', 3, $classifiedAt->copy()->addHour());
-        $this->pageHit($monitor, 'new-path-2', 4, $classifiedAt->copy()->addHours(2));
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'new']);
 
-        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'recheck']);
-
-        $row = collect($response->json('data'))->firstWhere('id', $monitor->id);
-        $this->assertNotNull($row);
-        $this->assertSame(4, $row['recheck_summary']['before']['hits']);
-        $this->assertSame(1, $row['recheck_summary']['before']['distinct_paths']);
-        $this->assertSame(7, $row['recheck_summary']['after']['hits']);
-        $this->assertSame(2, $row['recheck_summary']['after']['distinct_paths']);
+        $this->assertNotContains($monitor->id, collect($response->json('data'))->pluck('id')->all());
     }
 
     public function test_invalid_group_returns_422(): void
@@ -143,55 +136,43 @@ class MonitorQueueTest extends TestCase
         $response->assertStatus(422);
     }
 
+    /**
+     * laravel-monitor 266 (v0.55.0): `recheck` deixou de existir como
+     * grupo válido — passar `group=recheck` agora é só mais um valor
+     * inválido (422), igual qualquer outro fora de `MONITOR_QUEUE_GROUPS`.
+     */
+    public function test_recheck_group_no_longer_exists(): void
+    {
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'recheck']);
+
+        $response->assertStatus(422);
+    }
+
     public function test_counts_action_returns_both_numbers(): void
     {
+        $this->oldMonitor();
         Monitor::create(['data' => []]);
-
-        config(['monitor.ai_recheck_min_new_hits' => 5]);
-        $recheckMonitor = Monitor::create(['data' => []]);
-        MonitorLabel::create(['monitor_id' => $recheckMonitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()->subDay()]);
-        $this->pageHit($recheckMonitor, 'new-path', 10, now());
 
         $response = $this->callHandler(['action' => 'getMonitorQueueCounts']);
 
         $response->assertOk();
         $response->assertJsonPath('unclassified', 1);
-        $response->assertJsonPath('recheck', 1);
+        $response->assertJsonPath('new', 1);
     }
 
-    /**
-     * laravel-monitor 260 (v0.53.1, hotfix): a query do grupo `recheck`
-     * usava `->get()->count()`, que seleciona `*` (todas as colunas de
-     * `monitor_labels`) numa query com `groupBy('ml.monitor_id')` — MySQL
-     * com `sql_mode=only_full_group_by` recusa (erro 1055), já que nem
-     * toda coluna selecionada está no GROUP BY nem é agregada. SQLite (o
-     * driver dos testes) não aplica essa regra, por isso o bug passou
-     * despercebido; este teste inspeciona o SQL gerado em vez de confiar
-     * no comportamento do driver, pra pegar a regressão em qualquer banco.
-     */
-    public function test_counts_action_recheck_query_only_selects_grouped_column(): void
+    public function test_counts_action_excludes_classified_monitors_from_both_groups(): void
     {
-        config(['monitor.ai_recheck_min_new_hits' => 5]);
-        $recheckMonitor = Monitor::create(['data' => []]);
-        MonitorLabel::create(['monitor_id' => $recheckMonitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()->subDay()]);
-        $this->pageHit($recheckMonitor, 'new-path', 10, now());
+        $classifiedOld = $this->oldMonitor();
+        MonitorLabel::create(['monitor_id' => $classifiedOld->id, 'kind' => 'bot', 'source' => 'manual']);
 
-        $queries = [];
-        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$queries) {
-            $queries[] = $query->sql;
-        });
+        $classifiedNew = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $classifiedNew->id, 'kind' => 'human', 'source' => 'manual']);
 
         $response = $this->callHandler(['action' => 'getMonitorQueueCounts']);
 
         $response->assertOk();
-        $response->assertJsonPath('recheck', 1);
-
-        $groupByQueries = array_filter($queries, fn ($sql) => str_contains($sql, 'group by') && str_contains($sql, 'monitor_labels'));
-        $this->assertNotEmpty($groupByQueries, 'Expected a grouped query against monitor_labels to run.');
-
-        foreach ($groupByQueries as $sql) {
-            $this->assertStringNotContainsString('select *', $sql, 'GROUP BY query must not select *, only the grouped column — breaks under MySQL only_full_group_by.');
-        }
+        $response->assertJsonPath('unclassified', 0);
+        $response->assertJsonPath('new', 0);
     }
 
     public function test_rejects_unauthenticated_request(): void

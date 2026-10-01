@@ -1914,7 +1914,7 @@ class MonitorController extends Controller
         'auto_block_permanent_after_lifetime_offenses' => null,
 
         // Triagem por IA
-        'ai_recheck_min_new_hits' => null,
+        'ai_triage_min_age_hours' => null,
 
         // Cache
         'listings_cache_ttl_minutes' => null,
@@ -2460,13 +2460,14 @@ class MonitorController extends Controller
     }
 
     /**
-     * laravel-monitor 258 (v0.53.0): grupos aceitos por `group` em
-     * `getMonitorQueue` — substituem `clean_ai_queue` (removido nesta
-     * mesma versão), agora por Monitor em vez de por IP, já que a
-     * classificação pertence ao Monitor desde esta versão. Ver README "IP
-     * classification".
+     * laravel-monitor 266 (v0.55.0): `recheck` removido, substituído por
+     * `new` — período de carência (`ai_triage_min_age_hours`) antes de um
+     * Monitor sem `kind` entrar em `unclassified`. Nenhum dos dois grupos
+     * é gravado em banco (sem cron/coluna); ambos são derivados na query,
+     * a partir de `created_at` e da ausência de `kind` — ver
+     * `buildMonitorQueueResult()`. Ver README "IP classification".
      */
-    protected const MONITOR_QUEUE_GROUPS = ['unclassified', 'recheck'];
+    protected const MONITOR_QUEUE_GROUPS = ['new', 'unclassified'];
 
     /**
      * IDs de Monitor que NUNCA entram na fila de triagem IA (nenhum dos
@@ -2498,13 +2499,14 @@ class MonitorController extends Controller
      * triagem IA, substituindo o filtro `clean_ai_queue` de
      * `getVisitorsByIp` (removido nesta versão) — a fila passou de por IP
      * pra por Monitor, já que a classificação agora pertence ao Monitor.
-     * Dois grupos (`group`, obrigatório): `unclassified` (Monitor sem
-     * nenhum `kind` gravado — nem `monitor_labels` row, nem uma com `kind`
-     * null) e `recheck` (Monitor com `source=ai` que acumulou atividade
-     * nova desde `classified_at` — ver `buildMonitorQueueResult()`).
-     * Response no mesmo shape enxuto de `getIpMonitors`/`getUserMonitors`
-     * (via `hydrateMonitorRows`), com `recheck_summary` adicional em cada
-     * linha do grupo `recheck` (ver `attachRecheckSummary()`).
+     * Dois grupos (`group`, obrigatório), ambos Monitor sem nenhum `kind`
+     * gravado (nem `monitor_labels` row, nem uma com `kind` null) —
+     * diferem só pela idade (`created_at` vs. `ai_triage_min_age_hours`,
+     * laravel-monitor 266/v0.55.0): `new` (mais novo que o limiar, só
+     * informativo, nunca entra em triagem) e `unclassified` (mais velho,
+     * o backlog real de triagem manual/IA). Response no mesmo shape
+     * enxuto de `getIpMonitors`/`getUserMonitors` (via
+     * `hydrateMonitorRows`).
      */
     protected function getMonitorQueue(Request $request)
     {
@@ -2532,34 +2534,16 @@ class MonitorController extends Controller
     protected function buildMonitorQueueResult(int $page, int $perPage, string $group): array
     {
         $excludedIds = $this->excludedMonitorIdsForQueue();
+        $cutoff = now()->subHours((int) config('monitor.ai_triage_min_age_hours', 24));
 
-        if ($group === 'unclassified') {
-            $query = Monitor::query()
-                ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds))
-                ->whereDoesntHave('label', fn ($q) => $q->whereNotNull('kind'));
-        } else {
-            $minHits = (int) config('monitor.ai_recheck_min_new_hits', 20);
-
-            // Query única (join + having), não uma soma por Monitor em PHP
-            // — mesmo raciocínio de todas as outras listagens deste
-            // pacote (getPages/getVisitorsByIp/etc) desde as tasks
-            // 103/104: um caminho O(1 query) em vez de O(N).
-            $eligibleIds = DB::table('monitor_labels as ml')
-                ->join('monitor_page_hits as mph', function ($join) {
-                    $join->on('mph.monitor_id', '=', 'ml.monitor_id')
-                        ->whereColumn('mph.created_at', '>', 'ml.classified_at');
-                })
-                ->where('ml.source', 'ai')
-                ->whereNotNull('ml.kind')
-                ->whereNotNull('ml.classified_at')
-                ->groupBy('ml.monitor_id')
-                ->havingRaw('SUM(mph.hits) >= ?', [$minHits])
-                ->pluck('ml.monitor_id');
-
-            $query = Monitor::query()
-                ->whereIn('id', $eligibleIds)
-                ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds));
-        }
+        $query = Monitor::query()
+            ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds))
+            ->whereDoesntHave('label', fn ($q) => $q->whereNotNull('kind'))
+            ->when(
+                $group === 'new',
+                fn ($q) => $q->where('created_at', '>', $cutoff),
+                fn ($q) => $q->where('created_at', '<=', $cutoff),
+            );
 
         $paginator = $query
             ->orderByDesc('updated_at')
@@ -2567,10 +2551,6 @@ class MonitorController extends Controller
             ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
 
         $rows = $this->hydrateMonitorRows($paginator->items());
-
-        if ($group === 'recheck') {
-            $rows = $this->attachRecheckSummary($rows);
-        }
 
         return [
             'data' => $rows,
@@ -2584,74 +2564,10 @@ class MonitorController extends Controller
     }
 
     /**
-     * Insumo do agente de re-análise (home-page): pra cada Monitor do
-     * grupo `recheck`, quebra `monitor_page_hits` em dois baldes por
-     * `created_at` relativo ao `classified_at` daquele Monitor (já
-     * presente em cada `$row` via `hydrateMonitorRows`) — hits somados,
-     * paths distintos, e a janela de tempo (`first_seen`/`last_seen`,
-     * `created_at` mais antigo/`updated_at` mais recente de cada balde).
-     * Mesma limitação de `buildMonitorQueueResult()`: um path que já
-     * existia antes de `classified_at` e continua sendo acessado depois
-     * conta hits novos só se olharmos `updated_at`, mas o corte usa
-     * `created_at` (decisão do usuário, 2026-09-30) — o resumo "depois"
-     * aqui é um proxy de paths NOVOS, não de todo hit novo.
-     *
-     * @param  array<int, array<string, mixed>>  $rows
-     * @return array<int, array<string, mixed>>
-     */
-    protected function attachRecheckSummary(array $rows): array
-    {
-        $ids = array_column($rows, 'id');
-
-        if (empty($ids)) {
-            return $rows;
-        }
-
-        $hitsByMonitor = [];
-
-        DB::table('monitor_page_hits')
-            ->whereIn('monitor_id', $ids)
-            ->get(['monitor_id', 'hits', 'created_at', 'updated_at'])
-            ->each(function ($row) use (&$hitsByMonitor) {
-                $hitsByMonitor[$row->monitor_id][] = $row;
-            });
-
-        return array_map(function (array $row) use ($hitsByMonitor) {
-            $classifiedAt = $row['classified_at'] ? Carbon::parse($row['classified_at']) : null;
-
-            $buckets = [
-                'before' => ['hits' => 0, 'distinct_paths' => 0, 'first_seen' => null, 'last_seen' => null],
-                'after' => ['hits' => 0, 'distinct_paths' => 0, 'first_seen' => null, 'last_seen' => null],
-            ];
-
-            foreach ($hitsByMonitor[$row['id']] ?? [] as $hit) {
-                $createdAt = Carbon::parse($hit->created_at);
-                $updatedAt = Carbon::parse($hit->updated_at);
-                $bucketKey = ($classifiedAt && $createdAt->gt($classifiedAt)) ? 'after' : 'before';
-
-                $buckets[$bucketKey]['hits'] += (int) $hit->hits;
-                $buckets[$bucketKey]['distinct_paths']++;
-
-                if ($buckets[$bucketKey]['first_seen'] === null || $createdAt->lt(Carbon::parse($buckets[$bucketKey]['first_seen']))) {
-                    $buckets[$bucketKey]['first_seen'] = $createdAt->toIso8601String();
-                }
-
-                if ($buckets[$bucketKey]['last_seen'] === null || $updatedAt->gt(Carbon::parse($buckets[$bucketKey]['last_seen']))) {
-                    $buckets[$bucketKey]['last_seen'] = $updatedAt->toIso8601String();
-                }
-            }
-
-            $row['recheck_summary'] = $buckets;
-
-            return $row;
-        }, $rows);
-    }
-
-    /**
-     * laravel-monitor 258 (v0.53.0): os dois números separados
-     * (`unclassified`/`recheck`) que alimentam o modal de triagem do
-     * dashboard — mesmos critérios de `getMonitorQueue`, sem paginar as
-     * linhas.
+     * laravel-monitor 258 (v0.53.0): os dois números separados (`new`/
+     * `unclassified` desde a 266/v0.55.0) que alimentam o modal de
+     * triagem do dashboard — mesmos critérios de `getMonitorQueue`, sem
+     * paginar as linhas.
      */
     protected function getMonitorQueueCounts(Request $request)
     {
@@ -2660,29 +2576,16 @@ class MonitorController extends Controller
 
         $result = Cache::remember($cacheKey, $ttl, function () {
             $excludedIds = $this->excludedMonitorIdsForQueue();
+            $cutoff = now()->subHours((int) config('monitor.ai_triage_min_age_hours', 24));
 
-            $unclassified = Monitor::query()
+            $base = Monitor::query()
                 ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds))
-                ->whereDoesntHave('label', fn ($q) => $q->whereNotNull('kind'))
-                ->count();
+                ->whereDoesntHave('label', fn ($q) => $q->whereNotNull('kind'));
 
-            $minHits = (int) config('monitor.ai_recheck_min_new_hits', 20);
+            $new = (clone $base)->where('created_at', '>', $cutoff)->count();
+            $unclassified = (clone $base)->where('created_at', '<=', $cutoff)->count();
 
-            $recheck = DB::table('monitor_labels as ml')
-                ->join('monitor_page_hits as mph', function ($join) {
-                    $join->on('mph.monitor_id', '=', 'ml.monitor_id')
-                        ->whereColumn('mph.created_at', '>', 'ml.classified_at');
-                })
-                ->where('ml.source', 'ai')
-                ->whereNotNull('ml.kind')
-                ->whereNotNull('ml.classified_at')
-                ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('ml.monitor_id', $excludedIds))
-                ->groupBy('ml.monitor_id')
-                ->havingRaw('SUM(mph.hits) >= ?', [$minHits])
-                ->pluck('ml.monitor_id')
-                ->count();
-
-            return ['unclassified' => $unclassified, 'recheck' => $recheck];
+            return ['new' => $new, 'unclassified' => $unclassified];
         });
 
         return response()->json(['success' => true] + $result);

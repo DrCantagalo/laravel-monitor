@@ -33,7 +33,7 @@ class MonitorGetConfigTest extends TestCase
         'scraper_cumulative_visits_threshold', 'scraper_known_bot_user_agents',
         'auto_block_signal_threshold', 'auto_block_strike_decay_cooldown_days',
         'auto_block_permanent_after_lifetime_offenses',
-        'ai_recheck_min_new_hits',
+        'ai_triage_min_age_hours',
         'listings_cache_ttl_minutes', 'pages_cache_ttl_minutes', 'data_totals_cache_ttl_seconds',
         'block_results_cache_ttl_seconds', 'blocked_ip_cache_ttl',
         'track_visits', 'track_authenticated_user', 'visit_max_paths', 'denylist_format',
@@ -131,10 +131,10 @@ class MonitorGetConfigTest extends TestCase
         $response = $this->callHandler(['action' => 'getConfig']);
 
         $response->assertOk();
-        $entry = $response->json('config.ai_recheck_min_new_hits');
+        $entry = $response->json('config.ai_triage_min_age_hours');
 
-        $this->assertSame(20, $entry['value']);
-        $this->assertSame(20, $entry['default']);
+        $this->assertSame(24, $entry['value']);
+        $this->assertSame(24, $entry['default']);
         $this->assertFalse($entry['customized']);
     }
 

@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.55.0] - 2026-10-01
+### ⚠️ Breaking — AI triage queue: `recheck` replaced by `new` (grace period)
+- **The `recheck` group of `getMonitorQueue`/`getMonitorQueueCounts` is
+  gone, replaced by `new`.** A `Monitor` is a device/browser — it
+  doesn't "become" a bot or a human later. `recheck` (`0.53.0`) only
+  existed because `unclassified` accepted a brand-new `Monitor` (as
+  little as one hit) and the AI would classify it on thin evidence; the
+  actual fix is not classifying too early, not reclassifying after the
+  fact.
+  - New config `ai_triage_min_age_hours` (default `24`, replaces
+    `ai_recheck_min_new_hits`): a `Monitor` with no `kind` stays in
+    `new` (informational only, never surfaced for triage) while younger
+    than this many hours, based on `created_at` — not last activity.
+    Once past the grace period, it moves to `unclassified`.
+  - `recheck_summary` is gone with the group — nothing to summarize for
+    a grace-period Monitor.
+  - `getMonitorQueueCounts` now returns `{"new": N, "unclassified": N}`
+    instead of `{"unclassified": N, "recheck": N}`.
+  - Manual classification is unaffected — it has always worked on any
+    Monitor regardless of age.
+  - No migration needed — both groups are derived on the fly from
+    `created_at`, nothing is stored. Run `php artisan monitor:update` to
+    publish the new config key.
+  - See README, "Upgrading to `0.55.0`".
+
 ## [0.54.0] - 2026-09-30
 ### Added
 - **New read-only action `getConfig`**, for the dashboard's "Data" tab to
