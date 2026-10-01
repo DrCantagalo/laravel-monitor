@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
+use Drcantagalo\LaravelMonitor\Http\Controllers\MonitorController;
 use Drcantagalo\LaravelMonitor\Support\ListingsCache;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -218,6 +219,44 @@ class MonitorGetConfigTest extends TestCase
         $this->assertTrue($diverged->json('meta.version_diverged'));
     }
 
+    /**
+     * laravel-monitor 270 (v0.56.0): `InstalledVersions` devolve a versão
+     * da tag Git (`v0.54.0`), a config grava sem `v` (`0.54.0`). O teste
+     * acima copia a própria string resolvida pra config e nunca exercita
+     * esse formato — aqui a versão do pacote é forçada via subclasse do
+     * controller, sem depender do que `InstalledVersions` resolver.
+     */
+    protected function forcePackageVersion(?string $version): void
+    {
+        FixedPackageVersionController::$version = $version;
+        $this->app->bind(MonitorController::class, FixedPackageVersionController::class);
+        ListingsCache::invalidate();
+    }
+
+    public function test_version_diverged_ignores_a_leading_v_from_the_git_tag(): void
+    {
+        $this->forcePackageVersion('v0.54.0');
+        config(['monitor.version' => '0.54.0']);
+
+        $response = $this->callHandler(['action' => 'getConfig']);
+
+        $response->assertOk();
+        $this->assertSame('v0.54.0', $response->json('meta.package_version'));
+        $this->assertSame('0.54.0', $response->json('meta.config_version'));
+        $this->assertFalse($response->json('meta.version_diverged'));
+    }
+
+    public function test_version_diverged_is_true_for_a_real_mismatch_with_a_leading_v(): void
+    {
+        $this->forcePackageVersion('v0.54.0');
+        config(['monitor.version' => '0.53.0']);
+
+        $response = $this->callHandler(['action' => 'getConfig']);
+
+        $response->assertOk();
+        $this->assertTrue($response->json('meta.version_diverged'));
+    }
+
     public function test_meta_reports_whether_config_is_currently_cached(): void
     {
         $response = $this->callHandler(['action' => 'getConfig']);
@@ -267,5 +306,19 @@ class MonitorGetConfigTest extends TestCase
         $response = $this->postJson('/monitor/handler', ['action' => 'getConfig']);
 
         $response->assertStatus(401);
+    }
+}
+
+/**
+ * Controller com `packageVersion()` fixo — só pros testes de
+ * `version_diverged` acima.
+ */
+class FixedPackageVersionController extends MonitorController
+{
+    public static ?string $version = null;
+
+    protected function packageVersion(): ?string
+    {
+        return static::$version;
     }
 }

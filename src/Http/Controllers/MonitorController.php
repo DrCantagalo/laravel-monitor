@@ -380,12 +380,21 @@ class MonitorController extends Controller
      */
     protected function getData(Request $request)
     {
+        $monitorsByKind = $this->monitorsByKind();
+
         return response()->json([
             'success' => true,
-            'visitors_total' => (int) Monitor::count(),
+            // laravel-monitor 270 (v0.56.0): derivado do MESMO snapshot
+            // (cacheado) de `monitors_by_kind`, pra soma dos 4 grupos bater
+            // sempre exatamente com este total — um `Monitor::count()`
+            // separado, sem cache, divergiria dentro da janela do TTL.
+            'visitors_total' => array_sum($monitorsByKind),
             'visits_total' => $this->visitsTotal(),
-            'sessions_total' => $this->sessionsTotal(),
             'unique_ips_total' => $this->uniqueIpsTotal(),
+            // laravel-monitor 270 (v0.56.0): "Monitor é a fonte da
+            // verdade" — distribuição de todos os Monitors por
+            // classificação. Ver monitorsByKind().
+            'monitors_by_kind' => $monitorsByKind,
             // Task 83: soma agregada de monitor_block_results, pro
             // dashboard reusar o mesmo fetch que já alimenta os cards de
             // KPI em vez de bater um endpoint novo só pra esse número.
@@ -464,13 +473,98 @@ class MonitorController extends Controller
     }
 
     /**
-     * Desde 0.42.0 uma visita É uma sessão PHP, então `sessions_total` e
-     * `visits_total` são o mesmo número — as duas chaves continuam na
-     * resposta de `getData` só por compatibilidade com o dashboard.
+     * laravel-monitor 270 (v0.56.0): todos os Monitors em 4 grupos
+     * disjuntos — `human`/`bot` (`monitor_labels.kind` gravado, de
+     * qualquer `source`, manual ou IA) e, sem `kind`, `new`/`unclassified`
+     * pelo mesmo corte de idade da fila de triagem IA
+     * (`aiTriageCutoff()`, laravel-monitor 266): `new` = `created_at`
+     * mais recente que o cutoff, `unclassified` = igual ou mais antigo.
+     * Diferente de `getMonitorQueueCounts`, NÃO exclui Monitors de IPs
+     * flagados/bloqueados — aqui é contagem total (a soma bate com
+     * `visitors_total`), não a fila de trabalho.
+     *
+     * Uma query só, agregação condicional (`SUM(CASE ...)`) sem
+     * `GROUP BY`: devolve sempre exatamente 1 linha e não tem coluna
+     * não-agregada no SELECT, então não tem como esbarrar em
+     * `only_full_group_by` do MySQL (bug da laravel-monitor 260). O left
+     * join não multiplica linhas: `monitor_labels.monitor_id` é `unique`.
+     *
+     * Fail-open: sem `monitor_labels` (instalação ainda não migrada pra
+     * 0.53.0+) cai pra mesma agregação sem o join (todo Monitor conta
+     * como sem `kind`); sem `monitors`, zeros.
+     *
+     * @return array{human: int, bot: int, unclassified: int, new: int}
      */
-    protected function sessionsTotal(): int
+    protected function monitorsByKind(): array
     {
-        return $this->visitsTotal();
+        return Cache::remember(
+            'monitor:data:monitors-by-kind',
+            now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
+            function () {
+                $cutoff = $this->aiTriageCutoff();
+
+                try {
+                    return $this->aggregateMonitorsByKind($cutoff, true);
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] falha ao calcular monitors_by_kind com monitor_labels em getData (rode `php artisan migrate` ou `php artisan monitor:update`?). Erro original: '.$e->getMessage());
+                }
+
+                try {
+                    return $this->aggregateMonitorsByKind($cutoff, false);
+                } catch (QueryException $e) {
+                    Log::warning('[laravel-monitor] falha ao calcular monitors_by_kind em getData. Erro original: '.$e->getMessage());
+
+                    return ['human' => 0, 'bot' => 0, 'unclassified' => 0, 'new' => 0];
+                }
+            }
+        );
+    }
+
+    /**
+     * @return array{human: int, bot: int, unclassified: int, new: int}
+     */
+    protected function aggregateMonitorsByKind(Carbon $cutoff, bool $withLabels): array
+    {
+        $query = DB::table('monitors as m');
+
+        if ($withLabels) {
+            $query->leftJoin('monitor_labels as ml', 'ml.monitor_id', '=', 'm.id');
+            $kindSql = 'ml.kind';
+        } else {
+            $kindSql = 'NULL';
+        }
+
+        // Sem `kind` = NULL ou (defensivo) qualquer valor fora de
+        // human/bot — garante que os 4 grupos cubram todo Monitor
+        // exatamente uma vez.
+        $noKind = "({$kindSql} IS NULL OR {$kindSql} NOT IN ('human', 'bot'))";
+
+        $row = $query->selectRaw(
+            "SUM(CASE WHEN {$kindSql} = 'human' THEN 1 ELSE 0 END) AS human_total, "
+            ."SUM(CASE WHEN {$kindSql} = 'bot' THEN 1 ELSE 0 END) AS bot_total, "
+            ."SUM(CASE WHEN {$noKind} AND m.created_at > ? THEN 1 ELSE 0 END) AS new_total, "
+            ."SUM(CASE WHEN {$noKind} AND (m.created_at <= ? OR m.created_at IS NULL) THEN 1 ELSE 0 END) AS unclassified_total",
+            [$cutoff, $cutoff]
+        )->first();
+
+        return [
+            'human' => (int) ($row->human_total ?? 0),
+            'bot' => (int) ($row->bot_total ?? 0),
+            'unclassified' => (int) ($row->unclassified_total ?? 0),
+            'new' => (int) ($row->new_total ?? 0),
+        ];
+    }
+
+    /**
+     * laravel-monitor 266 (v0.55.0) / 270 (v0.56.0): corte de idade
+     * compartilhado entre a fila de triagem IA (`getMonitorQueue`/
+     * `getMonitorQueueCounts`) e `getData.monitors_by_kind` — um Monitor
+     * sem `kind` com `created_at` > cutoff é `new`, senão `unclassified`.
+     * Única fonte dessa regra; não recalcular `subHours(...)` noutro lugar.
+     */
+    protected function aiTriageCutoff(): Carbon
+    {
+        return now()->subHours((int) config('monitor.ai_triage_min_age_hours', 24));
     }
 
     /**
@@ -2014,13 +2108,19 @@ class MonitorController extends Controller
         $packageVersion = $this->packageVersion();
         $configVersion = config('monitor.version');
 
+        // laravel-monitor 270 (v0.56.0): `InstalledVersions` devolve a
+        // versão no formato da tag Git (`v0.54.0`), a config grava sem
+        // prefixo (`0.54.0`) — comparar as strings cruas dava falso
+        // positivo em toda instalação via tag. Normaliza os dois lados.
+        $versionDiverged = $packageVersion !== null
+            && $configVersion !== null
+            && ltrim((string) $packageVersion, 'vV') !== ltrim((string) $configVersion, 'vV');
+
         return [
             'meta' => [
                 'package_version' => $packageVersion,
                 'config_version' => $configVersion,
-                'version_diverged' => $packageVersion !== null
-                    && $configVersion !== null
-                    && $packageVersion !== $configVersion,
+                'version_diverged' => $versionDiverged,
                 'config_published' => $configPublished,
                 'config_cached' => app()->configurationIsCached(),
             ],
@@ -2534,7 +2634,7 @@ class MonitorController extends Controller
     protected function buildMonitorQueueResult(int $page, int $perPage, string $group): array
     {
         $excludedIds = $this->excludedMonitorIdsForQueue();
-        $cutoff = now()->subHours((int) config('monitor.ai_triage_min_age_hours', 24));
+        $cutoff = $this->aiTriageCutoff();
 
         $query = Monitor::query()
             ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds))
@@ -2576,7 +2676,7 @@ class MonitorController extends Controller
 
         $result = Cache::remember($cacheKey, $ttl, function () {
             $excludedIds = $this->excludedMonitorIdsForQueue();
-            $cutoff = now()->subHours((int) config('monitor.ai_triage_min_age_hours', 24));
+            $cutoff = $this->aiTriageCutoff();
 
             $base = Monitor::query()
                 ->when($excludedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $excludedIds))

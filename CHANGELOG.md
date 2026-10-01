@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.56.0] - 2026-10-01
+### ⚠️ Breaking — `getData`: `sessions_total` removed
+- **`sessions_total` is gone from the `getData` response.** Since
+  `0.42.0` a visit is a PHP session, so it only ever repeated
+  `visits_total` and was kept just for compatibility. Read
+  `visits_total` instead.
+
+### Added
+- **`getData.monitors_by_kind`**: `{"human": N, "bot": N,
+  "unclassified": N, "new": N}` — every `Monitor` in four disjoint
+  groups, summing to exactly `visitors_total` ("the Monitor is the
+  source of truth" for the dashboard header).
+  - `human`/`bot`: `monitor_labels.kind` recorded, any `source`
+    (manual or AI).
+  - `new`/`unclassified`: no `kind`, split by `created_at` against the
+    same `ai_triage_min_age_hours` cutoff as the AI triage queue
+    (`0.55.0`) — the cutoff now lives in one shared helper. Not
+    filtered by flagged/blocked IPs (full census, not the work queue).
+  - One aggregate query (left join + conditional `SUM(CASE …)`, no
+    `GROUP BY`, so no MySQL `only_full_group_by` exposure — see
+    `[0.53.1]`), cached with `data_totals_cache_ttl_seconds`. Fails open
+    (every Monitor counted as no-`kind`) without `monitor_labels`.
+
+### Changed
+- `visitors_total` is now the sum of `monitors_by_kind` (same cached
+  snapshot) instead of a separate uncached `Monitor::count()`, so the
+  two always agree. This also makes it actually honor
+  `data_totals_cache_ttl_seconds`, as the README already documented.
+
+### Fixed
+- **`getConfig` `meta.version_diverged` was always `true` on tag-based
+  installs**: `InstalledVersions` returns the Git tag (`v0.54.0`) while
+  `config('monitor.version')` is `0.54.0`. Both sides are now
+  normalized with `ltrim($v, 'vV')` before comparing.
+
 ## [0.55.0] - 2026-10-01
 ### ⚠️ Breaking — AI triage queue: `recheck` replaced by `new` (grace period)
 - **The `recheck` group of `getMonitorQueue`/`getMonitorQueueCounts` is

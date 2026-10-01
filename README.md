@@ -117,25 +117,47 @@ loading a full `Monitor` row into PHP:
   "success": true,
   "visitors_total": 19532,
   "visits_total": 84210,
-  "sessions_total": 21044,
   "unique_ips_total": 8117,
+  "monitors_by_kind": {
+    "human": 6120,
+    "bot": 9874,
+    "unclassified": 3291,
+    "new": 247
+  },
   "blocked_attempts_total": 342,
   "package_version": "0.47.0",
   "config_version": "0.46.0"
 }
 ```
 
-- **`visitors_total`**: `Monitor::count()` — one row per recognized
-  device/browser (see "Remember-me" above).
+- **`visitors_total`**: total `Monitor` rows — one row per recognized
+  device/browser (see "Remember-me" above). Since `0.56.0` it is the sum
+  of `monitors_by_kind` (same cached snapshot), so the two always agree
+  exactly.
 - **`visits_total`**: `COUNT(*)` of `monitor_visits` (see "Visits"
   below) — one row per **new PHP session**, not per page view. A visitor
   browsing multiple pages in the same session is one visit. Only counts
   visits recorded since `0.42.0` (until `0.41.0` this was a `SUM` of
   `data.visits` over the JSON blob, which is no longer written) and stays
   `0` with `monitor.track_visits` turned off.
-- **`sessions_total`**: since `0.42.0` a visit **is** a PHP session, so
-  this is the same number as `visits_total`. Both keys are kept in the
-  response for backward compatibility.
+- **`sessions_total`**: **removed in `0.56.0`** (breaking). Since
+  `0.42.0` a visit **is** a PHP session, so it was always the same number
+  as `visits_total` — read `visits_total` instead.
+- **`monitors_by_kind`** (since `0.56.0`): every `Monitor` split into
+  four disjoint groups — "the Monitor is the source of truth" for the
+  dashboard header. `human`/`bot`: Monitors with a `kind` recorded in
+  `monitor_labels` (any `source`, manual or AI). `new`/`unclassified`:
+  Monitors with no `kind`, split by `created_at` against the same
+  `ai_triage_min_age_hours` cutoff the AI triage queue uses (see "IP
+  classification" below) — `new` is younger than the cutoff,
+  `unclassified` is at or past it. The four always sum to exactly
+  `visitors_total`. Unlike `getMonitorQueueCounts`, this does **not**
+  exclude Monitors seen at flagged/blocked IPs — it's a full census,
+  not the triage work queue, so `new`/`unclassified` here can be higher
+  than the queue counts. Computed in a single aggregate query (left join
+  on `monitor_labels`, conditional `SUM(CASE …)`, no `GROUP BY`). On an
+  install not yet migrated to `0.53.0`+ (no `monitor_labels` table) it
+  fails open by counting every Monitor as having no `kind`.
 - **`unique_ips_total`**: `IpStat::count()` — reuses `monitor_ip_stats`
   (see "Per-IP stats" below), which already keeps exactly one row per
   unique IP ever seen. Deliberately **not** a dedupe of
@@ -168,8 +190,8 @@ loading a full `Monitor` row into PHP:
   config *and* the package's pending migrations are out of date (see
   `MonitorUpdateCommand::confirmPendingMigrations()`). Clients on a
   package version older than `0.47.0` don't send this key at all.
-- `visitors_total`/`visits_total`/`sessions_total`/`unique_ips_total`
-  (added in `0.10.0`) share a short, fixed cache TTL
+- `visitors_total`/`visits_total`/`unique_ips_total` (added in
+  `0.10.0`) and `monitors_by_kind` (`0.56.0`) share a short, fixed cache TTL
   (`config('monitor.data_totals_cache_ttl_seconds')`, default `45`
   seconds — same rationale as `block_results_cache_ttl_seconds`) and
   fail open to `0` if the underlying table/column isn't there yet on an
@@ -1407,6 +1429,15 @@ the first place, not reclassifying after the fact.
   from `created_at` and the absence of `kind`, nothing is stored. Run
   `php artisan monitor:update` to publish the new config key.
 
+### Upgrading to `0.56.0`
+
+**Breaking**: `getData` no longer returns `sessions_total` (it has been
+identical to `visits_total` since `0.42.0`) — read `visits_total`
+instead. New key `monitors_by_kind` (`{human, bot, unclassified, new}`,
+sums to `visitors_total`), see "Aggregated dashboard totals" above. No
+migration or new config key; `ai_triage_min_age_hours` now also sets the
+`new`/`unclassified` boundary of `monitors_by_kind`.
+
 ## Paginated page listing (`getPages`)
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the
@@ -1764,7 +1795,11 @@ mutations as `getTableStats`).
   `config/monitor.php`).
 - **`meta.version_diverged`**: `true` when both of the above are known
   and don't match — Composer was updated but `monitor:update` wasn't run
-  afterward (config, and possibly migrations, may be pending).
+  afterward (config, and possibly migrations, may be pending). Since
+  `0.56.0` a leading `v`/`V` is ignored on both sides before comparing:
+  `package_version` comes from the Git tag (`v0.54.0`) while the config
+  stores `0.54.0`, which used to be reported as diverged on every
+  tag-based install.
 - **`meta.config_published`**: whether `config/monitor.php` is published
   at all in this project (`vendor:publish --tag=monitor-config` /
   `monitor:install` ran at some point). When `false`, every key below is

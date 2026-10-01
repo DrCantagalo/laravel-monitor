@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.55.0',
+    'version' => '0.56.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -248,7 +248,7 @@ return [
     'block_results_cache_ttl_seconds' => 45,
 
     // TTL (segundos) do cache de visitors_total/visits_total/
-    // sessions_total/unique_ips_total (agregados de getData desde a
+    // unique_ips_total/monitors_by_kind (agregados de getData desde a
     // 0.10.0, ver README "Aggregated dashboard totals"). Mesmo raciocínio
     // de block_results_cache_ttl_seconds: mutação a cada request
     // rastreada (Monitor::newVisit/IpStat::recordVisit), fora do esquema
@@ -277,7 +277,8 @@ return [
     // em vez de reclassificar depois. Baixo demais classifica Monitors
     // com pouca evidência; alto demais atrasa a triagem de visitantes
     // reais. 24 é ponto de partida, não valor final. Ver README "IP
-    // classification".
+    // classification". Desde a 0.56.0 também define a fronteira
+    // `new`/`unclassified` de `getData.monitors_by_kind`.
     'ai_triage_min_age_hours' => 24,
 
 ];
