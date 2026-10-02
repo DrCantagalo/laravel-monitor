@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.58.0] - 2026-10-02
+### Added
+- **`getTimeline`**: new read-only action with daily series for the
+  dashboard's "Overview" charts — new visitors by classification
+  (`human`/`bot`/`unclassified`, from `monitors.created_at` +
+  `monitor_labels.kind`), visits by `clean`/`scraper`
+  (`monitor_visits.created_at`), and data reads by kind
+  (`monitor_access_logs.accessed_at`). `days` param (7–365, default 30,
+  `422` outside that range). Days are resolved in
+  `config('app.timezone')`, never UTC-fixed; a day with no events is `0`,
+  never a gap. Same auth/cache pattern as `getTableStats`. Fail-open per
+  series when a table hasn't migrated yet. New migration indexing
+  `monitors.created_at` and `monitor_visits.created_at`. See README,
+  "Daily timeline (`getTimeline`)".
+
 ## [0.57.0] - 2026-10-01
 ### Fixed
 - **Stable `name`/`email` across a user's Monitors.** `data.user_id` is

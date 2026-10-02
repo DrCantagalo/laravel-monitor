@@ -43,7 +43,7 @@ class MonitorController extends Controller
     protected const ACCESS_LOGGED_ACTIONS = [
         'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
         'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig',
+        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
     ];
 
     /**
@@ -69,12 +69,13 @@ class MonitorController extends Controller
         // getVisitorPaths, getBlockedIps, getBlockedPaths, getUsers,
         // getUserMonitors, getBlockResults, getIpMonitors, getMonitorVisits,
         // getIpTags, getTableStats, getAccessLog, getMonitorQueue,
-        // getMonitorQueueCounts, getConfig — getIpMonitors/getMonitorVisits
-        // desde a laravel-monitor 152/v0.46.0, getUserMonitors desde a
-        // 237/v0.48.0 (substituindo getUserVisits), getIpTags desde a
-        // 239/v0.49.0, getTableStats desde a 242/v0.50.0, getAccessLog
-        // desde a 249/v0.51.0, getMonitorQueue/getMonitorQueueCounts desde
-        // a 258/v0.53.0, getConfig desde a 262/v0.54.0 — nunca pra
+        // getMonitorQueueCounts, getConfig, getTimeline — getIpMonitors/
+        // getMonitorVisits desde a laravel-monitor 152/v0.46.0,
+        // getUserMonitors desde a 237/v0.48.0 (substituindo getUserVisits),
+        // getIpTags desde a 239/v0.49.0, getTableStats desde a 242/v0.50.0,
+        // getAccessLog desde a 249/v0.51.0, getMonitorQueue/
+        // getMonitorQueueCounts desde a 258/v0.53.0, getConfig desde a
+        // 262/v0.54.0, getTimeline desde a 280/v0.58.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
         // setIpLabels/setIpTags/setMonitorKind/setMonitorTags (estas duas
         // desde a 258/v0.53.0, substituindo `spreadIpLabel` removida nesta
@@ -82,7 +83,7 @@ class MonitorController extends Controller
         $isValidReadToken = in_array($action, [
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-            'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig',
+            'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -158,6 +159,9 @@ class MonitorController extends Controller
 
             case 'getConfig':
                 return $this->getConfig($request);
+
+            case 'getTimeline':
+                return $this->getTimeline($request);
 
             case 'getAccessLog':
                 return $this->getAccessLog($request);
@@ -2140,6 +2144,290 @@ class MonitorController extends Controller
                 'config_cached' => app()->configurationIsCached(),
             ],
             'config' => $entries,
+        ];
+    }
+
+    /**
+     * Limites aceitos pelo parâmetro `days` de getTimeline.
+     */
+    protected const TIMELINE_MIN_DAYS = 7;
+
+    protected const TIMELINE_MAX_DAYS = 365;
+
+    /**
+     * laravel-monitor 280 (v0.58.0): séries diárias pros gráficos do
+     * dashboard (visitantes novos por classificação, visitas clean/
+     * scraper, acessos aos dados) — última peça read-only antes da 1.0.
+     *
+     * `days` (7–365, default 30) é validado explicitamente (nunca clamp
+     * silencioso): fora da faixa ou não-inteiro → 422, mesmo padrão de
+     * `filter` em getPages/getVisitorsByIp. Janela = hoje (no timezone do
+     * app) + os `days - 1` dias anteriores.
+     *
+     * Mesma auth/cache de `getTableStats` (local_token OU read-token;
+     * `Cache::remember` com `listings_cache_ttl_minutes`, chave incluindo
+     * `days` já que cada valor tem um resultado diferente).
+     */
+    protected function getTimeline(Request $request)
+    {
+        $rawDays = $request->input('days', 30);
+
+        if (! ctype_digit((string) $rawDays)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'days must be an integer',
+            ], 422);
+        }
+
+        $days = (int) $rawDays;
+
+        if ($days < self::TIMELINE_MIN_DAYS || $days > self::TIMELINE_MAX_DAYS) {
+            return response()->json([
+                'success' => false,
+                'message' => sprintf('days must be between %d and %d', self::TIMELINE_MIN_DAYS, self::TIMELINE_MAX_DAYS),
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('timeline', [$days]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($days) {
+            return $this->buildTimelineResult($days);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * Janela do gráfico sempre resolvida no timezone do app cliente
+     * (`config('app.timezone')`), nunca UTC fixo — virada de dia em
+     * tz != UTC não pode deslocar o bucket de um registro pro dia
+     * errado.
+     *
+     * Sem conversão pra UTC no meio do caminho: `created_at`/
+     * `accessed_at` são gravados pelo Eloquent via `now()`, que já
+     * devolve a hora-relógio no timezone do APP (`config('app.timezone')`)
+     * — não um instante convertido pra UTC (mesmo comportamento já
+     * assumido por `date_from`/`date_to` em getPages/getVisitorsByIp,
+     * comparados direto contra a string crua, sem conversão nenhuma).
+     * Então o limite da janela e a leitura de volta usam o MESMO
+     * timezone ($tz), tratando a string do banco como hora-relógio
+     * nesse timezone — nunca misturando com UTC de verdade.
+     *
+     * @return array{0: \Illuminate\Support\Carbon, 1: \Illuminate\Support\Carbon, 2: array<int, string>}
+     *                                                                              [$startBound, $endBound, $dayKeys]
+     */
+    protected function timelineWindow(string $tz, int $days): array
+    {
+        $todayLocal = Carbon::now($tz)->startOfDay();
+        $startLocal = $todayLocal->copy()->subDays($days - 1);
+        $endLocal = $todayLocal->copy()->endOfDay();
+
+        $dayKeys = [];
+        $cursor = $startLocal->copy();
+
+        while ($cursor->lte($todayLocal)) {
+            $dayKeys[] = $cursor->toDateString();
+            $cursor->addDay();
+        }
+
+        return [$startLocal, $endLocal, $dayKeys];
+    }
+
+    /**
+     * Bucket vazio (todo dia de `$dayKeys` com 0) — ponto de partida de
+     * cada série antes de somar as linhas reais, garantindo que um dia
+     * sem nenhum registro apareça como `0` (nunca um buraco no array).
+     *
+     * @param  array<int, string>  $dayKeys
+     * @return array<string, int>
+     */
+    private function emptyTimelineBucket(array $dayKeys): array
+    {
+        return array_fill_keys($dayKeys, 0);
+    }
+
+    /**
+     * Chave "YYYY-MM-DD" de um timestamp cru do banco (string) — tratado
+     * como hora-relógio já no timezone `$tz` (ver `timelineWindow()`),
+     * nunca reinterpretado/convertido a partir de UTC.
+     */
+    private function timelineDayKey(string $rawTimestamp, string $tz): string
+    {
+        return Carbon::parse($rawTimestamp, $tz)->toDateString();
+    }
+
+    /**
+     * @return array{human: array<string,int>, bot: array<string,int>, unclassified: array<string,int>}
+     */
+    protected function timelineMonitorsNew(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys): array
+    {
+        $buckets = [
+            'human' => $this->emptyTimelineBucket($dayKeys),
+            'bot' => $this->emptyTimelineBucket($dayKeys),
+            'unclassified' => $this->emptyTimelineBucket($dayKeys),
+        ];
+
+        if (! Schema::hasTable('monitors')) {
+            return $buckets;
+        }
+
+        $withLabels = Schema::hasTable('monitor_labels');
+
+        try {
+            $query = DB::table('monitors as m')
+                ->whereBetween('m.created_at', [$startBound, $endBound]);
+
+            if ($withLabels) {
+                $query->leftJoin('monitor_labels as ml', 'ml.monitor_id', '=', 'm.id')
+                    ->select('m.created_at as created_at', 'ml.kind as kind');
+            } else {
+                $query->select('m.created_at as created_at', DB::raw('NULL as kind'));
+            }
+
+            $query->orderBy('m.id')->chunk(1000, function ($rows) use (&$buckets, $tz) {
+                foreach ($rows as $row) {
+                    $dayKey = $this->timelineDayKey($row->created_at, $tz);
+
+                    if (! array_key_exists($dayKey, $buckets['human'])) {
+                        continue;
+                    }
+
+                    $kind = in_array($row->kind, MonitorLabel::KINDS, true) ? $row->kind : 'unclassified';
+                    $buckets[$kind][$dayKey]++;
+                }
+            });
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular series.monitors_new em getTimeline. Erro original: '.$e->getMessage());
+
+            return [
+                'human' => $this->emptyTimelineBucket($dayKeys),
+                'bot' => $this->emptyTimelineBucket($dayKeys),
+                'unclassified' => $this->emptyTimelineBucket($dayKeys),
+            ];
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * @return array{clean: array<string,int>, scraper: array<string,int>}
+     */
+    protected function timelineVisits(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys): array
+    {
+        $buckets = [
+            'clean' => $this->emptyTimelineBucket($dayKeys),
+            'scraper' => $this->emptyTimelineBucket($dayKeys),
+        ];
+
+        if (! Schema::hasTable('monitor_visits')) {
+            return $buckets;
+        }
+
+        try {
+            DB::table('monitor_visits')
+                ->select('created_at', 'scraper')
+                ->whereBetween('created_at', [$startBound, $endBound])
+                ->orderBy('id')
+                ->chunk(1000, function ($rows) use (&$buckets, $tz) {
+                    foreach ($rows as $row) {
+                        $dayKey = $this->timelineDayKey($row->created_at, $tz);
+
+                        if (! array_key_exists($dayKey, $buckets['clean'])) {
+                            continue;
+                        }
+
+                        $buckets[$row->scraper ? 'scraper' : 'clean'][$dayKey]++;
+                    }
+                });
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular series.visits em getTimeline. Erro original: '.$e->getMessage());
+
+            return [
+                'clean' => $this->emptyTimelineBucket($dayKeys),
+                'scraper' => $this->emptyTimelineBucket($dayKeys),
+            ];
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * @return array{read_token_issued: array<string,int>, read_token_first_use: array<string,int>, local_token_read: array<string,int>}
+     */
+    protected function timelineAccess(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys): array
+    {
+        $buckets = [
+            AccessLogger::KIND_READ_TOKEN_ISSUED => $this->emptyTimelineBucket($dayKeys),
+            AccessLogger::KIND_READ_TOKEN_FIRST_USE => $this->emptyTimelineBucket($dayKeys),
+            AccessLogger::KIND_LOCAL_TOKEN_READ => $this->emptyTimelineBucket($dayKeys),
+        ];
+
+        if (! Schema::hasTable('monitor_access_logs')) {
+            return $buckets;
+        }
+
+        try {
+            DB::table('monitor_access_logs')
+                ->select('accessed_at', 'kind')
+                ->whereBetween('accessed_at', [$startBound, $endBound])
+                ->orderBy('id')
+                ->chunk(1000, function ($rows) use (&$buckets, $tz) {
+                    foreach ($rows as $row) {
+                        if (! array_key_exists($row->kind, $buckets)) {
+                            continue;
+                        }
+
+                        $dayKey = $this->timelineDayKey($row->accessed_at, $tz);
+
+                        if (! array_key_exists($dayKey, $buckets[$row->kind])) {
+                            continue;
+                        }
+
+                        $buckets[$row->kind][$dayKey]++;
+                    }
+                });
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular series.access em getTimeline. Erro original: '.$e->getMessage());
+
+            return [
+                AccessLogger::KIND_READ_TOKEN_ISSUED => $this->emptyTimelineBucket($dayKeys),
+                AccessLogger::KIND_READ_TOKEN_FIRST_USE => $this->emptyTimelineBucket($dayKeys),
+                AccessLogger::KIND_LOCAL_TOKEN_READ => $this->emptyTimelineBucket($dayKeys),
+            ];
+        }
+
+        return $buckets;
+    }
+
+    protected function buildTimelineResult(int $days): array
+    {
+        $tz = config('app.timezone', 'UTC');
+        [$startBound, $endBound, $dayKeys] = $this->timelineWindow($tz, $days);
+
+        $monitorsNew = $this->timelineMonitorsNew($tz, $startBound, $endBound, $dayKeys);
+        $visits = $this->timelineVisits($tz, $startBound, $endBound, $dayKeys);
+        $access = $this->timelineAccess($tz, $startBound, $endBound, $dayKeys);
+
+        return [
+            'timezone' => $tz,
+            'days' => $dayKeys,
+            'series' => [
+                'monitors_new' => [
+                    'human' => array_values($monitorsNew['human']),
+                    'bot' => array_values($monitorsNew['bot']),
+                    'unclassified' => array_values($monitorsNew['unclassified']),
+                ],
+                'visits' => [
+                    'clean' => array_values($visits['clean']),
+                    'scraper' => array_values($visits['scraper']),
+                ],
+                'access' => [
+                    'read_token_issued' => array_values($access[AccessLogger::KIND_READ_TOKEN_ISSUED]),
+                    'read_token_first_use' => array_values($access[AccessLogger::KIND_READ_TOKEN_FIRST_USE]),
+                    'local_token_read' => array_values($access[AccessLogger::KIND_LOCAL_TOKEN_READ]),
+                ],
+            ],
         ];
     }
 

@@ -487,11 +487,12 @@ application's backend — only a short-lived, read-only token does.
   `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
   `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`,
   `getIpTags`, `getTableStats`, `getAccessLog`, `getMonitorQueue`,
-  `getMonitorQueueCounts`, `getConfig`
+  `getMonitorQueueCounts`, `getConfig`, `getTimeline`
   — `getIpMonitors`/`getMonitorVisits` since `0.46.0`, `getUserMonitors`
   since `0.48.0`, `getIpTags` since `0.49.0`, `getTableStats` since
   `0.50.0`, `getAccessLog` since `0.51.0`, `getMonitorQueue`/
-  `getMonitorQueueCounts` since `0.53.0`, `getConfig` since `0.54.0`)**.
+  `getMonitorQueueCounts` since `0.53.0`, `getConfig` since `0.54.0`,
+  `getTimeline` since `0.58.0`)**.
   `clearData`, `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
@@ -1883,6 +1884,82 @@ still being computed on the real underlying value:
   (`basename()`), never the absolute path on the client's server.
 - **`scraper_known_bot_user_agents`**: `value`/`default` are the *count*
   of substrings in the list, never the list itself.
+
+## Daily timeline (`getTimeline`, since `0.58.0`)
+
+Read-only, no-pagination daily series for the dashboard's "Overview"
+charts: new visitors by classification, visits by clean/scraper, and
+reads of the client's data. Same auth as `getData`/`getTableStats`
+(permanent `local_token` **or** the ephemeral read token from
+`issueReadToken`), and cached the same way as `getTableStats`
+(`Cache::remember`, TTL `config('monitor.listings_cache_ttl_minutes')`,
+key including the `days` parameter since each value has its own result).
+
+**`days`** (query/body param, integer, default `30`): the window is
+"today" plus the `days - 1` days before it. Must be between `7` and
+`365` — anything else (non-integer, out of range) is a `422`, never a
+silently clamped or unbounded query.
+
+```json
+{
+  "success": true,
+  "timezone": "America/Sao_Paulo",
+  "days": ["2026-09-26", "2026-09-27", "2026-09-28", "2026-10-02"],
+  "series": {
+    "monitors_new": {
+      "human": [1, 0, 2, 3],
+      "bot": [0, 1, 0, 2],
+      "unclassified": [4, 2, 1, 0]
+    },
+    "visits": {
+      "clean": [10, 8, 12, 15],
+      "scraper": [1, 0, 2, 1]
+    },
+    "access": {
+      "read_token_issued": [3, 3, 4, 5],
+      "read_token_first_use": [3, 2, 4, 4],
+      "local_token_read": [12, 10, 14, 16]
+    }
+  }
+}
+```
+
+- **`timezone`**: `config('app.timezone')`, echoed back so the dashboard
+  never has to guess which timezone the `days` dates are in.
+- **`days`**: one `"YYYY-MM-DD"` entry per day of the window, in the
+  **app's timezone**, oldest first — never UTC-fixed. A day with zero
+  events for a given series is `0`, not a gap: every array in `series`
+  has exactly as many entries as `days`, aligned 1:1 by index.
+- **`series.monitors_new`**: every `Monitor` whose `created_at` falls on
+  that day, split by its **current** `monitor_labels.kind`
+  (`human`/`bot`), or `unclassified` when it has none — same source as
+  `getData.monitors_by_kind`, but unlike that endpoint there's no
+  separate `new` bucket here (a Monitor is "new" vs. "unclassified" by
+  age in `getData`; here it's just classified or not, on the day it was
+  first seen). The kind reflects whatever it is **right now**, not
+  whatever it was classified as on that historical day — reclassifying a
+  Monitor later shifts which bucket its day counts toward.
+- **`series.visits`**: every `monitor_visits` row whose `created_at`
+  falls on that day, split by its `scraper` flag.
+- **`series.access`**: every `monitor_access_logs` row whose
+  `accessed_at` falls on that day, split by `kind` (see "Access log"
+  below) — `read_token_issued` is included for completeness but is
+  deliberately left out of the dashboard's chart (it reflects the
+  cantagalo.it backend opening the dashboard, not an actual data read).
+- **Fail-open per series**: a table that hasn't migrated yet (e.g.
+  right after upgrading, before `php artisan migrate`) makes that
+  series — and only that series — come back all zeros, with a
+  `Log::warning`, same pattern as `getData`/`getTableStats`. It never
+  turns the whole action into a `500`.
+- Indexed on `monitors.created_at` and `monitor_visits.created_at`
+  (migration `2026_10_02_000000_add_created_at_indexes_for_timeline`) —
+  without it this query would scan the full table on every cache miss.
+
+**Out of scope, on purpose**: blocked IPs/attempts per day.
+`monitor_blocked_ips` deletes its row on unblock/expiry
+(`BlockedIpCleaner`) and `monitor_block_results.counter` is accumulated
+per IP — neither has an honest daily history to report. Left for a
+post-`1.0` daily rollup table (`monitor_daily_stats`).
 
 ## Access log (`monitor_access_logs`, since `0.51.0`)
 
