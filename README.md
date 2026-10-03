@@ -120,8 +120,11 @@ loading a full `Monitor` row into PHP:
   "unique_ips_total": 8117,
   "monitors_by_kind": {
     "human": 6120,
+    "human_guest": 5480,
+    "human_user": 640,
     "bot": 9874,
-    "unclassified": 3291,
+    "flagged": 412,
+    "unclassified": 2879,
     "new": 247
   },
   "blocked_attempts_total": 342,
@@ -132,8 +135,8 @@ loading a full `Monitor` row into PHP:
 
 - **`visitors_total`**: total `Monitor` rows — one row per recognized
   device/browser (see "Remember-me" above). Since `0.56.0` it is the sum
-  of `monitors_by_kind` (same cached snapshot), so the two always agree
-  exactly.
+  of `monitors_by_kind` (same cached snapshot, excluding the legacy
+  `human` key — see below), so the two always agree exactly.
 - **`visits_total`**: `COUNT(*)` of `monitor_visits` (see "Visits"
   below) — one row per **new PHP session**, not per page view. A visitor
   browsing multiple pages in the same session is one visit. Only counts
@@ -143,21 +146,38 @@ loading a full `Monitor` row into PHP:
 - **`sessions_total`**: **removed in `0.56.0`** (breaking). Since
   `0.42.0` a visit **is** a PHP session, so it was always the same number
   as `visits_total` — read `visits_total` instead.
-- **`monitors_by_kind`** (since `0.56.0`): every `Monitor` split into
-  four disjoint groups — "the Monitor is the source of truth" for the
-  dashboard header. `human`/`bot`: Monitors with a `kind` recorded in
-  `monitor_labels` (any `source`, manual or AI). `new`/`unclassified`:
-  Monitors with no `kind`, split by `created_at` against the same
-  `ai_triage_min_age_hours` cutoff the AI triage queue uses (see "IP
-  classification" below) — `new` is younger than the cutoff,
-  `unclassified` is at or past it. The four always sum to exactly
-  `visitors_total`. Unlike `getMonitorQueueCounts`, this does **not**
-  exclude Monitors seen at flagged/blocked IPs — it's a full census,
-  not the triage work queue, so `new`/`unclassified` here can be higher
-  than the queue counts. Computed in a single aggregate query (left join
-  on `monitor_labels`, conditional `SUM(CASE …)`, no `GROUP BY`). On an
-  install not yet migrated to `0.53.0`+ (no `monitor_labels` table) it
-  fails open by counting every Monitor as having no `kind`.
+- **`monitors_by_kind`** (since `0.56.0`, categories expanded in
+  `0.59.0`): every `Monitor` split into disjoint groups — "the Monitor is
+  the source of truth" for the dashboard header.
+  - `human_guest`/`human_user` (since `0.59.0`): Monitors with
+    `kind=human`, split by whether `data.user_id` is present (see
+    "Authenticated user tagging" below). `human` is kept as
+    `human_guest + human_user`, for consumers still reading the old key —
+    **excluded** from the sum that must equal `visitors_total` (it's
+    redundant with the two granular keys, summing it too would double-count
+    every human Monitor).
+  - `bot`: Monitors with `kind=bot` (any `source` — manual, AI, or the
+    `auth` source doesn't apply here, only humans get auto-tagged).
+  - `flagged` (new in `0.59.0`): Monitors with **no** `kind` that were
+    seen at a flagged or currently-blocked IP — same exclusion criteria
+    `getMonitorQueueCounts` already used internally. A Monitor's own
+    `kind` always wins: a classified `human`/`bot` seen at a flagged IP
+    still counts by its classification, never `flagged`.
+  - `new`/`unclassified`: Monitors with no `kind` and **not** `flagged`,
+    split by `created_at` against the same `ai_triage_min_age_hours`
+    cutoff the AI triage queue uses (see "IP classification" below) —
+    `new` is younger than the cutoff, `unclassified` is at or past it.
+    Since `0.59.0` these two no longer include `flagged` Monitors (before,
+    they did) — this is why `monitors_by_kind` now matches
+    `getMonitorQueueCounts` exactly, not just approximately.
+  - `human_guest + human_user + bot + flagged + unclassified + new`
+    always sums to exactly `visitors_total`.
+  - Computed in a single aggregate query (left join on `monitor_labels`,
+    conditional `SUM(CASE …)`, no `GROUP BY` — the flagged/user-id
+    breakdowns are expressed as `id IN (...)` against two ID sets computed
+    once beforehand, not a second join). On an install not yet migrated to
+    `0.53.0`+ (no `monitor_labels` table) it fails open by counting every
+    Monitor as having no `kind`.
 - **`unique_ips_total`**: `IpStat::count()` — reuses `monitor_ip_stats`
   (see "Per-IP stats" below), which already keeps exactly one row per
   unique IP ever seen. Deliberately **not** a dedupe of
@@ -327,6 +347,31 @@ their row with that").
   `Drcantagalo\LaravelMonitor\Support\Monitor::PROTECTED_DATA_KEYS` — a
   call to `Monitor::tag()` (see "Arbitrary visitor data" above) can never
   overwrite it, so it can't be spoofed onto a row by mistake.
+- **Auto-human tagging (since `0.59.0`)**: the first time `user_id` is
+  recorded for a Monitor (the guest → authenticated transition — not on
+  every subsequent authenticated request, see below), the package also
+  ensures a `monitor_labels` row with `kind=human`, `source=auth` (a new
+  `source` value, alongside `ai`/`manual`), `classified_at=now()` —
+  someone who authenticated is, by definition, a real person, so there's
+  no reason for that Monitor to keep sitting in the AI triage queue
+  waiting for a manual/AI classification it'll never need. This **never**
+  overwrites an existing classification: a Monitor already `kind=bot`
+  (even `source=manual`, e.g. a known bot account that happens to log in)
+  or already `kind=human` keeps it as-is — only a Monitor with **no**
+  `kind` yet gets tagged. Gated by the same `track_authenticated_user`
+  config above; disabling it skips this too.
+  - **Cheap by design**: the check only runs on the request where
+    `user_id` is being written for the *first* time (nothing in `data`
+    yet) — once written, `data['user_id']` stays set on every later
+    request for that Monitor, so the classification check never runs
+    again for it. No per-request query for an already-tagged visitor.
+  - **Backfill**: Monitors that already had `user_id` recorded *before*
+    upgrading to `0.59.0` never go through that first-time transition
+    again, so a migration backfills them once (same rule: only Monitors
+    with no `kind` yet get `kind=human, source=auth`).
+  - See "Aggregated dashboard totals" above for how this interacts with
+    `monitors_by_kind.human_user`, and "Daily timeline" below for
+    `series.monitors_new.human_user`/`series.visits.human_user`.
 
 ## Querying by user_id (CRM index)
 
@@ -1286,17 +1331,19 @@ does this automatically).
   `setIpTags` (add/remove one tag, all Monitors of one or many IPs), or
   `setMonitorTags` (add/remove one tag, one Monitor, since `0.53.0`).
 - **`note`**: an optional free-text note. Set via `setIpLabels`.
-- **`source`**: `manual` (default) or `ai` (written by the AI triage
-  flow). Refers to **`kind`** specifically, not to tags/note.
+- **`source`**: `manual` (default), `ai` (written by the AI triage flow),
+  or `auth` (since `0.59.0`, written automatically the first time a
+  Monitor authenticates — see "Authenticated user tagging" above). Refers
+  to **`kind`** specifically, not to tags/note.
   **Guaranteed by the package itself, not just the consumer**: a
-  `source=ai` write never overwrites a `kind` already set with
-  `source=manual` on that same `Monitor` (that `Monitor` is silently
-  skipped and reported back, not an error), and `source=ai` tag writes
-  are always a merge (add-only) — they can never remove an existing tag.
-  A manual write always wins and always records `source=manual`.
-  `setMonitorKind`/`setMonitorTags` always write `source=manual` — the AI
-  flow only ever writes through `setIpKind`/`setIpTags`, never per
-  individual `Monitor`.
+  `source=ai`/`source=auth` write never overwrites a `kind` already set
+  by ANY other source on that same `Monitor` (`maybeAutoHumanClassify()`
+  and the AI triage flow both only ever fill in a Monitor with no `kind`
+  yet), and `source=ai` tag writes are always a merge (add-only) — they
+  can never remove an existing tag. A manual write always wins and always
+  records `source=manual`. `setMonitorKind`/`setMonitorTags` always write
+  `source=manual` — the AI flow only ever writes through
+  `setIpKind`/`setIpTags`, never per individual `Monitor`.
 - **`classified_at`**: when `kind` was last (re)written for that
   `Monitor`. Not touched by tag-only writes.
 
@@ -1888,7 +1935,7 @@ still being computed on the real underlying value:
 ## Daily timeline (`getTimeline`, since `0.58.0`)
 
 Read-only, no-pagination daily series for the dashboard's "Overview"
-charts: new visitors by classification, visits by clean/scraper, and
+charts: new visitors by classification, visits by classification, and
 reads of the client's data. Same auth as `getData`/`getTableStats`
 (permanent `local_token` **or** the ephemeral read token from
 `issueReadToken`), and cached the same way as `getTableStats`
@@ -1908,12 +1955,18 @@ silently clamped or unbounded query.
   "series": {
     "monitors_new": {
       "human": [1, 0, 2, 3],
+      "human_guest": [1, 0, 1, 2],
+      "human_user": [0, 0, 1, 1],
       "bot": [0, 1, 0, 2],
-      "unclassified": [4, 2, 1, 0]
+      "flagged": [1, 0, 0, 1],
+      "unclassified": [3, 2, 1, 0]
     },
     "visits": {
-      "clean": [10, 8, 12, 15],
-      "scraper": [1, 0, 2, 1]
+      "human_guest": [7, 6, 9, 10],
+      "human_user": [2, 1, 2, 3],
+      "bot": [1, 0, 2, 1],
+      "flagged": [0, 1, 1, 0],
+      "unclassified": [1, 0, 2, 2]
     },
     "access": {
       "read_token_issued": [3, 3, 4, 5],
@@ -1930,17 +1983,27 @@ silently clamped or unbounded query.
   **app's timezone**, oldest first — never UTC-fixed. A day with zero
   events for a given series is `0`, not a gap: every array in `series`
   has exactly as many entries as `days`, aligned 1:1 by index.
-- **`series.monitors_new`**: every `Monitor` whose `created_at` falls on
-  that day, split by its **current** `monitor_labels.kind`
-  (`human`/`bot`), or `unclassified` when it has none — same source as
-  `getData.monitors_by_kind`, but unlike that endpoint there's no
-  separate `new` bucket here (a Monitor is "new" vs. "unclassified" by
-  age in `getData`; here it's just classified or not, on the day it was
-  first seen). The kind reflects whatever it is **right now**, not
-  whatever it was classified as on that historical day — reclassifying a
-  Monitor later shifts which bucket its day counts toward.
-- **`series.visits`**: every `monitor_visits` row whose `created_at`
-  falls on that day, split by its `scraper` flag.
+- **`series.monitors_new`** (categories expanded in `0.59.0`): every
+  `Monitor` whose `created_at` falls on that day, split into the same
+  categories as `getData.monitors_by_kind` — `human_guest`/`human_user`
+  (`kind=human`, by `user_id` presence), `bot` (`kind=bot`), `flagged`
+  (no `kind`, seen at a flagged/blocked IP), `unclassified` (no `kind`,
+  the rest). `human` is kept as `human_guest + human_user` for
+  compatibility. Unlike `getData`, there's **no** separate `new` bucket
+  here — the AI-triage grace period only makes sense for an "as of now"
+  total, not a daily series, so those Monitors fall under `unclassified`.
+  All of this reflects the Monitor's **current** state, not whatever it
+  was on that historical day — reclassifying a Monitor later shifts which
+  bucket its day counts toward.
+- **`series.visits`** (breaking change in `0.59.0`: `clean`/`scraper`
+  removed): every `monitor_visits` row whose `created_at` falls on that
+  day, split by the category of the **Monitor that owns the visit**
+  (`monitor_visits.monitor_id`) — same 5 categories as
+  `series.monitors_new` above (minus the legacy `human` key, which
+  `series.visits` never had). This is a category of the *visitor*, not of
+  the individual visit: a visit from a Monitor later reclassified as
+  `bot` moves to the `bot` bucket on its next `getTimeline` read, same as
+  `series.monitors_new`.
 - **`series.access`**: every `monitor_access_logs` row whose
   `accessed_at` falls on that day, split by `kind` (see "Access log"
   below) — `read_token_issued` is included for completeness but is

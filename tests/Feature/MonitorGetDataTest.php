@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
@@ -16,6 +17,14 @@ use Illuminate\Support\Facades\Schema;
  * (`{human, bot, unclassified, new}`, soma == `visitors_total`), com a
  * fronteira `new`/`unclassified` pelo mesmo `ai_triage_min_age_hours` da
  * fila de triagem IA (266).
+ *
+ * laravel-monitor 284 (v0.59.0): `monitors_by_kind` ganhou `human_guest`/
+ * `human_user` (`human` = soma dos dois, mantido por compatibilidade) e
+ * `flagged` (sem `kind`, visto em IP flagado/bloqueado) — `new`/
+ * `unclassified` deixaram de contar `flagged` (por isso
+ * `array_sum($byKind) - $byKind['human']` nas somas abaixo, não
+ * `array_sum` cru: `human` é redundante com `human_guest`+`human_user`,
+ * contaria em dobro).
  */
 class MonitorGetDataTest extends TestCase
 {
@@ -70,10 +79,67 @@ class MonitorGetDataTest extends TestCase
         $response->assertOk();
         $byKind = $response->json('monitors_by_kind');
 
-        $this->assertSame(['human' => 2, 'bot' => 1, 'unclassified' => 2, 'new' => 2], $byKind);
+        $this->assertSame([
+            'human' => 2,
+            'human_guest' => 2,
+            'human_user' => 0,
+            'bot' => 1,
+            'flagged' => 0,
+            'unclassified' => 2,
+            'new' => 2,
+        ], $byKind);
         $this->assertSame(7, $response->json('visitors_total'));
         $this->assertSame(Monitor::count(), $response->json('visitors_total'));
-        $this->assertSame($response->json('visitors_total'), array_sum($byKind));
+        $this->assertSame($response->json('visitors_total'), array_sum($byKind) - $byKind['human']);
+    }
+
+    public function test_monitors_by_kind_splits_human_between_guest_and_user(): void
+    {
+        $guest = $this->monitorAgedHours(1);
+        MonitorLabel::create(['monitor_id' => $guest->id, 'kind' => 'human']);
+
+        $user = Monitor::create(['data' => ['user_id' => 99]]);
+        $user->forceFill(['created_at' => now()->subHour()])->save();
+        MonitorLabel::create(['monitor_id' => $user->id, 'kind' => 'human']);
+
+        $byKind = $this->callHandler(['action' => 'getData'])->json('monitors_by_kind');
+
+        $this->assertSame(1, $byKind['human_guest']);
+        $this->assertSame(1, $byKind['human_user']);
+        $this->assertSame(2, $byKind['human']);
+    }
+
+    public function test_monitors_by_kind_flagged_excludes_from_new_and_unclassified(): void
+    {
+        config(['monitor.ai_triage_min_age_hours' => 24]);
+
+        $flaggedOld = $this->monitorAgedHours(30);
+        IpStat::create([
+            'ip' => '198.51.100.20', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true,
+        ]);
+        $flaggedOld->recordIp('198.51.100.20');
+
+        $this->monitorAgedHours(30); // unclassified comum, não flagado
+
+        $byKind = $this->callHandler(['action' => 'getData'])->json('monitors_by_kind');
+
+        $this->assertSame(1, $byKind['flagged']);
+        $this->assertSame(1, $byKind['unclassified'], 'o flagado não deveria contar em unclassified');
+    }
+
+    public function test_monitors_by_kind_kind_wins_over_flagged_ip(): void
+    {
+        $bot = $this->monitorAgedHours(1);
+        MonitorLabel::create(['monitor_id' => $bot->id, 'kind' => 'bot']);
+        IpStat::create([
+            'ip' => '198.51.100.21', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true,
+        ]);
+        $bot->recordIp('198.51.100.21');
+
+        $byKind = $this->callHandler(['action' => 'getData'])->json('monitors_by_kind');
+
+        $this->assertSame(1, $byKind['bot']);
+        $this->assertSame(0, $byKind['flagged']);
     }
 
     public function test_new_unclassified_boundary_respects_ai_triage_min_age_hours(): void
@@ -148,7 +214,7 @@ class MonitorGetDataTest extends TestCase
 
         $response->assertOk();
         $this->assertSame(
-            ['human' => 0, 'bot' => 0, 'unclassified' => 1, 'new' => 1],
+            ['human' => 0, 'human_guest' => 0, 'human_user' => 0, 'bot' => 0, 'flagged' => 0, 'unclassified' => 1, 'new' => 1],
             $response->json('monitors_by_kind')
         );
         $this->assertSame(2, $response->json('visitors_total'));

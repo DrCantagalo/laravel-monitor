@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
+use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorAccessLog;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
@@ -13,8 +14,13 @@ use Illuminate\Support\Facades\Schema;
 
 /**
  * laravel-monitor 280 (v0.58.0): novo read action `getTimeline` — séries
- * diárias (visitantes novos por classificação, visitas clean/scraper,
- * acessos aos dados) pros gráficos "Overview" do dashboard. Ver
+ * diárias pros gráficos "Overview" do dashboard. laravel-monitor 284
+ * (v0.59.0, breaking pra `series.visits`): `monitors_new` ganhou as 5
+ * categorias de `MonitorController::MONITOR_CATEGORIES`
+ * (`human_guest`/`human_user`/`bot`/`flagged`/`unclassified`, mantendo
+ * `human` = guest+user por compatibilidade); `visits` trocou `clean`/
+ * `scraper` pelas MESMAS 5 categorias, pela categoria do Monitor DONO da
+ * visita (não mais pelo IP da visita em si) — ver
  * `MonitorController::getTimeline()`/`buildTimelineResult()`.
  */
 class MonitorTimelineTest extends TestCase
@@ -32,9 +38,9 @@ class MonitorTimelineTest extends TestCase
      * `created_at` não é `$fillable` em nenhum destes models — `forceFill`
      * (mesmo padrão de `MonitorGetDataTest::monitorAgedHours()`).
      */
-    protected function monitorAt(string $createdAt, ?string $kind = null): Monitor
+    protected function monitorAt(string $createdAt, ?string $kind = null, ?int $userId = null): Monitor
     {
-        $monitor = Monitor::create(['data' => []]);
+        $monitor = Monitor::create(['data' => $userId !== null ? ['user_id' => $userId] : []]);
         $monitor->forceFill(['created_at' => $createdAt])->save();
 
         if ($kind !== null) {
@@ -44,10 +50,20 @@ class MonitorTimelineTest extends TestCase
         return $monitor;
     }
 
-    protected function visitAt(string $createdAt, bool $scraper = false): MonitorVisit
+    /**
+     * IP flagado (`monitor_ip_stats.flagged`) — mesmo critério de
+     * `excludedMonitorIdsForQueue()`, reusado pelas categorias desde a 284.
+     */
+    protected function flagMonitorIp(Monitor $monitor, string $ip): void
     {
-        $monitor = Monitor::create(['data' => []]);
-        $visit = MonitorVisit::create(['monitor_id' => $monitor->id, 'paths' => ['/'], 'scraper' => $scraper]);
+        IpStat::create(['ip' => $ip, 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
+        $monitor->recordIp($ip);
+    }
+
+    protected function visitAt(string $createdAt, ?Monitor $monitor = null): MonitorVisit
+    {
+        $monitor ??= Monitor::create(['data' => []]);
+        $visit = MonitorVisit::create(['monitor_id' => $monitor->id, 'paths' => ['/'], 'scraper' => false]);
         $visit->forceFill(['created_at' => $createdAt])->save();
 
         return $visit;
@@ -75,7 +91,7 @@ class MonitorTimelineTest extends TestCase
         $this->assertSame('2026-09-03', $response->json('days.0'));
         $this->assertSame('2026-10-02', $response->json('days.29'));
         $this->assertCount(30, $response->json('series.monitors_new.human'));
-        $this->assertCount(30, $response->json('series.visits.clean'));
+        $this->assertCount(30, $response->json('series.visits.unclassified'));
         $this->assertCount(30, $response->json('series.access.local_token_read'));
     }
 
@@ -124,6 +140,51 @@ class MonitorTimelineTest extends TestCase
         $this->assertSame(1, $response->json('series.monitors_new.unclassified.6'));
     }
 
+    public function test_monitors_new_splits_human_between_guest_and_user_and_sums_into_legacy_human(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
+
+        $this->monitorAt('2026-10-02 08:00:00', 'human');
+        $this->monitorAt('2026-10-02 09:00:00', 'human', userId: 42);
+
+        $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
+
+        $response->assertOk();
+        $this->assertSame(1, $response->json('series.monitors_new.human_guest.6'));
+        $this->assertSame(1, $response->json('series.monitors_new.human_user.6'));
+        $this->assertSame(2, $response->json('series.monitors_new.human.6'), 'human legado deveria ser guest + user');
+    }
+
+    public function test_monitors_new_classifies_unclassified_monitor_seen_in_a_flagged_ip_as_flagged(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
+
+        $monitor = $this->monitorAt('2026-10-02 08:00:00');
+        $this->flagMonitorIp($monitor, '198.51.100.9');
+
+        $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
+
+        $response->assertOk();
+        $this->assertSame(1, $response->json('series.monitors_new.flagged.6'));
+        $this->assertSame(0, $response->json('series.monitors_new.unclassified.6'));
+    }
+
+    public function test_monitors_new_kind_wins_over_flagged_ip(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
+
+        // Já classificado como bot, mas também visto num IP flagado - kind
+        // manda, continua contando como bot, nunca flagged.
+        $monitor = $this->monitorAt('2026-10-02 08:00:00', 'bot');
+        $this->flagMonitorIp($monitor, '198.51.100.10');
+
+        $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
+
+        $response->assertOk();
+        $this->assertSame(1, $response->json('series.monitors_new.bot.6'));
+        $this->assertSame(0, $response->json('series.monitors_new.flagged.6'));
+    }
+
     /**
      * Sem `monitor_labels` (instalação não migrada), todo Monitor conta
      * como sem `kind` — mesmo fail-open de `monitorsByKind()` em getData.
@@ -142,18 +203,53 @@ class MonitorTimelineTest extends TestCase
         $this->assertSame(1, $response->json('series.monitors_new.unclassified.6'));
     }
 
-    public function test_splits_visits_by_clean_and_scraper(): void
+    public function test_splits_visits_by_the_owning_monitors_category_not_the_visit_ip(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
 
-        $this->visitAt('2026-10-02 08:00:00', false);
-        $this->visitAt('2026-10-02 09:00:00', true);
+        $human = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $human->id, 'kind' => 'human']);
+        $this->visitAt('2026-10-02 08:00:00', $human);
+
+        $bot = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $bot->id, 'kind' => 'bot']);
+        $this->visitAt('2026-10-02 09:00:00', $bot);
+
+        $authenticated = Monitor::create(['data' => ['user_id' => 7]]);
+        MonitorLabel::create(['monitor_id' => $authenticated->id, 'kind' => 'human']);
+        $this->visitAt('2026-10-02 10:00:00', $authenticated);
+
+        $flagged = Monitor::create(['data' => []]);
+        $this->flagMonitorIp($flagged, '198.51.100.11');
+        $this->visitAt('2026-10-02 11:00:00', $flagged);
+
+        $this->visitAt('2026-10-02 12:00:00'); // sem kind, sem flag - unclassified
 
         $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
 
         $response->assertOk();
-        $this->assertSame(1, $response->json('series.visits.clean.6'));
-        $this->assertSame(1, $response->json('series.visits.scraper.6'));
+        $this->assertSame(1, $response->json('series.visits.human_guest.6'));
+        $this->assertSame(1, $response->json('series.visits.human_user.6'));
+        $this->assertSame(1, $response->json('series.visits.bot.6'));
+        $this->assertSame(1, $response->json('series.visits.flagged.6'));
+        $this->assertSame(1, $response->json('series.visits.unclassified.6'));
+    }
+
+    public function test_visits_table_without_monitor_labels_counts_everything_as_unclassified(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
+
+        $human = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $human->id, 'kind' => 'human']);
+        $this->visitAt('2026-10-02 08:00:00', $human);
+
+        Schema::drop('monitor_labels');
+
+        $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
+
+        $response->assertOk();
+        $this->assertSame(0, $response->json('series.visits.human_guest.6'));
+        $this->assertSame(1, $response->json('series.visits.unclassified.6'));
     }
 
     public function test_splits_access_by_kind_and_excludes_get_timeline_itself_from_its_own_window_count(): void
@@ -186,7 +282,7 @@ class MonitorTimelineTest extends TestCase
 
         $response->assertOk();
         $this->assertSame([0, 0, 0, 0, 0, 0, 0], $response->json('series.monitors_new.human'));
-        $this->assertSame([0, 0, 0, 0, 0, 0, 0], $response->json('series.visits.clean'));
+        $this->assertSame([0, 0, 0, 0, 0, 0, 0], $response->json('series.visits.unclassified'));
         $this->assertSame([0, 0, 0, 0, 0, 0, 0], $response->json('series.access.local_token_read'));
     }
 

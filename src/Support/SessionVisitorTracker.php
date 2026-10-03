@@ -4,6 +4,7 @@ namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
@@ -55,6 +56,45 @@ class SessionVisitorTracker
 
         $monitor->recordIp($ip);
         session(['monitor_last_ip' => $ip]);
+    }
+
+    /**
+     * laravel-monitor 284 (v0.59.0): auto-classifica como `human` (
+     * `source=auth`) um Monitor que acabou de logar — quem autenticou é,
+     * por definição, uma pessoa (ou pelo menos tem uma conta de verdade por
+     * trás), então não faz sentido esse Monitor continuar na fila de
+     * triagem IA pra sempre só porque nunca foi classificado manualmente.
+     *
+     * Só os dois call sites de `track()` que acabaram de setar
+     * `data['user_id']` pela primeira vez chamam este método (ver
+     * `$newlyAuthenticated` nos dois ramos abaixo) — é esse "só na
+     * transição guest->autenticado" que faz o custo ficar barato: depois
+     * da primeira vez, `user_id` já está em `data` e o ramo nunca mais
+     * entra aqui pra este Monitor, então nenhuma query roda nas requests
+     * seguintes. Monitors que já tinham `user_id` antes desta feature
+     * existir não passam por essa transição de novo — ver o backfill em
+     * `MonitorUpdateCommand`/migration idempotente.
+     *
+     * `firstOrNew` + checagem de `kind` em PHP (não um `INSERT ... WHERE
+     * NOT EXISTS` ou `upsert`): precisa checar `kind !== null` antes de
+     * decidir se escreve, não só "existe linha ou não" — uma linha já
+     * existente SEM `kind` (ex: só com `tags`/`note`) deve ganhar
+     * `kind=human` normalmente, mas uma com `kind=bot`/`human` manual ou
+     * de IA NUNCA pode ser sobrescrita (um bot manual que loga continua
+     * bot).
+     */
+    protected function maybeAutoHumanClassify(int $monitorId): void
+    {
+        $label = MonitorLabel::firstOrNew(['monitor_id' => $monitorId]);
+
+        if ($label->kind !== null) {
+            return;
+        }
+
+        $label->kind = 'human';
+        $label->source = 'auth';
+        $label->classified_at = now();
+        $label->save();
     }
 
     /**
@@ -127,7 +167,14 @@ class SessionVisitorTracker
                 $data['ua'] = $userAgent;
 
                 if (config('monitor.track_authenticated_user', true) && Auth::check()) {
+                    // $data é AsArrayObject (ArrayAccess), não array puro -
+                    // array_key_exists() não aceita ArrayAccess, isset() sim.
+                    $newlyAuthenticated = ! isset($data['user_id']);
                     $data['user_id'] = Auth::id();
+
+                    if ($newlyAuthenticated) {
+                        $this->maybeAutoHumanClassify($user->id);
+                    }
                 }
 
                 $visitCount = IpStat::visitCount($ip) + 1;
@@ -184,6 +231,10 @@ class SessionVisitorTracker
 
         $user = Monitor::create(['data' => $data, 'id_token' => $rememberToken]);
         session(['monitor_id' => $user->id]);
+
+        if (isset($data['user_id'])) {
+            $this->maybeAutoHumanClassify($user->id);
+        }
 
         $user->recordHit($path, $notFound);
         $this->recordIpIfChanged($user, $ip);

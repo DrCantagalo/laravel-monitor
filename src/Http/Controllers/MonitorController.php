@@ -21,6 +21,7 @@ use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -389,10 +390,14 @@ class MonitorController extends Controller
         return response()->json([
             'success' => true,
             // laravel-monitor 270 (v0.56.0): derivado do MESMO snapshot
-            // (cacheado) de `monitors_by_kind`, pra soma dos 4 grupos bater
+            // (cacheado) de `monitors_by_kind`, pra soma dos grupos bater
             // sempre exatamente com este total — um `Monitor::count()`
             // separado, sem cache, divergiria dentro da janela do TTL.
-            'visitors_total' => array_sum($monitorsByKind),
+            // laravel-monitor 284 (v0.59.0): `human` é a chave LEGADA
+            // (`human_guest` + `human_user`, mantida só por
+            // compatibilidade) — soma-la junto contaria todo Monitor
+            // humano em dobro, por isso excluída daqui.
+            'visitors_total' => array_sum(Arr::except($monitorsByKind, 'human')),
             'visits_total' => $this->visitsTotal(),
             'unique_ips_total' => $this->uniqueIpsTotal(),
             // laravel-monitor 270 (v0.56.0): "Monitor é a fonte da
@@ -477,27 +482,143 @@ class MonitorController extends Controller
     }
 
     /**
-     * laravel-monitor 270 (v0.56.0): todos os Monitors em 4 grupos
-     * disjuntos — `human`/`bot` (`monitor_labels.kind` gravado, de
-     * qualquer `source`, manual ou IA) e, sem `kind`, `new`/`unclassified`
-     * pelo mesmo corte de idade da fila de triagem IA
-     * (`aiTriageCutoff()`, laravel-monitor 266): `new` = `created_at`
+     * laravel-monitor 284 (v0.59.0): as 5 categorias derivadas de Monitor,
+     * cada Monitor em exatamente uma — mesma definição usada por
+     * `aggregateMonitorsByKind()` (getData) e por `timelineMonitorsNew()`/
+     * `timelineVisits()` (getTimeline), pra nunca divergirem. `kind`
+     * manda: um Monitor classificado (`human`/`bot`) conta pela
+     * classificação mesmo que tenha sido visto num IP flagado — só entra
+     * em `flagged` quem NÃO tem `kind`.
+     */
+    protected const MONITOR_CATEGORIES = ['human_user', 'human_guest', 'bot', 'flagged', 'unclassified'];
+
+    /**
+     * Categoria de um Monitor a partir do `kind` já resolvido (`null`/
+     * `'human'`/`'bot'` — qualquer outro valor deve ser normalizado pra
+     * `null` por quem chama, mesmo tratamento de "sem kind" que o resto do
+     * controller já dá a um `kind` fora de `MonitorLabel::KINDS`) e dos
+     * dois booleanos pré-calculados pelo chamador (ver
+     * `monitorCategoryIdSets()` — nunca calculados aqui dentro, pra não
+     * rodar uma query por Monitor).
+     */
+    protected function categoryForMonitor(?string $kind, bool $hasUserId, bool $isFlagged): string
+    {
+        if ($kind === 'bot') {
+            return 'bot';
+        }
+
+        if ($kind === 'human') {
+            return $hasUserId ? 'human_user' : 'human_guest';
+        }
+
+        return $isFlagged ? 'flagged' : 'unclassified';
+    }
+
+    /**
+     * IDs de Monitor flagado/bloqueado (reusa `excludedMonitorIdsForQueue()`
+     * tal qual — mesmo critério da fila de triagem) e IDs de Monitor com
+     * `user_id` presente em `data` — os dois conjuntos que
+     * `categoryForMonitor()` precisa, calculados UMA VEZ por chamada
+     * (`getTimeline`/`getData`), nunca por linha/Monitor. `user_id`: coluna
+     * gerada `monitors_user_id` no MySQL, fallback `data->user_id` nos
+     * demais drivers — mesma lógica de `Monitor::scopeForUserId()`.
+     *
+     * Fail-open por conjunto: uma falha aqui (ex: `monitor_visit_ips`
+     * ausente) não pode derrubar quem chama — trata como conjunto vazio
+     * (nenhum Monitor flagado / nenhum com user_id), que é a degradação
+     * mais conservadora (tudo que seria `flagged` cai em `unclassified`;
+     * tudo que seria `human_user` cai em `human_guest`).
+     *
+     * @return array{0: \Illuminate\Support\Collection<int,int>, 1: \Illuminate\Support\Collection<int,int>} [$flaggedMonitorIds, $monitorIdsWithUserId]
+     */
+    protected function monitorCategoryIdSets(): array
+    {
+        try {
+            $flaggedIds = $this->excludedMonitorIdsForQueue();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular Monitors flagados pras categorias — tratando como nenhum. Erro original: '.$e->getMessage());
+            $flaggedIds = collect();
+        }
+
+        try {
+            $userIds = $this->monitorIdsWithUserId();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular Monitors com user_id pras categorias — tratando como nenhum. Erro original: '.$e->getMessage());
+            $userIds = collect();
+        }
+
+        return [$flaggedIds, $userIds];
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int,int>
+     */
+    protected function monitorIdsWithUserId()
+    {
+        $query = DB::table('monitors')->select('id');
+
+        if ($query->getConnection()->getDriverName() === 'mysql') {
+            $query->whereNotNull('monitors_user_id');
+        } else {
+            $query->whereNotNull('data->user_id');
+        }
+
+        return $query->pluck('id');
+    }
+
+    /**
+     * Converte uma collection de IDs numa lista "1,2,3" segura pra embutir
+     * direto num `IN (...)` de SQL raw — cast pra int em cada item (nunca
+     * interpola um valor não confiável) e `-1` (nenhum Monitor tem esse id)
+     * quando a collection está vazia, pra manter `IN (...)` sintaticamente
+     * válido sem um `CASE WHEN` extra só pra lista vazia.
+     *
+     * @param  \Illuminate\Support\Collection<int,int>  $ids
+     */
+    protected function sqlIntList($ids): string
+    {
+        if ($ids->isEmpty()) {
+            return '-1';
+        }
+
+        return $ids->map(fn ($id) => (int) $id)->implode(',');
+    }
+
+    /**
+     * laravel-monitor 270 (v0.56.0, categorias ampliadas na 284/v0.59.0):
+     * todos os Monitors em grupos disjuntos — `bot` e `human` (divididos em
+     * `human_guest`/`human_user`, `monitor_labels.kind` gravado, de
+     * qualquer `source`, manual/IA/auth) e, sem `kind`, `flagged` (visto em
+     * IP flagado/bloqueado, mesmo critério de `excludedMonitorIdsForQueue`)
+     * e `new`/`unclassified` pelo mesmo corte de idade da fila de triagem
+     * IA (`aiTriageCutoff()`, laravel-monitor 266) — `new` = `created_at`
      * mais recente que o cutoff, `unclassified` = igual ou mais antigo.
-     * Diferente de `getMonitorQueueCounts`, NÃO exclui Monitors de IPs
-     * flagados/bloqueados — aqui é contagem total (a soma bate com
-     * `visitors_total`), não a fila de trabalho.
+     * Diferente de `getMonitorQueueCounts`, a soma de TODAS as chaves bate
+     * com `visitors_total` (contagem total, não a fila de trabalho) — mas,
+     * desde a 284, `unclassified`/`new` já não incluem `flagged` (antes
+     * incluíam), pra bater com `getMonitorQueueCounts` de verdade.
      *
      * Uma query só, agregação condicional (`SUM(CASE ...)`) sem
      * `GROUP BY`: devolve sempre exatamente 1 linha e não tem coluna
      * não-agregada no SELECT, então não tem como esbarrar em
      * `only_full_group_by` do MySQL (bug da laravel-monitor 260). O left
-     * join não multiplica linhas: `monitor_labels.monitor_id` é `unique`.
+     * join não multiplica linhas: `monitor_labels.monitor_id` é `unique`
+     * (bem, deveria ser — ver `bugs/laravel-monitor.md` no claude-manager,
+     * a constraint de banco não existe de verdade em nenhum driver; a
+     * aplicação sempre manteve 1:1 na prática). As listas de IDs
+     * (`$flaggedIds`/`$userIds`, calculadas uma vez só por
+     * `monitorCategoryIdSets()`) entram como `IN (...)` embutido na mesma
+     * query raw — não dá pra passar uma `Collection` como binding único,
+     * mas os valores são sempre inteiros castados (`sqlIntList()`), nunca
+     * interpolação de entrada externa.
      *
      * Fail-open: sem `monitor_labels` (instalação ainda não migrada pra
      * 0.53.0+) cai pra mesma agregação sem o join (todo Monitor conta
      * como sem `kind`); sem `monitors`, zeros.
      *
-     * @return array{human: int, bot: int, unclassified: int, new: int}
+     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
+     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @return array{human: int, human_guest: int, human_user: int, bot: int, flagged: int, unclassified: int, new: int}
      */
     protected function monitorsByKind(): array
     {
@@ -506,28 +627,31 @@ class MonitorController extends Controller
             now()->addSeconds((int) config('monitor.data_totals_cache_ttl_seconds', 45)),
             function () {
                 $cutoff = $this->aiTriageCutoff();
+                [$flaggedIds, $userIds] = $this->monitorCategoryIdSets();
 
                 try {
-                    return $this->aggregateMonitorsByKind($cutoff, true);
+                    return $this->aggregateMonitorsByKind($cutoff, true, $flaggedIds, $userIds);
                 } catch (QueryException $e) {
                     Log::warning('[laravel-monitor] falha ao calcular monitors_by_kind com monitor_labels em getData (rode `php artisan migrate` ou `php artisan monitor:update`?). Erro original: '.$e->getMessage());
                 }
 
                 try {
-                    return $this->aggregateMonitorsByKind($cutoff, false);
+                    return $this->aggregateMonitorsByKind($cutoff, false, $flaggedIds, $userIds);
                 } catch (QueryException $e) {
                     Log::warning('[laravel-monitor] falha ao calcular monitors_by_kind em getData. Erro original: '.$e->getMessage());
 
-                    return ['human' => 0, 'bot' => 0, 'unclassified' => 0, 'new' => 0];
+                    return ['human' => 0, 'human_guest' => 0, 'human_user' => 0, 'bot' => 0, 'flagged' => 0, 'unclassified' => 0, 'new' => 0];
                 }
             }
         );
     }
 
     /**
-     * @return array{human: int, bot: int, unclassified: int, new: int}
+     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
+     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @return array{human: int, human_guest: int, human_user: int, bot: int, flagged: int, unclassified: int, new: int}
      */
-    protected function aggregateMonitorsByKind(Carbon $cutoff, bool $withLabels): array
+    protected function aggregateMonitorsByKind(Carbon $cutoff, bool $withLabels, $flaggedIds, $userIds): array
     {
         $query = DB::table('monitors as m');
 
@@ -539,21 +663,33 @@ class MonitorController extends Controller
         }
 
         // Sem `kind` = NULL ou (defensivo) qualquer valor fora de
-        // human/bot — garante que os 4 grupos cubram todo Monitor
+        // human/bot — garante que os grupos cubram todo Monitor
         // exatamente uma vez.
         $noKind = "({$kindSql} IS NULL OR {$kindSql} NOT IN ('human', 'bot'))";
+        $notFlagged = 'm.id NOT IN ('.$this->sqlIntList($flaggedIds).')';
+        $isFlagged = 'm.id IN ('.$this->sqlIntList($flaggedIds).')';
+        $hasUserId = 'm.id IN ('.$this->sqlIntList($userIds).')';
+        $noUserId = 'm.id NOT IN ('.$this->sqlIntList($userIds).')';
 
         $row = $query->selectRaw(
-            "SUM(CASE WHEN {$kindSql} = 'human' THEN 1 ELSE 0 END) AS human_total, "
+            "SUM(CASE WHEN {$kindSql} = 'human' AND {$hasUserId} THEN 1 ELSE 0 END) AS human_user_total, "
+            ."SUM(CASE WHEN {$kindSql} = 'human' AND {$noUserId} THEN 1 ELSE 0 END) AS human_guest_total, "
             ."SUM(CASE WHEN {$kindSql} = 'bot' THEN 1 ELSE 0 END) AS bot_total, "
-            ."SUM(CASE WHEN {$noKind} AND m.created_at > ? THEN 1 ELSE 0 END) AS new_total, "
-            ."SUM(CASE WHEN {$noKind} AND (m.created_at <= ? OR m.created_at IS NULL) THEN 1 ELSE 0 END) AS unclassified_total",
+            ."SUM(CASE WHEN {$noKind} AND {$isFlagged} THEN 1 ELSE 0 END) AS flagged_total, "
+            ."SUM(CASE WHEN {$noKind} AND {$notFlagged} AND m.created_at > ? THEN 1 ELSE 0 END) AS new_total, "
+            ."SUM(CASE WHEN {$noKind} AND {$notFlagged} AND (m.created_at <= ? OR m.created_at IS NULL) THEN 1 ELSE 0 END) AS unclassified_total",
             [$cutoff, $cutoff]
         )->first();
 
+        $humanUser = (int) ($row->human_user_total ?? 0);
+        $humanGuest = (int) ($row->human_guest_total ?? 0);
+
         return [
-            'human' => (int) ($row->human_total ?? 0),
+            'human' => $humanUser + $humanGuest,
+            'human_guest' => $humanGuest,
+            'human_user' => $humanUser,
             'bot' => (int) ($row->bot_total ?? 0),
+            'flagged' => (int) ($row->flagged_total ?? 0),
             'unclassified' => (int) ($row->unclassified_total ?? 0),
             'new' => (int) ($row->new_total ?? 0),
         ];
@@ -2258,21 +2394,43 @@ class MonitorController extends Controller
     }
 
     /**
-     * @return array{human: array<string,int>, bot: array<string,int>, unclassified: array<string,int>}
+     * laravel-monitor 284 (v0.59.0): as 5 categorias de `MONITOR_CATEGORIES`
+     * (`human_user`/`human_guest`/`bot`/`flagged`/`unclassified`) — ao
+     * contrário de `aggregateMonitorsByKind` (getData), aqui NÃO existe um
+     * bucket `new` separado: a carência da fila IA só faz sentido num
+     * total agregado "agora", não numa série diária (um Monitor "novo"
+     * ontem já não é mais novo hoje) — esses Monitors entram direto em
+     * `unclassified`, mesmo critério de antes desta task.
+     *
+     * `$flaggedIds`/`$userIds` vêm de `monitorCategoryIdSets()` (chamado
+     * uma vez só em `buildTimelineResult()`, nunca aqui dentro) — convertidos
+     * em lookup O(1) (`array_flip`) ANTES do chunk, pra nunca rodar uma
+     * query (nem uma busca O(n) em array) por linha.
+     *
+     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
+     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @return array<string, array<string,int>> chaves de self::MONITOR_CATEGORIES
      */
-    protected function timelineMonitorsNew(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys): array
+    protected function timelineMonitorsNew(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys, $flaggedIds, $userIds): array
     {
-        $buckets = [
-            'human' => $this->emptyTimelineBucket($dayKeys),
-            'bot' => $this->emptyTimelineBucket($dayKeys),
-            'unclassified' => $this->emptyTimelineBucket($dayKeys),
-        ];
+        $emptyBuckets = function () use ($dayKeys) {
+            $buckets = [];
+            foreach (self::MONITOR_CATEGORIES as $category) {
+                $buckets[$category] = $this->emptyTimelineBucket($dayKeys);
+            }
+
+            return $buckets;
+        };
+
+        $buckets = $emptyBuckets();
 
         if (! Schema::hasTable('monitors')) {
             return $buckets;
         }
 
         $withLabels = Schema::hasTable('monitor_labels');
+        $flaggedLookup = array_flip($flaggedIds->all());
+        $userIdLookup = array_flip($userIds->all());
 
         try {
             $query = DB::table('monitors as m')
@@ -2280,73 +2438,97 @@ class MonitorController extends Controller
 
             if ($withLabels) {
                 $query->leftJoin('monitor_labels as ml', 'ml.monitor_id', '=', 'm.id')
-                    ->select('m.created_at as created_at', 'ml.kind as kind');
+                    ->select('m.id as id', 'm.created_at as created_at', 'ml.kind as kind');
             } else {
-                $query->select('m.created_at as created_at', DB::raw('NULL as kind'));
+                $query->select('m.id as id', 'm.created_at as created_at', DB::raw('NULL as kind'));
             }
 
-            $query->orderBy('m.id')->chunk(1000, function ($rows) use (&$buckets, $tz) {
+            $query->orderBy('m.id')->chunk(1000, function ($rows) use (&$buckets, $tz, $flaggedLookup, $userIdLookup) {
                 foreach ($rows as $row) {
                     $dayKey = $this->timelineDayKey($row->created_at, $tz);
 
-                    if (! array_key_exists($dayKey, $buckets['human'])) {
+                    if (! array_key_exists($dayKey, $buckets['unclassified'])) {
                         continue;
                     }
 
-                    $kind = in_array($row->kind, MonitorLabel::KINDS, true) ? $row->kind : 'unclassified';
-                    $buckets[$kind][$dayKey]++;
+                    $kind = in_array($row->kind, MonitorLabel::KINDS, true) ? $row->kind : null;
+                    $category = $this->categoryForMonitor($kind, isset($userIdLookup[$row->id]), isset($flaggedLookup[$row->id]));
+                    $buckets[$category][$dayKey]++;
                 }
             });
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] falha ao calcular series.monitors_new em getTimeline. Erro original: '.$e->getMessage());
 
-            return [
-                'human' => $this->emptyTimelineBucket($dayKeys),
-                'bot' => $this->emptyTimelineBucket($dayKeys),
-                'unclassified' => $this->emptyTimelineBucket($dayKeys),
-            ];
+            return $emptyBuckets();
         }
 
         return $buckets;
     }
 
     /**
-     * @return array{clean: array<string,int>, scraper: array<string,int>}
+     * laravel-monitor 284 (v0.59.0, breaking): `clean`/`scraper` (pelo IP da
+     * visita) viram as mesmas 5 categorias de `MONITOR_CATEGORIES`, pela
+     * categoria do MONITOR DONO da visita (`monitor_visits.monitor_id`) —
+     * não mais pelo IP individual daquela visita. Ver CHANGELOG.
+     *
+     * Mesmo raciocínio de performance de `timelineMonitorsNew()`: join com
+     * `monitor_labels` direto na query principal (sem precisar carregar
+     * TODOS os Monitors, só os donos de visitas dentro da janela), lookups
+     * O(1) pros conjuntos pré-calculados.
+     *
+     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
+     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @return array<string, array<string,int>> chaves de self::MONITOR_CATEGORIES
      */
-    protected function timelineVisits(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys): array
+    protected function timelineVisits(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys, $flaggedIds, $userIds): array
     {
-        $buckets = [
-            'clean' => $this->emptyTimelineBucket($dayKeys),
-            'scraper' => $this->emptyTimelineBucket($dayKeys),
-        ];
+        $emptyBuckets = function () use ($dayKeys) {
+            $buckets = [];
+            foreach (self::MONITOR_CATEGORIES as $category) {
+                $buckets[$category] = $this->emptyTimelineBucket($dayKeys);
+            }
+
+            return $buckets;
+        };
+
+        $buckets = $emptyBuckets();
 
         if (! Schema::hasTable('monitor_visits')) {
             return $buckets;
         }
 
+        $withLabels = Schema::hasTable('monitor_labels');
+        $flaggedLookup = array_flip($flaggedIds->all());
+        $userIdLookup = array_flip($userIds->all());
+
         try {
-            DB::table('monitor_visits')
-                ->select('created_at', 'scraper')
-                ->whereBetween('created_at', [$startBound, $endBound])
-                ->orderBy('id')
-                ->chunk(1000, function ($rows) use (&$buckets, $tz) {
-                    foreach ($rows as $row) {
-                        $dayKey = $this->timelineDayKey($row->created_at, $tz);
+            $query = DB::table('monitor_visits as v')
+                ->whereBetween('v.created_at', [$startBound, $endBound]);
 
-                        if (! array_key_exists($dayKey, $buckets['clean'])) {
-                            continue;
-                        }
+            if ($withLabels) {
+                $query->leftJoin('monitor_labels as ml', 'ml.monitor_id', '=', 'v.monitor_id')
+                    ->select('v.created_at as created_at', 'v.monitor_id as monitor_id', 'ml.kind as kind');
+            } else {
+                $query->select('v.created_at as created_at', 'v.monitor_id as monitor_id', DB::raw('NULL as kind'));
+            }
 
-                        $buckets[$row->scraper ? 'scraper' : 'clean'][$dayKey]++;
+            $query->orderBy('v.id')->chunk(1000, function ($rows) use (&$buckets, $tz, $flaggedLookup, $userIdLookup) {
+                foreach ($rows as $row) {
+                    $dayKey = $this->timelineDayKey($row->created_at, $tz);
+
+                    if (! array_key_exists($dayKey, $buckets['unclassified'])) {
+                        continue;
                     }
-                });
+
+                    $kind = in_array($row->kind, MonitorLabel::KINDS, true) ? $row->kind : null;
+                    $category = $this->categoryForMonitor($kind, isset($userIdLookup[$row->monitor_id]), isset($flaggedLookup[$row->monitor_id]));
+                    $buckets[$category][$dayKey]++;
+                }
+            });
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] falha ao calcular series.visits em getTimeline. Erro original: '.$e->getMessage());
 
-            return [
-                'clean' => $this->emptyTimelineBucket($dayKeys),
-                'scraper' => $this->emptyTimelineBucket($dayKeys),
-            ];
+            return $emptyBuckets();
         }
 
         return $buckets;
@@ -2400,27 +2582,60 @@ class MonitorController extends Controller
         return $buckets;
     }
 
+    /**
+     * Soma dois buckets diários (mesmas chaves de dia, mesma ordem) — usada
+     * só pra compor o `human` legado (`human_guest` + `human_user`) de
+     * `series.monitors_new`, mantido por compatibilidade (ver
+     * `buildTimelineResult()`).
+     *
+     * @param  array<string,int>  $a
+     * @param  array<string,int>  $b
+     * @return array<string,int>
+     */
+    private function sumDailyBuckets(array $a, array $b): array
+    {
+        $sum = [];
+        foreach ($a as $dayKey => $value) {
+            $sum[$dayKey] = $value + ($b[$dayKey] ?? 0);
+        }
+
+        return $sum;
+    }
+
     protected function buildTimelineResult(int $days): array
     {
         $tz = config('app.timezone', 'UTC');
         [$startBound, $endBound, $dayKeys] = $this->timelineWindow($tz, $days);
+        [$flaggedIds, $userIds] = $this->monitorCategoryIdSets();
 
-        $monitorsNew = $this->timelineMonitorsNew($tz, $startBound, $endBound, $dayKeys);
-        $visits = $this->timelineVisits($tz, $startBound, $endBound, $dayKeys);
+        $monitorsNew = $this->timelineMonitorsNew($tz, $startBound, $endBound, $dayKeys, $flaggedIds, $userIds);
+        $visits = $this->timelineVisits($tz, $startBound, $endBound, $dayKeys, $flaggedIds, $userIds);
         $access = $this->timelineAccess($tz, $startBound, $endBound, $dayKeys);
 
         return [
             'timezone' => $tz,
             'days' => $dayKeys,
             'series' => [
+                // `human` legado = human_guest + human_user, mantido por
+                // compatibilidade (decisão da task 284) ao lado das 5
+                // categorias granulares.
                 'monitors_new' => [
-                    'human' => array_values($monitorsNew['human']),
+                    'human' => array_values($this->sumDailyBuckets($monitorsNew['human_guest'], $monitorsNew['human_user'])),
+                    'human_guest' => array_values($monitorsNew['human_guest']),
+                    'human_user' => array_values($monitorsNew['human_user']),
                     'bot' => array_values($monitorsNew['bot']),
+                    'flagged' => array_values($monitorsNew['flagged']),
                     'unclassified' => array_values($monitorsNew['unclassified']),
                 ],
+                // Breaking (task 284): `clean`/`scraper` saíram, pelas
+                // mesmas 5 categorias acima, pela categoria do Monitor DONO
+                // da visita — ver CHANGELOG.
                 'visits' => [
-                    'clean' => array_values($visits['clean']),
-                    'scraper' => array_values($visits['scraper']),
+                    'human_guest' => array_values($visits['human_guest']),
+                    'human_user' => array_values($visits['human_user']),
+                    'bot' => array_values($visits['bot']),
+                    'flagged' => array_values($visits['flagged']),
+                    'unclassified' => array_values($visits['unclassified']),
                 ],
                 'access' => [
                     'read_token_issued' => array_values($access[AccessLogger::KIND_READ_TOKEN_ISSUED]),

@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.59.0] - 2026-10-03
+### Added
+- **Auto-human tagging for authenticated visitors.** The first time
+  `SessionVisitorTracker` records `data.user_id` for a Monitor (guest →
+  authenticated transition, gated by `track_authenticated_user` like
+  before), it now also ensures a `monitor_labels` row with `kind=human`,
+  `source=auth` (new value, alongside `ai`/`manual`), `classified_at=now()`
+  — but only when that Monitor doesn't have a `kind` yet; an existing
+  `manual`/`ai` classification (including `bot`) is never overwritten. A
+  new migration backfills Monitors that already had `user_id` recorded
+  before this version (they never go through the transition again, so
+  they'd otherwise stay stuck in the AI triage queue forever).
+- **`getData`/`monitors_by_kind`: new `flagged` category, `human` split
+  into `human_guest`/`human_user`.** A Monitor without a `kind` that was
+  seen on a flagged/blocked IP (same criteria as the AI triage queue's
+  exclusion) now counts as `flagged` instead of `new`/`unclassified` —
+  matches `getMonitorQueueCounts` exactly. `human` is split into
+  `human_guest` (no `user_id`) and `human_user` (has one); the old `human`
+  key is kept as `human_guest + human_user` for compatibility. A Monitor's
+  own `kind` always wins over its flagged-IP status (a classified bot/human
+  seen on a flagged IP still counts by its classification, never
+  `flagged`).
+- **`getTimeline`: `series.monitors_new` gained `human_guest`/
+  `human_user`/`flagged`** (same 5-category breakdown as `getData`,
+  `human` kept as the guest+user sum for compatibility); no separate `new`
+  bucket here (the AI-triage grace period only makes sense for an
+  "as of now" total, not a daily series — those Monitors fall under
+  `unclassified`).
+
+### ⚠️ Breaking — `getTimeline`: `series.visits` shape changed
+- **`series.visits` no longer has `clean`/`scraper`.** It now has the same
+  5 categories as `series.monitors_new`
+  (`human_guest`/`human_user`/`bot`/`flagged`/`unclassified`), bucketed by
+  the category of the Monitor that OWNS each visit
+  (`monitor_visits.monitor_id`), not by the IP the individual visit came
+  from. `series.access` is unchanged.
+
 ## [0.58.0] - 2026-10-02
 ### Added
 - **`getTimeline`**: new read-only action with daily series for the
