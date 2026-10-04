@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.59.1] - 2026-10-04
+### Fixed
+- **`monitor_labels.monitor_id` now has a real unique index.** The
+  `->unique()` in the 0.53.0 migration was chained after `constrained()`
+  (on the foreign-key definition), so no index was ever created on any
+  driver and two concurrent requests could create two label rows for the
+  same Monitor. A new migration merges any existing duplicates (`manual`
+  wins, then the newest `classified_at`, then the highest `id`) and adds
+  the index. The auto-human classifier now ignores the losing side of that
+  race instead of erroring.
+
 ## [0.59.0] - 2026-10-03
 ### Added
 - **Auto-human tagging for authenticated visitors.** The first time

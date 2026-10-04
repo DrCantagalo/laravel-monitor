@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor\Support;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
@@ -94,7 +95,16 @@ class SessionVisitorTracker
         $label->kind = 'human';
         $label->source = 'auth';
         $label->classified_at = now();
-        $label->save();
+
+        // Com o `unique` em monitor_id (migration 2026-10-04), duas
+        // requests simultâneas criando o primeiro rótulo do mesmo Monitor
+        // não duplicam mais a linha: a perdedora cai aqui e desiste — o
+        // rótulo que venceu (qualquer origem) não deve ser sobrescrito.
+        try {
+            $label->save();
+        } catch (UniqueConstraintViolationException) {
+            return;
+        }
     }
 
     /**

@@ -45,7 +45,11 @@ return new class extends Migration
     {
         Schema::create('monitor_labels', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('monitor_id')->constrained('monitors')->cascadeOnDelete()->unique();
+            // O `unique` de monitor_id é criado em
+            // 2026_10_04_000000_add_unique_monitor_id_to_monitor_labels_table
+            // (o `->unique()` que estava encadeado aqui, depois de
+            // `constrained()`, não criava índice nenhum).
+            $table->foreignId('monitor_id')->constrained('monitors')->cascadeOnDelete();
             // null = indefinido, mesmo raciocínio de monitor_ip_labels:
             // 'bot'/'human' validados na aplicação, não via enum() do banco.
             $table->string('kind')->nullable();
