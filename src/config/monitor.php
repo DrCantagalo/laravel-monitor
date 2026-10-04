@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.59.1',
+    'version' => '0.60.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -65,6 +65,12 @@ return [
     // atividade da visita) — aplicada por `DataPruner` em `monitor:prune`/
     // `pruneData` (nunca no gatilho automático, ver abaixo), independente
     // da idade do Monitor pai. `0` desliga (guarda pra sempre).
+    //
+    // Desde a laravel-monitor 286 (v0.60.0): o MESMO valor também apaga
+    // `monitor_page_hits` (perfil de navegação por visitante, por `day`)
+    // mais antigo que o cutoff, no mesmo passe (`DataPruner::prunePageHits()`)
+    // — inclusive hits do tracker anônimo (bots/API, sem sessão, que nunca
+    // cria `monitor_visits`).
     //
     // ATENÇÃO — mudança de comportamento (laravel-monitor 152, v0.46.0):
     // o default mudou de `90` pra `0` (retenção agora é manual/opt-in).

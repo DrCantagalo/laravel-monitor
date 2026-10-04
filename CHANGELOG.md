@@ -4,6 +4,53 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.60.0] - 2026-10-04
+### ⚠️ Breaking — `monitor_page_hits` schema: day dimension added
+- **`monitor_page_hits` is now keyed on `(monitor_id, path, day)`**
+  instead of `(monitor_id, path)` — a new `day` (DATE) column. A
+  migration backfills existing rows with `day = DATE(updated_at)` (an
+  approximation — the row's last-activity date, not every day that
+  visitor actually hit that path, since the old schema had no per-day
+  data to recover) and records the date it ran in a new
+  `monitor_settings` key/value table
+  (`page_hits_exact_since`), exposed as `exact_since` in `getPages`/
+  `getPageTimeline` responses: days from that date on are exact (written
+  with a real `day` already), days before it come from the approximate
+  backfill. `Monitor::recordHit()` now upserts on `(monitor_id, path,
+  day)` — same visitor + path + day sums into the same row, a different
+  day always gets a new row. Any direct SQL against this table (outside
+  `getPages`/`getVisitorPaths`/the other package helpers) needs to
+  account for the new column.
+- **`getPages`'s `date_from`/`date_to` are now exact.** Before `0.60.0`
+  they filtered by the owning `Monitor`'s `updated_at` ("that visitor was
+  active in this window", summing hits from their entire lifetime even
+  outside the requested window, since the schema had no per-hit
+  timestamp). They now filter directly on `monitor_page_hits.day`. The
+  response also gains `exact_since` (see above).
+
+### Added
+- **`getPageTimeline` action** (`path`, `days` — same `7`–`365`
+  range/validation/cache as `getTimeline`): zero-filled daily series of
+  hits for one specific path (summed across every `Monitor`), for the
+  "click a path to see its history" dashboard chart (home-page 287).
+  `path` is matched exactly (the same `host/path` key already stored in
+  `monitor_page_hits.path`), not by the suffix matching
+  `flagScraperPath`/`markPathSafe` use. Response: `{"success": true,
+  "path": "...", "timezone": "...", "days": [...], "hits": [...],
+  "exact_since": "..."}`.
+- **`monitor_page_hits` now has its own retention.** `DataPruner::prune()`
+  (used by both `monitor:prune` and the `pruneData` HTTP action) now also
+  deletes `monitor_page_hits` rows with `day` older than
+  `monitor.visits_retention_days` — the same cutoff/gate already used for
+  `monitor_visits` pruning (`0`, the default, keeps the old
+  keep-forever behavior). Before this, a visitor's page-hit profile had
+  no retention at all, even when `visits_retention_days` was set — the
+  visit journey was pruned, but the per-path hit counts behind it stayed
+  forever, including for the anonymous tracker (bots/API, no session,
+  which never creates a `monitor_visits` row to prune in the first
+  place). `pruneData`'s response and `monitor:prune`'s output gain a new
+  `page_hits_deleted` count.
+
 ## [0.59.1] - 2026-10-04
 ### Fixed
 - **`monitor_labels.monitor_id` now has a real unique index.** The

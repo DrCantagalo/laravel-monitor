@@ -19,24 +19,35 @@ class Monitor extends Model
     protected $fillable = ['data', 'id_token'];
 
     /**
-     * `monitor_page_hits` (uma linha por path por Monitor) e
-     * `monitor_visit_ips` (uma linha por IP por Monitor) são a fonte da
-     * verdade desses dados — gravadas direto pelos trackers via
-     * `recordHit()`/`recordIp()`, não mais copiadas do blob `data` por um
-     * hook `saved` (até 0.41.0, `data.page`/`data.not_found`/`data.ips`
-     * eram a fonte e essas tabelas só uma cópia, com upsert de TODOS os
-     * paths a cada save). Quem limpa as linhas filhas de um Monitor
-     * apagado é o `cascadeOnDelete` da FK — `Monitor::where(...)->delete()`
-     * em massa (DataPruner) nunca disparou eventos de model de qualquer
-     * forma.
+     * `monitor_page_hits` (uma linha por path por Monitor **por dia**,
+     * desde a laravel-monitor 286) e `monitor_visit_ips` (uma linha por
+     * IP por Monitor) são a fonte da verdade desses dados — gravadas
+     * direto pelos trackers via `recordHit()`/`recordIp()`, não mais
+     * copiadas do blob `data` por um hook `saved` (até 0.41.0,
+     * `data.page`/`data.not_found`/`data.ips` eram a fonte e essas
+     * tabelas só uma cópia, com upsert de TODOS os paths a cada save).
+     * Quem limpa as linhas filhas de um Monitor apagado é o
+     * `cascadeOnDelete` da FK — `Monitor::where(...)->delete()` em massa
+     * (DataPruner) nunca disparou eventos de model de qualquer forma.
      *
      * Incremento atômico (`hits = hits + 1` no banco, mesmo padrão de
      * `IpStat::recordVisit`), sem ler-modificar-gravar: duas requests
-     * simultâneas do mesmo visitante não perdem contagem. `not_found` só
-     * entra na lista de update quando `$notFound` é true — "gruda em
-     * true": uma vez marcado 404, nunca volta a false (mesma semântica de
+     * simultâneas do mesmo visitante no mesmo dia não perdem contagem.
+     * `not_found` só entra na lista de update quando `$notFound` é true -
+     * "gruda em true" dentro do mesmo dia: uma vez marcado 404 naquele
+     * dia, não volta a false no mesmo dia (mesma semântica de
      * `data.not_found[$path] = true` de antes), sem precisar de uma
      * expressão SQL específica de driver (`OR`/`GREATEST`).
+     *
+     * `day` (laravel-monitor 286, v0.60.0): `now()->toDateString()` —
+     * mesmo `now()` (já na hora-relógio do timezone do app, nunca UTC
+     * cru) usado em todo o resto do pacote, mesma convenção de
+     * `MonitorController::timelineWindow()`/`timelineDayKey()`
+     * (getTimeline), pra um hit do fim do dia e a leitura da série diária
+     * nunca discordarem sobre qual dia é. Mesmo visitante + path + dia =
+     * soma (upsert, unique agora inclui `day`); dia diferente = linha
+     * nova.
+     *
      * Fail-open (try/catch QueryException, mesmo padrão de
      * `isPathBlocked`/`recordBlockedAttempt`): se a migration ainda não
      * rodou, não pode derrubar o site hospedeiro.
@@ -44,6 +55,7 @@ class Monitor extends Model
     public function recordHit(string $path, bool $notFound = false): void
     {
         $now = now();
+        $day = $now->toDateString();
 
         $update = [
             'hits' => DB::raw('hits + 1'),
@@ -59,16 +71,17 @@ class Monitor extends Model
                 [[
                     'monitor_id' => $this->id,
                     'path' => $path,
+                    'day' => $day,
                     'hits' => 1,
                     'not_found' => $notFound,
                     'created_at' => $now,
                     'updated_at' => $now,
                 ]],
-                ['monitor_id', 'path'],
+                ['monitor_id', 'path', 'day'],
                 $update
             );
         } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_page_hits não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
+            Log::warning('[laravel-monitor] tabela monitor_page_hits não encontrada ou desatualizada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
         }
     }
 

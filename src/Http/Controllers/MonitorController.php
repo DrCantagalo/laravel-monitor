@@ -44,7 +44,7 @@ class MonitorController extends Controller
     protected const ACCESS_LOGGED_ACTIONS = [
         'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
         'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
-        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
+        'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline', 'getPageTimeline',
     ];
 
     /**
@@ -76,7 +76,8 @@ class MonitorController extends Controller
         // getIpTags desde a 239/v0.49.0, getTableStats desde a 242/v0.50.0,
         // getAccessLog desde a 249/v0.51.0, getMonitorQueue/
         // getMonitorQueueCounts desde a 258/v0.53.0, getConfig desde a
-        // 262/v0.54.0, getTimeline desde a 280/v0.58.0 — nunca pra
+        // 262/v0.54.0, getTimeline desde a 280/v0.58.0, getPageTimeline
+        // desde a 286/v0.60.0 — nunca pra
         // clearData/updateBlockedIps/updateRules/issueReadToken/setIpKind/
         // setIpLabels/setIpTags/setMonitorKind/setMonitorTags (estas duas
         // desde a 258/v0.53.0, substituindo `spreadIpLabel` removida nesta
@@ -85,6 +86,7 @@ class MonitorController extends Controller
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
             'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
+            'getPageTimeline',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -163,6 +165,9 @@ class MonitorController extends Controller
 
             case 'getTimeline':
                 return $this->getTimeline($request);
+
+            case 'getPageTimeline':
+                return $this->getPageTimeline($request);
 
             case 'getAccessLog':
                 return $this->getAccessLog($request);
@@ -828,11 +833,17 @@ class MonitorController extends Controller
      * uma vez). O sinal de scraper continua existindo normalmente, só que
      * fica restrito ao nível de IP/visitante (ver getVisitorsByIp).
      *
-     * `date_from`/`date_to` filtram pela `updated_at` da linha `Monitor`
-     * (não existe timestamp por página/hit no schema atual — cada linha
-     * agrega várias páginas de um mesmo visitante — então isso é uma
-     * aproximação: "atividade daquele visitante no período", não
-     * "hit exato nesse path na data X").
+     * `date_from`/`date_to` filtram pela coluna `day` de
+     * `monitor_page_hits` — **exato** desde a laravel-monitor 286
+     * (v0.60.0): antes filtrava pela `updated_at` da linha `Monitor`
+     * inteira (aproximação — "atividade daquele visitante no período",
+     * somando os hits da vida toda dele mesmo fora da janela pedida), já
+     * que o schema anterior não tinha dimensão de tempo por path. A
+     * resposta ganha `exact_since` (`YYYY-MM-DD`, data em que a migration
+     * 286 rodou nesta instalação): dias a partir dessa data são exatos
+     * (escritos já com `day`), dias anteriores vêm do backfill
+     * aproximado daquela migration (`day = DATE(updated_at)` da linha
+     * antiga) — ver README.
      *
      * Sem `filter` explícito, o default é `pending_review` (não `all`):
      * a fila "ainda não analisado" (404 + não marcado como safe + não
@@ -870,29 +881,24 @@ class MonitorController extends Controller
 
     /**
      * Agrega `data.page`/`data.not_found` via `monitor_page_hits`
-     * (laravel-monitor 103) — uma linha por (Monitor, path) mantida em
-     * sincronia a cada save (`Monitor::booted()`), em vez de escanear e
-     * decodificar o JSON de toda a tabela `Monitor` a cada `getPages`
-     * (85s medidos em produção com 35.225 linhas — ver
-     * bugs/laravel-monitor.md). `date_from`/`date_to` continuam
-     * filtrando pelo `updated_at` do `Monitor` (mesma aproximação de
-     * sempre — "atividade daquele visitante no período" — só que via
-     * JOIN em SQL em vez de carregar a linha inteira em PHP).
+     * (laravel-monitor 103) — uma linha por (Monitor, path, dia, desde a
+     * 286) mantida em sincronia a cada hit (`Monitor::recordHit()`), em
+     * vez de escanear e decodificar o JSON de toda a tabela `Monitor` a
+     * cada `getPages` (85s medidos em produção com 35.225 linhas — ver
+     * bugs/laravel-monitor.md). `date_from`/`date_to`, desde a 286,
+     * filtram direto pela coluna `day` (exato — ver docblock de
+     * `getPages`), não mais via JOIN com `monitors.updated_at`.
      */
     protected function buildPagesResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo): array
     {
         $query = DB::table('monitor_page_hits');
 
-        if ($dateFrom || $dateTo) {
-            $query->join('monitors', 'monitors.id', '=', 'monitor_page_hits.monitor_id');
+        if ($dateFrom) {
+            $query->where('day', '>=', $this->toDateOnly($dateFrom));
+        }
 
-            if ($dateFrom) {
-                $query->where('monitors.updated_at', '>=', $dateFrom);
-            }
-
-            if ($dateTo) {
-                $query->where('monitors.updated_at', '<=', $dateTo);
-            }
+        if ($dateTo) {
+            $query->where('day', '<=', $this->toDateOnly($dateTo));
         }
 
         $aggregated = [];
@@ -967,7 +973,51 @@ class MonitorController extends Controller
                 'total' => $total,
                 'last_page' => max(1, (int) ceil($total / $perPage)),
             ],
+            'exact_since' => $this->pageHitsExactSince(),
         ];
+    }
+
+    /**
+     * Normaliza `date_from`/`date_to` (qualquer formato aceito pelo
+     * `Carbon`, mesmo contrato de sempre desses parâmetros) pra
+     * "YYYY-MM-DD" antes de comparar contra a coluna `day` (DATE) de
+     * `monitor_page_hits` — necessário desde a laravel-monitor 286:
+     * comparar uma string com hora (ex: "2026-01-01 00:00:00") contra uma
+     * coluna DATE funciona por coerção implícita no MySQL, mas falha
+     * silenciosamente no SQLite (comparação lexicográfica pura —
+     * "2026-01-01" < "2026-01-01 00:00:00", então um `date_from` à
+     * meia-noite excluiria o próprio dia). Entrada que o `Carbon` não
+     * consegue parsear volta sem mudança — mesmo comportamento de antes
+     * desta task, deixa o banco reclamar/não casar nada, não é
+     * responsabilidade desta função validar o parâmetro.
+     */
+    private function toDateOnly(string $raw): string
+    {
+        try {
+            return Carbon::parse($raw)->toDateString();
+        } catch (\Throwable $e) {
+            return $raw;
+        }
+    }
+
+    /**
+     * laravel-monitor 286: data (`YYYY-MM-DD`) em que a migration
+     * `2026_10_04_000001_redesign_monitor_page_hits_with_day` rodou
+     * nesta instalação, gravada em `monitor_settings` por ela mesma —
+     * exposta como `exact_since` no payload de `getPages`/
+     * `getPageTimeline` pro dashboard avisar que dados anteriores a essa
+     * data vêm do backfill aproximado (`day = DATE(updated_at)` da linha
+     * antiga, sem dimensão de dia própria), não de hits gravados já por
+     * dia. Fail-open (`null`, mesmo padrão dos demais leitores deste
+     * controller): tabela ainda não migrada não pode quebrar `getPages`.
+     */
+    private function pageHitsExactSince(): ?string
+    {
+        try {
+            return DB::table('monitor_settings')->where('key', 'page_hits_exact_since')->value('value');
+        } catch (QueryException $e) {
+            return null;
+        }
     }
 
     /**
@@ -2647,6 +2697,105 @@ class MonitorController extends Controller
     }
 
     /**
+     * laravel-monitor 286 (v0.60.0): série diária zero-filled de hits de
+     * UM path específico (soma de todos os `Monitor` que bateram nele),
+     * pro gráfico "clicar num path abre o histórico" do dashboard
+     * (home-page 287) — mesma janela/validação/cache de `getTimeline`
+     * (`days` 7–365, default 30, timezone do app, `listings_cache_ttl_minutes`
+     * via `listingsCacheKey`), só que lida de `monitor_page_hits` (coluna
+     * `day`, desde a 286) em vez das tabelas de `getTimeline`.
+     *
+     * `path` é comparado EXATO (mesma chave "host/path" gravada em
+     * `monitor_page_hits.path`) — sem o match por sufixo de
+     * `flagScraperPath`/`markPathSafe`: aqui o cliente já sabe o path
+     * exato, veio de uma linha de `getPages`.
+     */
+    protected function getPageTimeline(Request $request)
+    {
+        $path = (string) $request->input('path', '');
+
+        if ($path === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No path provided',
+            ], 422);
+        }
+
+        $rawDays = $request->input('days', 30);
+
+        if (! ctype_digit((string) $rawDays)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'days must be an integer',
+            ], 422);
+        }
+
+        $days = (int) $rawDays;
+
+        if ($days < self::TIMELINE_MIN_DAYS || $days > self::TIMELINE_MAX_DAYS) {
+            return response()->json([
+                'success' => false,
+                'message' => sprintf('days must be between %d and %d', self::TIMELINE_MIN_DAYS, self::TIMELINE_MAX_DAYS),
+            ], 422);
+        }
+
+        $cacheKey = $this->listingsCacheKey('page-timeline', [$path, $days]);
+        $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($path, $days) {
+            return $this->buildPageTimelineResult($path, $days);
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * `day` sai de `monitor_page_hits` já como "YYYY-MM-DD" (coluna DATE,
+     * ambos os drivers suportados devolvem string nesse formato via query
+     * builder cru, sem cast de Eloquent envolvido) — usado direto como
+     * chave do bucket zero-filled, sem passar por `timelineDayKey()`
+     * (que parseia timestamp com hora, não se aplica aqui).
+     */
+    protected function buildPageTimelineResult(string $path, int $days): array
+    {
+        $tz = config('app.timezone', 'UTC');
+        [$startBound, $endBound, $dayKeys] = $this->timelineWindow($tz, $days);
+
+        $hits = $this->emptyTimelineBucket($dayKeys);
+
+        try {
+            DB::table('monitor_page_hits')
+                ->where('path', $path)
+                ->whereBetween('day', [$startBound->toDateString(), $endBound->toDateString()])
+                ->select('day', 'hits')
+                ->orderBy('id')
+                ->chunk(1000, function ($rows) use (&$hits) {
+                    foreach ($rows as $row) {
+                        $dayKey = (string) $row->day;
+
+                        if (! array_key_exists($dayKey, $hits)) {
+                            continue;
+                        }
+
+                        $hits[$dayKey] += (int) $row->hits;
+                    }
+                });
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao calcular getPageTimeline. Erro original: '.$e->getMessage());
+
+            $hits = $this->emptyTimelineBucket($dayKeys);
+        }
+
+        return [
+            'path' => $path,
+            'timezone' => $tz,
+            'days' => $dayKeys,
+            'hits' => array_values($hits),
+            'exact_since' => $this->pageHitsExactSince(),
+        ];
+    }
+
+    /**
      * Mascaramento de valores sensíveis (item 3 da task 262) — nunca a
      * lista crua de IPs de `ignore_ips`, nunca o path absoluto do
      * `denylist_path` do servidor do cliente. `$value`/`$default` aqui já
@@ -3601,6 +3750,10 @@ class MonitorController extends Controller
             // `older_than_days` (não só por `visits_retention_days`, hoje
             // `0`/desligado por padrão) — ver DataPruner::prune().
             'visits_deleted' => $result['visits_deleted'],
+            // laravel-monitor 286 (v0.60.0): monitor_page_hits (perfil de
+            // navegação por visitante) agora também é podada, pelo mesmo
+            // cutoff de visits_retention_days — ver DataPruner::prunePageHits().
+            'page_hits_deleted' => $result['page_hits_deleted'],
         ]);
     }
 

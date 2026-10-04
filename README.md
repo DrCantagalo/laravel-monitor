@@ -1540,16 +1540,25 @@ says.
   matched by suffix the same way `flagScraperPath` does), `safe` (since
   `0.20.3`: path has `status: 'safe'` — see below). An unknown `filter`
   value returns `422`.
-- `date_from`/`date_to` (optional, any format `Carbon`/the DB driver
-  accepts for a `where` comparison): filters by the **`Monitor` row's**
-  `updated_at`, not a per-page-hit timestamp — the schema has no
-  per-visit timestamp (one row aggregates every page a visitor hit), so
-  this is "that visitor was active in this window", not "this path was
-  hit on this exact date". Good enough to narrow down recent activity;
-  don't rely on it for exact per-hit auditing.
+- `date_from`/`date_to` (optional, any format `Carbon` accepts): since
+  `0.60.0`, filters **exactly** by the `day` column of `monitor_page_hits`
+  (a hit is only counted if it happened on a day inside the window).
+  Before `0.60.0` this filtered by the **`Monitor` row's** `updated_at`
+  instead — "that visitor was active in this window" (summing hits from
+  their entire lifetime, even outside the window) — because the schema
+  had no per-day data; see `exact_since` below for the one caveat left
+  from that change.
 - Response: `{"success": true, "data": [{"path": "example.com/a",
   "hits": 12, "not_found": false, "blocked": false, "status": "pending"},
-  ...], "meta": {"page": 1, "per_page": 20, "total": 47, "last_page": 3}}`.
+  ...], "meta": {"page": 1, "per_page": 20, "total": 47, "last_page": 3},
+  "exact_since": "2026-10-04"}`. **Since `0.60.0`**: `exact_since` is the
+  date the `monitor_page_hits` day-dimension migration ran on this
+  installation (`monitor_settings.page_hits_exact_since`) — `day` values
+  from that date on were written directly by `recordHit()` and are exact;
+  values before it came from a one-time backfill (`day =
+  DATE(updated_at)` of the old, dayless row) and are an approximation of
+  "last time this path was hit", not every day it actually was. `null` if
+  the migration hasn't run yet on this installation.
 
 Result is cached (`Cache::remember`, TTL
 `config('monitor.pages_cache_ttl_minutes')`, default 5 minutes) keyed by
@@ -1562,20 +1571,19 @@ being individually deleted.
 
 **Since `0.23.0`**, the aggregation itself no longer scans and
 JSON-decodes every `Monitor` row on a cache miss. A `monitor_page_hits`
-table (one row per `Monitor`+path, unique on `(monitor_id, path)`) is
-kept in sync automatically whenever a `Monitor` is saved — via a model
-event, so this works no matter how the row was written (the trackers,
-`Monitor::create()` directly, `tinker`, tests) — and `getPages` now
+table is kept in sync automatically whenever a visitor hits a page — via
+`Monitor::recordHit()`, called by both trackers — and `getPages`
 aggregates it with a single `GROUP BY` query (`SUM(hits)`,
-`MAX(not_found)`), joined against `monitors.updated_at` only when
-`date_from`/`date_to` are given. This fixed a real production timeout:
-with ~35k `Monitor` rows, the old PHP-side scan measured ~85s on a cache
-miss, well past the 10s timeout a typical consumer (e.g. `home-page`)
-uses to call this endpoint. Upgrading runs a one-time backfill migration
-that populates `monitor_page_hits` from whatever `Monitor.data` already
-exists — expect it to take roughly as long as the old per-request scan
-used to (a few seconds per ~1k rows), but it only runs once, at migrate
-time, not on every `getPages` call.
+`MAX(not_found)`). This fixed a real production timeout: with ~35k
+`Monitor` rows, the old PHP-side scan measured ~85s on a cache miss, well
+past the 10s timeout a typical consumer (e.g. `home-page`) uses to call
+this endpoint. Upgrading ran a one-time backfill migration that populated
+`monitor_page_hits` from whatever `Monitor.data` already existed.
+
+**Since `0.60.0`**, the table is unique on `(monitor_id, path, day)`
+instead of `(monitor_id, path)` — see the breaking-change entry in
+`CHANGELOG.md` `[0.60.0]` for the full migration/backfill story and the
+`date_from`/`date_to`/`exact_since` semantics above.
 
 ## Paginated visitor/blocklist listing (`getVisitorsByIp`, `getBlockedIps`, `getBlockedPaths`)
 
@@ -2024,6 +2032,46 @@ silently clamped or unbounded query.
 per IP — neither has an honest daily history to report. Left for a
 post-`1.0` daily rollup table (`monitor_daily_stats`).
 
+## Per-path daily timeline (`getPageTimeline`, since `0.60.0`)
+
+Read-only, no-pagination daily series of hits for **one specific path** —
+the "click a path in `getPages` to see its history" dashboard chart
+(home-page 287). Same auth/cache scheme as `getTimeline` above
+(`Cache::remember`, `listings_cache_ttl_minutes`, key including `path`
+and `days`).
+
+- **`path`** (required): the exact `host/path` key, same string as
+  returned by `getPages`' `data[].path`. Matched exactly — unlike
+  `flagScraperPath`/`markPathSafe`, there's no suffix matching here, since
+  the caller already has the exact key from a `getPages` row. Missing/
+  empty is a `422`.
+- **`days`** (optional, integer, default `30`): same `7`–`365` range and
+  validation as `getTimeline`'s `days`.
+
+```json
+{
+  "success": true,
+  "path": "example.com/a",
+  "timezone": "America/Sao_Paulo",
+  "days": ["2026-09-26", "2026-09-27", "2026-09-28", "2026-10-02"],
+  "hits": [3, 0, 5, 2],
+  "exact_since": "2026-10-04"
+}
+```
+
+- **`timezone`**/**`days`**: same semantics as `getTimeline` — the app's
+  timezone, oldest first, a day with zero hits is `0`, never a gap.
+- **`hits`**: `monitor_page_hits.hits` summed across every `Monitor` that
+  hit this `path`, grouped by `day`, aligned 1:1 with `days` by index.
+- **`exact_since`**: same value and meaning as `getPages`' `exact_since`
+  (see above) — days before it come from the one-time backfill
+  (`day = DATE(updated_at)`), not from a real daily count, so a long
+  window spanning that date can undercount/misplace older hits onto
+  whatever day the visitor happened to last be seen.
+- **Fail-open**: a `monitor_page_hits` table that hasn't migrated to the
+  `day` column yet comes back as an all-zero series with a
+  `Log::warning`, same pattern as `getTimeline`, never a `500`.
+
 ## Access log (`monitor_access_logs`, since `0.51.0`)
 
 Transparency guarantee: **every read of your data leaves a line in a log
@@ -2293,6 +2341,19 @@ visits of a deleted `Monitor` go away through the foreign key's
 above, and the command's message says so (`"past
 monitor.visits_retention_days"` when `--only-blocked` was passed, `"past
 monitor.visits_retention_days and/or --older-than-days"` otherwise).
+
+> **New in `0.60.0`**: `monitor.visits_retention_days` now *also* deletes
+> `monitor_page_hits` rows whose `day` is older than the cutoff — same
+> gate (`0` = disabled, the default), same call inside
+> `DataPruner::prune()`. Before this, a visitor's page-hit profile had no
+> retention of its own: `visits_retention_days` cleaned up the visit
+> journey in `monitor_visits`, but the per-path hit counts behind it in
+> `monitor_page_hits` lived forever, even for the **anonymous** tracker
+> (bots/API, no session — it never creates a `monitor_visits` row for
+> this setting to clean up in the first place, so this was its only route
+> to any retention at all). `monitor:prune`'s output and
+> `DataPruner::prune()`'s return value gain a separate `page_hits_deleted`
+> count (not folded into `visits_deleted` — it isn't a visit).
 
 ## Visits (`monitor_visits`, since `0.42.0`)
 

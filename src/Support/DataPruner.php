@@ -205,11 +205,16 @@ class DataPruner
 
         $ipStatsDeleted = $ipStatQuery->delete();
 
-        if ($monitors['deleted'] > 0) {
+        $visits = self::pruneVisits($maxRows);
+
+        // laravel-monitor 286: mesmo cutoff/gate de pruneVisits() acima
+        // (monitor.visits_retention_days, 0 = desligado) — ver docblock
+        // de prunePageHits().
+        $pageHits = self::prunePageHits($maxRows);
+
+        if ($monitors['deleted'] > 0 || $pageHits['deleted'] > 0) {
             self::invalidatePagesCache();
         }
-
-        $visits = self::pruneVisits($maxRows);
 
         $cutoffVisits = $onlyBlocked
             ? ['deleted' => 0, 'done' => true]
@@ -228,7 +233,7 @@ class DataPruner
         // já são invalidadas com mais frequência do que precisam noutros
         // pontos do código, invalidar aqui também só significa um cache
         // miss a mais, nunca um dado errado.
-        if ($monitors['deleted'] > 0 || $ipStatsDeleted > 0 || $visitsDeleted > 0) {
+        if ($monitors['deleted'] > 0 || $ipStatsDeleted > 0 || $visitsDeleted > 0 || $pageHits['deleted'] > 0) {
             ListingsCache::invalidate();
         }
 
@@ -236,7 +241,8 @@ class DataPruner
             'monitors_deleted' => $monitors['deleted'],
             'ip_stats_deleted' => $ipStatsDeleted,
             'visits_deleted' => $visitsDeleted,
-            'done' => $monitors['done'] && $visits['done'] && $cutoffVisits['done'],
+            'page_hits_deleted' => $pageHits['deleted'],
+            'done' => $monitors['done'] && $visits['done'] && $cutoffVisits['done'] && $pageHits['done'],
         ];
     }
 
@@ -304,6 +310,68 @@ class DataPruner
             ];
         } catch (QueryException $e) {
             Log::warning('[laravel-monitor] tabela monitor_visits não encontrada ao podar visitas — rode `php artisan migrate` ou `php artisan monitor:update`. Erro original: '.$e->getMessage());
+
+            return ['deleted' => 0, 'done' => true];
+        }
+    }
+
+    /**
+     * laravel-monitor 286: apaga `monitor_page_hits` com `day < cutoff`,
+     * MESMO cutoff/gate de `pruneVisits()` acima
+     * (`monitor.visits_retention_days`, `0` = desligado, default) — chamada
+     * sempre junto dela dentro de `prune()`, nunca sozinha. Antes desta
+     * task, `monitor_page_hits` (perfil de navegação por visitante) não
+     * tinha NENHUMA retenção própria: `pruneVisits()` apagava
+     * `monitor_visits`, mas o visitante em si (e seus hits) continuava
+     * existindo em `monitor_page_hits` pra sempre — inclusive o tracker
+     * anônimo (bots/API, sem sessão, que nunca cria `monitor_visits`),
+     * que não tinha NENHUM jeito de ter esse histórico limpo por idade.
+     * Independente de `$onlyBlocked`, mesmo motivo de `pruneVisits()`: é
+     * uma retenção própria, não ligada à idade do `Monitor` pai.
+     *
+     * @return array{deleted: int, done: bool}
+     */
+    public static function prunePageHits(?int $maxRows = null): array
+    {
+        $days = (int) config('monitor.visits_retention_days', 0);
+
+        if ($days <= 0) {
+            return ['deleted' => 0, 'done' => true];
+        }
+
+        return self::deletePageHitsOlderThan(now()->subDays($days)->toDateString(), $maxRows);
+    }
+
+    /**
+     * Núcleo de `prunePageHits()` — mesmo esquema de chunk/teto de
+     * `deleteVisitsOlderThan()` acima, só que comparando a coluna `day`
+     * (DATE, "YYYY-MM-DD") em vez de `updated_at` (timestamp).
+     *
+     * @return array{deleted: int, done: bool}
+     */
+    private static function deletePageHitsOlderThan(string $cutoffDate, ?int $maxRows): array
+    {
+        try {
+            $query = DB::table('monitor_page_hits')->where('day', '<', $cutoffDate);
+
+            if ($maxRows === null) {
+                return ['deleted' => $query->delete(), 'done' => true];
+            }
+
+            $ids = $query->orderBy('id')->limit($maxRows + 1)->pluck('id');
+            $done = $ids->count() <= $maxRows;
+            $ids = $ids->take($maxRows);
+
+            if ($ids->isEmpty()) {
+                return ['deleted' => 0, 'done' => $done];
+            }
+
+            return [
+                'deleted' => DB::table('monitor_page_hits')->whereIn('id', $ids)->delete(),
+                'done' => $done,
+            ];
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] tabela monitor_page_hits não encontrada ao podar perfis de navegação — rode `php artisan migrate` ou `php artisan monitor:update`. Erro original: '.$e->getMessage());
 
             return ['deleted' => 0, 'done' => true];
         }

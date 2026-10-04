@@ -46,7 +46,11 @@ class MonitorPruneCommand extends Command
             ? 'past monitor.visits_retention_days'
             : 'past monitor.visits_retention_days and/or --older-than-days';
 
-        $this->info("Pruned {$result['monitors_deleted']} monitor row(s), {$result['ip_stats_deleted']} IP stat row(s) and {$result['visits_deleted']} visit row(s) {$visitsNote}.");
+        // laravel-monitor 286 (v0.60.0): page_hits_deleted segue a MESMA
+        // retenção de visits_retention_days (nunca --older-than-days),
+        // reportado separado por clareza (não é visita, é perfil de
+        // navegação por path).
+        $this->info("Pruned {$result['monitors_deleted']} monitor row(s), {$result['ip_stats_deleted']} IP stat row(s), {$result['visits_deleted']} visit row(s) {$visitsNote}, and {$result['page_hits_deleted']} page hit row(s) past monitor.visits_retention_days.");
 
         return 0;
     }
