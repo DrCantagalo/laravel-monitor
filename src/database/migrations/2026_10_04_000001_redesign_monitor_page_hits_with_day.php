@@ -79,30 +79,45 @@ return new class extends Migration
 
         DB::table('monitor_page_hits')->whereNull('day')->update(['day' => DB::raw('DATE(updated_at)')]);
 
-        Schema::table('monitor_page_hits', function (Blueprint $table) {
-            $table->dropUnique(['monitor_id', 'path']);
-            $table->dropIndex(['path']);
-        });
-
+        // Cria os índices novos ANTES de derrubar os antigos: `monitor_id`
+        // tem uma foreign key (`constrained('monitors')`) e nunca teve um
+        // índice próprio só pra ela — o InnoDB sempre usou o unique
+        // `(monitor_id, path)` como índice de suporte da FK (ele começa
+        // com `monitor_id`). Se a ordem for invertida (dropar o unique
+        // antigo antes de criar o novo), existe uma janela sem NENHUM
+        // índice cobrindo `monitor_id` e o MySQL recusa o DROP com erro
+        // 1553 ("needed in a foreign key constraint") — foi exatamente o
+        // que aconteceu no deploy de produção (ver deploy-errors/
+        // home-page.md, commit 94a5f73). O unique novo também começa com
+        // `monitor_id`, então criá-lo primeiro mantém a FK sempre
+        // suportada durante a troca.
         Schema::table('monitor_page_hits', function (Blueprint $table) {
             $table->unique(['monitor_id', 'path', 'day']);
             $table->index(['path', 'day']);
             $table->index('day');
+        });
+
+        Schema::table('monitor_page_hits', function (Blueprint $table) {
+            $table->dropUnique(['monitor_id', 'path']);
+            $table->dropIndex(['path']);
         });
     }
 
     public function down(): void
     {
         if (Schema::hasTable('monitor_page_hits') && Schema::hasColumn('monitor_page_hits', 'day')) {
+            // Mesmo cuidado do up(): recria o unique antigo (também líder
+            // em `monitor_id`) antes de derrubar o novo, pra nunca deixar
+            // a FK sem índice de suporte.
+            Schema::table('monitor_page_hits', function (Blueprint $table) {
+                $table->unique(['monitor_id', 'path']);
+                $table->index('path');
+            });
+
             Schema::table('monitor_page_hits', function (Blueprint $table) {
                 $table->dropUnique(['monitor_id', 'path', 'day']);
                 $table->dropIndex(['path', 'day']);
                 $table->dropIndex(['day']);
-            });
-
-            Schema::table('monitor_page_hits', function (Blueprint $table) {
-                $table->unique(['monitor_id', 'path']);
-                $table->index('path');
             });
 
             Schema::table('monitor_page_hits', function (Blueprint $table) {

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.60.1] - 2026-10-04
+### Fixed
+- **`2026_10_04_000001_redesign_monitor_page_hits_with_day` (0.60.0) failed
+  on MySQL in production** with `SQLSTATE[HY000]: General error: 1553
+  Cannot drop index 'monitor_page_hits_monitor_id_path_unique': needed in
+  a foreign key constraint`. `monitor_page_hits.monitor_id` has a foreign
+  key (`constrained('monitors')`) that was always backed by the
+  `(monitor_id, path)` unique index (no dedicated single-column index
+  existed for it). The migration dropped that unique index *before*
+  creating its `(monitor_id, path, day)` replacement, leaving a window
+  with no index covering `monitor_id` — InnoDB refuses to drop an index a
+  FK depends on in that case. Fixed by creating the new indexes first
+  (the new unique also leads with `monitor_id`, so the FK stays
+  continuously supported), then dropping the old ones; `down()` mirrors
+  the same ordering. SQLite (used by this package's own test suite) does
+  not enforce this, so it wasn't caught here — only surfaced against a
+  real MySQL database. No schema or behavior change versus `0.60.0`
+  otherwise.
+
 ## [0.60.0] - 2026-10-04
 ### ⚠️ Breaking — `monitor_page_hits` schema: day dimension added
 - **`monitor_page_hits` is now keyed on `(monitor_id, path, day)`**
