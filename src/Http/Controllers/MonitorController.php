@@ -717,6 +717,30 @@ class MonitorController extends Controller
     }
 
     /**
+     * laravel-monitor 299 (v0.61.1): `aiTriageCutoff()` é um limiar que se
+     * move com o relógio (`now()->subHours(...)`), mas `getMonitorQueue`/
+     * `buildMonitorQueueResult` e `getMonitorQueueCounts` cacheavam cada
+     * um sob sua própria chave (`ListingsCache`) sem NENHUM componente de
+     * tempo nela — só `invalidateListingsCache()` (escritas) zerava os
+     * dois. Resultado: um Monitor cruzando o cutoff (`new` -> `unclassified`)
+     * só refletia quando cada cache expirava por TTL (`listings_cache_ttl_minutes`,
+     * default 5min) — e como as duas chaves são cacheadas independentemente,
+     * cada uma podia expirar num instante diferente, fazendo
+     * `getMonitorQueueCounts` divergir de `getMonitorQueue(group=unclassified)`
+     * pra o MESMO instante lógico por até um TTL inteiro. Esta função
+     * arredonda o cutoff pro minuto e os dois métodos incluem o resultado
+     * na própria chave de cache (só pros grupos `new`/`unclassified`, que
+     * são os únicos que dependem do cutoff) — a janela de divergência cai
+     * de "até o TTL" pra "até o próximo minuto virar", e, dentro do mesmo
+     * minuto, os dois métodos sempre leem o mesmo cutoff gravado na chave
+     * (nunca um recalculado em momentos diferentes).
+     */
+    protected function aiTriageCutoffBucket(): string
+    {
+        return $this->aiTriageCutoff()->format('Y-m-d H:i');
+    }
+
+    /**
      * Contagem de IPs únicos vistos por esta installation — reusa
      * `monitor_ip_stats` (1 linha por IP, já mantida por
      * `IpStat::recordVisit()` a cada request rastreada) em vez de dedupear
@@ -3120,7 +3144,17 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        $cacheKey = $this->listingsCacheKey('monitor-queue', [$page, $perPage, $group]);
+        // laravel-monitor 299 (v0.61.1): `new`/`unclassified` dependem do
+        // cutoff móvel (aiTriageCutoffBucket()) — incluído na chave só pra
+        // esses dois grupos, pra nunca divergir de getMonitorQueueCounts
+        // (ver aiTriageCutoffBucket()).
+        $cacheParams = [$page, $perPage, $group];
+
+        if (in_array($group, ['new', 'unclassified'], true)) {
+            $cacheParams[] = $this->aiTriageCutoffBucket();
+        }
+
+        $cacheKey = $this->listingsCacheKey('monitor-queue', $cacheParams);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $group) {
@@ -3206,10 +3240,23 @@ class MonitorController extends Controller
      * `unclassified` desde a 266/v0.55.0) que alimentam o modal de
      * triagem do dashboard — mesmos critérios de `getMonitorQueue`, sem
      * paginar as linhas.
+     *
+     * laravel-monitor 299 (v0.61.1): a chave de cache inclui
+     * `aiTriageCutoffBucket()` (cutoff arredondado pro minuto) — mesma
+     * técnica usada por `getMonitorQueue` pros grupos `new`/`unclassified`
+     * — pra nunca divergir dele pro mesmo instante lógico (ver
+     * `aiTriageCutoffBucket()` pro raciocínio completo). Ainda assim,
+     * pra qualquer parâmetro além do cutoff (ex: `excludedMonitorIdsForQueue()`),
+     * trate esta contagem como "mais recente até o TTL" — não como fonte
+     * de verdade atômica junto da listagem paginada.
      */
     protected function getMonitorQueueCounts(Request $request)
     {
-        $cacheKey = $this->listingsCacheKey('monitor-queue-counts', []);
+        // laravel-monitor 299 (v0.61.1): cutoff móvel na própria chave —
+        // mesmo raciocínio/método de getMonitorQueue() (ver
+        // aiTriageCutoffBucket()), pra nunca divergir dele pro mesmo
+        // instante lógico.
+        $cacheKey = $this->listingsCacheKey('monitor-queue-counts', [$this->aiTriageCutoffBucket()]);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
         $result = Cache::remember($cacheKey, $ttl, function () {

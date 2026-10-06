@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.61.1] - 2026-10-06
+### Fixed
+- **`getMonitorQueueCounts` could diverge from `getMonitorQueue` for the
+  same logical parameters at the same moment.** Both apply the same
+  `new`/`unclassified` filter (`created_at` vs. the moving
+  `aiTriageCutoff()`), but cached under independent `ListingsCache` keys
+  with no time component at all — only a write (`invalidateListingsCache()`)
+  busted either cache, so a Monitor aging from `new` into `unclassified`
+  purely from the clock moving forward left each cache frozen at its own
+  stale snapshot for up to `listings_cache_ttl_minutes`, and since the two
+  caches are populated independently they could each go stale at a
+  different real moment — making `getMonitorQueueCounts`'s numbers
+  disagree with `getMonitorQueue(group=unclassified|new)`'s actual rows.
+  Fixed by folding the cutoff, rounded to the minute
+  (`aiTriageCutoffBucket()`), into both methods' cache keys (only for the
+  two groups that depend on it), so the cache for a given minute always
+  reflects that minute's cutoff and the divergence window shrinks from
+  "up to the TTL" to "up to the next minute boundary". No request/response
+  shape change.
+
 ## [0.61.0] - 2026-10-06
 ### ⚠️ Breaking — IP classification writes removed; classification is now Monitor-only
 - **`setIpKind`, `setIpLabels`, and `setIpTags` are removed.** No

@@ -8,6 +8,7 @@ use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 
 /**
  * laravel-monitor 258 (v0.53.0): novas read actions `getMonitorQueue`
@@ -19,6 +20,13 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 class MonitorQueueTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
 
     /**
      * laravel-monitor 266 (v0.55.0): `unclassified` só inclui Monitor sem
@@ -304,6 +312,62 @@ class MonitorQueueTest extends TestCase
         $rows = collect($response->json('data'))->keyBy('id');
 
         $this->assertFalse($rows[$blocked->id]['inherited_flagged']);
+    }
+
+    /**
+     * laravel-monitor 299 (v0.61.1): `getMonitorQueueCounts()` cacheava
+     * sob uma chave SEM nenhum componente de tempo, enquanto
+     * `getMonitorQueue()` incluía `page`/`per_page`/`group` mas também
+     * nada do cutoff — então um Monitor que envelhecia de `new` pra
+     * `unclassified` só pela passagem do tempo (sem nenhuma escrita, que
+     * é o único evento que bumpa `ListingsCache::invalidate()`) ficava
+     * "congelado" no valor cacheado de cada método até o TTL
+     * (`listings_cache_ttl_minutes`) expirar — e como os dois métodos
+     * cacheiam de forma independente, eles podiam ficar congelados em
+     * momentos diferentes, divergindo um do outro pro MESMO instante
+     * lógico. Este teste prova a divergência seria reproduzível sem o
+     * fix: avança o relógio de teste só 2 minutos (bem dentro do TTL
+     * default de 5min) depois de popular os dois caches, o suficiente pra
+     * cruzar o cutoff de `ai_triage_min_age_hours` e mover o Monitor de
+     * `new` pra `unclassified` — e confirma que AMBOS os métodos já
+     * refletem a mudança e continuam concordando entre si (fix:
+     * `aiTriageCutoffBucket()` na chave de cache dos dois).
+     */
+    public function test_queue_counts_never_diverge_from_the_queue_listing_when_a_monitor_crosses_the_ai_triage_cutoff(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 1, 1, 12, 0, 0, 'UTC'));
+
+        config(['monitor.ai_triage_min_age_hours' => 24]);
+
+        $monitor = Monitor::create(['data' => []]);
+        $monitor->forceFill(['created_at' => now()->subHours(24)->addMinute()])->save();
+
+        // Popula os dois caches enquanto o Monitor ainda é `new`.
+        $countsBefore = $this->callHandler(['action' => 'getMonitorQueueCounts']);
+        $countsBefore->assertJsonPath('new', 1);
+        $countsBefore->assertJsonPath('unclassified', 0);
+
+        $queueBefore = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
+        $this->assertNotContains($monitor->id, collect($queueBefore->json('data'))->pluck('id')->all());
+
+        // O relógio avança 2min (< TTL de 5min) — o cutoff também avança
+        // 2min, e o Monitor (criado 1min depois do cutoff ORIGINAL)
+        // agora fica 1min ANTES do cutoff novo: cruzou pra `unclassified`
+        // só pela passagem do tempo, sem nenhuma escrita.
+        Carbon::setTestNow(now()->addMinutes(2));
+
+        $countsAfter = $this->callHandler(['action' => 'getMonitorQueueCounts']);
+        $queueAfter = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'unclassified']);
+        $queueAfterIds = collect($queueAfter->json('data'))->pluck('id')->all();
+
+        $countsAfter->assertJsonPath('new', 0);
+        $countsAfter->assertJsonPath('unclassified', 1);
+        $this->assertContains($monitor->id, $queueAfterIds, 'getMonitorQueue deveria já refletir o Monitor como unclassified');
+
+        // As duas respostas pro mesmo instante lógico nunca podem
+        // divergir: o count de `unclassified` tem que bater com o
+        // tamanho da listagem do grupo `unclassified`.
+        $this->assertSame($countsAfter->json('unclassified'), count($queueAfterIds));
     }
 
     public function test_rejects_unauthenticated_request(): void

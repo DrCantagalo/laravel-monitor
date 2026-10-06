@@ -1474,7 +1474,16 @@ makes on purpose (see the intro above).
 - **`getMonitorQueueCounts`** (since `0.53.0`): `{"success": true,
   "new": 7, "unclassified": 12}` — the same two groups as
   `getMonitorQueue`, unpaginated counts only, feeding the triage modal in
-  the dashboard.
+  the dashboard. Since `0.61.1`: cached under a key that includes the
+  `new`/`unclassified` cutoff rounded to the minute (same technique as
+  `getMonitorQueue` below), so it can never drift from
+  `getMonitorQueue(group=unclassified|new)` by more than the minute a
+  Monitor ages past the cutoff — previously it cached under a key with
+  *no* time component at all, so it could return a count up to
+  `listings_cache_ttl_minutes` stale relative to `getMonitorQueue`'s own
+  (independently cached) answer for the exact same moment, purely from
+  the passage of time (no write involved). Still cache-backed and
+  best-effort within that one-minute window, not a live/atomic count.
 
 See "Paginated visitor/blocklist listing" below for how the derived
 classification surfaces in `getVisitorsByIp`/`getBlockedIps`, and "User
