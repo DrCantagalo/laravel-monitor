@@ -372,6 +372,22 @@ their row with that").
   - See "Aggregated dashboard totals" above for how this interacts with
     `monitors_by_kind.human_user`, and "Daily timeline" below for
     `series.monitors_new.human_user`/`series.visits.human_user`.
+- **Reserved `user` tag (since `0.61.0`)**: the same guest → authenticated
+  transition above also ensures the Monitor's `monitor_labels.tags`
+  contains `user` (`MonitorLabel::TAG_USER`) — independent of, and never
+  gated by, the `kind` protection described above: a Monitor already
+  manually classified `bot` that logs in still gains the `user` tag (the
+  tag only means "this Monitor is tied to a `user_id`", it says nothing
+  about the bot/human judgment). This tag is **entirely managed by the
+  package** — `setMonitorTags` rejects (`422`) any manual `op=add`/
+  `op=remove` call with `tag=user`; there's no way to add or remove it by
+  hand. **Backfill**: same mechanics as the `kind=human` backfill above —
+  a migration adds the tag to every Monitor that already had `user_id`
+  before upgrading to `0.61.0` and doesn't have it yet. This is what lets
+  the IP-level listing (`getVisitorsByIp`/`getBlockedIps`) distinguish
+  authenticated visitors (at least one Monitor at that IP carries `user`)
+  from guests (none do) via the existing `tag` filter — see "IP
+  classification" below.
 
 ## Querying by user_id (CRM index)
 
@@ -1321,31 +1337,66 @@ row, not a row with null fields — a row with no `kind`, no `tags`, and no
 `note` is deleted rather than kept around empty (every write action below
 does this automatically).
 
-- **`kind`**: `bot`, `human`, or `null` (undefined). Set via `setIpKind`
-  (all Monitors of one or more IPs at once) or `setMonitorKind` (one
-  Monitor, since `0.53.0`).
+**⚠️ Breaking in `0.61.0`: classification is now writable ONLY on the
+`Monitor`, never on the IP.** `setIpKind`, `setIpLabels`, and `setIpTags`
+have been **removed** (no replacement, no compatibility shim — calling any
+of them now falls through to the generic `400`/`"Invalid action"` response
+any unrecognized action gets). Decided with the user (2026-10-05): all
+three used to write the same `kind`/`tags`/`note` to **every** `Monitor`
+ever seen from a given IP in one call. On a shared IP (NAT/CGNAT,
+residential proxy, a household behind one router) that meant tagging one
+person's device could silently relabel a different person's or device's
+Monitor just because they happened to share that IP at some point — a
+privacy/data-correctness bug, not a feature. `setMonitorKind`/
+`setMonitorTags` (below) are now the **only** write paths for
+classification, always scoped to one `Monitor`. The IP-level view
+(`getVisitorsByIp`/`getBlockedIps`/`getIpMonitors`) remains exactly as
+useful for *reading* — still derived on the fly from the Monitors seen at
+that IP (see below) — it's only writing through the IP that's gone. If
+your integration used to call `setIpKind`/`setIpLabels`/`setIpTags`,
+switch to looking up the Monitor(s) at that IP (`getIpMonitors`) and
+calling `setMonitorKind`/`setMonitorTags` per `monitor_id` instead.
+
+- **`kind`**: `bot`, `human`, or `null` (undefined). Set via
+  `setMonitorKind` (one Monitor).
 - **`tags`**: a short list of free-form strings, normalized on every
   write (trimmed, lowercased, deduplicated, capped at 20 tags of 40
   characters each — longer/duplicate entries are silently dropped, not
-  rejected). Set via `setIpLabels` (full replace, all Monitors of one IP),
-  `setIpTags` (add/remove one tag, all Monitors of one or many IPs), or
-  `setMonitorTags` (add/remove one tag, one Monitor, since `0.53.0`).
-- **`note`**: an optional free-text note. Set via `setIpLabels`.
-- **`source`**: `manual` (default), `ai` (written by the AI triage flow),
-  or `auth` (since `0.59.0`, written automatically the first time a
-  Monitor authenticates — see "Authenticated user tagging" above). Refers
-  to **`kind`** specifically, not to tags/note.
+  rejected). Set via `setMonitorTags` (add/remove one tag, one Monitor).
+  One tag, `user`, is **reserved** — see below.
+- **`note`**: an optional free-text note. **No write action sets this
+  any more** since `setIpLabels` (the only action that ever touched
+  `note`) was removed in `0.61.0` — an existing `note` is preserved
+  (nothing prunes it on its own) but there is currently no HTTP action to
+  set a new one or change it. If your integration needs to edit `note`
+  per-`Monitor`, that's tracked as a follow-up (home-page 296); for now,
+  `note` is effectively read-only/legacy data.
+- **`source`**: `manual` (default), `ai` (written by the AI triage flow;
+  since `0.61.0` the AI flow has no bulk-by-IP write path either, so it
+  must also classify one `Monitor` at a time — the `ai` value is still
+  accepted on `setMonitorKind`), or `auth` (since `0.59.0`, written
+  automatically the first time a Monitor authenticates — see
+  "Authenticated user tagging" above). Refers to **`kind`** specifically,
+  not to tags/note.
   **Guaranteed by the package itself, not just the consumer**: a
   `source=ai`/`source=auth` write never overwrites a `kind` already set
   by ANY other source on that same `Monitor` (`maybeAutoHumanClassify()`
-  and the AI triage flow both only ever fill in a Monitor with no `kind`
-  yet), and `source=ai` tag writes are always a merge (add-only) — they
-  can never remove an existing tag. A manual write always wins and always
-  records `source=manual`. `setMonitorKind`/`setMonitorTags` always write
-  `source=manual` — the AI flow only ever writes through
-  `setIpKind`/`setIpTags`, never per individual `Monitor`.
+  only ever fills in a Monitor with no `kind` yet). A manual write always
+  wins and always records `source=manual`.
 - **`classified_at`**: when `kind` was last (re)written for that
   `Monitor`. Not touched by tag-only writes.
+
+**Reserved `user` tag (since `0.61.0`)**: `MonitorLabel::TAG_USER`
+(`'user'`) is added/removed automatically by the package itself, in sync
+with `Monitor.data.user_id` (see "Authenticated user tagging" above) — it
+is never writable by hand. `setMonitorTags` rejects (`422`) any manual
+`op=add`/`op=remove` call with `tag=user`, whether or not the Monitor
+already has it. This is what lets the IP-level listing distinguish
+authenticated visitors from guests: an IP where at least one Monitor
+carries `user` has seen a logged-in visitor; `tag=user` on
+`getVisitorsByIp`/`getBlockedIps` filters for exactly that (see
+"Paginated visitor/blocklist listing" below) — no special-casing needed,
+it's the same generic tag filter every other tag already uses.
 
 **Never touched by `pruneData`, the automatic prune (`DataPruner`), or
 `clearData`** *directly* — but since `0.53.0` a label lives on the
@@ -1357,49 +1408,18 @@ makes on purpose (see the intro above).
 
 ### Write actions (`local_token` only, same auth as `updateBlockedIps`)
 
-- **`setIpKind`**: `ips` (array) or `ip` (single string, same param
-  either way), `kind` (`bot`/`human`/`null`, `422` if anything else),
-  `source` (`manual` default | `ai`). Invalid/non-IP entries in `ips` are
-  silently dropped (same best-effort pattern as `flagScraperPaths`);
-  `422` only if none of the given IPs are valid. **Since `0.53.0`**:
-  writes the same `kind` to **every `Monitor`** ever seen from each IP
-  (via `monitor_visit_ips`), not to the IP itself — an IP with no
-  `Monitor` at all is silently a no-op (not an error). The
-  `source=manual` protection applies **per `Monitor`**, so a single IP
-  with several Monitors can have some applied and some ignored in the
-  same call. Response is now granular by Monitor, not by IP:
-  `{"success": true, "applied": [{"ip": "1.2.3.4", "monitor_id": 10}],
-  "ignored": [{"ip": "1.2.3.4", "monitor_id": 11, "reason": "manual
-  classification protected"}]}`.
-- **`setIpLabels`**: `ip` (single, `422` if missing/invalid), `tags`
-  (array, replaces the full set — normalized as described above), `note`
-  (string or omitted/null to clear). Always `source=manual`; doesn't
-  touch `kind`/`classified_at`. This is the detail-view "edit
-  classification" form's save action. **Since `0.53.0`**: writes the same
-  `tags`/`note` to every `Monitor` ever seen from that IP. Response:
-  `{"success": true, "ip": "1.2.3.4", "tags": [...], "note": "...",
-  "monitors_updated": 3}`.
-- **`setIpTags`**: `ips`/`ip` (same as `setIpKind`), `tag` (single
-  string, normalized; `422` if empty after normalization), `op` (`add`
-  default | `remove`), `source` (`manual` default | `ai`). `op=remove`
-  with `source=ai` is rejected with `422` (`"source=ai cannot remove
-  tags"`) — the AI triage flow only ever adds. This is the bulk-action
-  case ("add tag to selected IPs" in the dashboard) as well as what the
-  AI triage job calls per classified bot. **Since `0.53.0`**: applies to
-  every `Monitor` ever seen from each IP; response is granular by
-  Monitor, same shape as `setIpKind`'s `applied`.
 - **`setMonitorKind`** (since `0.53.0`): `monitor_id` (`422` if
   missing/not an existing `Monitor`), `kind` (`bot`/`human`/`null`, `422`
   if anything else). Always `source=manual` — no `source` param, this
-  action doesn't accept AI writes (the AI flow classifies via `setIpKind`
-  in bulk, never one `Monitor` at a time). This is the Monitor detail
-  view's classification control. Response: `{"success": true,
-  "monitor_id": 10, "kind": "bot"}`.
+  action doesn't accept AI writes. This is the Monitor detail view's
+  classification control, and since `0.61.0` the only way to write `kind`
+  at all. Response: `{"success": true, "monitor_id": 10, "kind": "bot"}`.
 - **`setMonitorTags`** (since `0.53.0`): `monitor_id` (same validation as
   `setMonitorKind`), `tag` (single string, normalized; `422` if empty
-  after normalization), `op` (`add` default | `remove`). Always
-  `source=manual`, same reasoning as `setMonitorKind`. Response:
-  `{"success": true, "monitor_id": 10, "tag": "amazon", "op": "add"}`.
+  after normalization, `422` if it's the reserved `user` tag — see
+  above), `op` (`add` default | `remove`). Always `source=manual`, same
+  reasoning as `setMonitorKind`. Response: `{"success": true,
+  "monitor_id": 10, "tag": "amazon", "op": "add"}`.
 
 ### Read actions
 
@@ -1409,33 +1429,48 @@ makes on purpose (see the intro above).
   small by nature). Same auth as `getData` (permanent `local_token`
   **or** the ephemeral read token). Response: `{"success": true, "data":
   [{"tag": "amazon", "count": 12}, ...]}`.
-- **`getMonitorQueue`** (since `0.53.0`): the AI-triage work queue,
-  replacing the old `clean_ai_queue` filter of `getVisitorsByIp` (removed
-  in this same version) — now listing **Monitors**, not IPs, since the
-  classification moved to the `Monitor`. Params: `page`/`per_page` (same
-  as `getIpMonitors`), `group` (required, `new` or `unclassified`, `422`
-  on anything else — including the old `recheck`, removed in `0.55.0`,
-  see below).
-  - Both groups are Monitors with no `kind` at all (no `monitor_labels`
-    row, or one with `kind` null), split only by age: `new` (`created_at`
-    newer than `ai_triage_min_age_hours`, config, default `24` — purely
-    informational, never surfaced for triage) and `unclassified`
-    (`created_at` at or past that threshold — the actual manual/AI
-    triage backlog).
-  - **Breaking in `0.55.0`**: replaces the old `recheck` group (Monitors
-    with `source=ai` that accumulated new activity since
-    `classified_at`) — see "Upgrading to `0.55.0`" below for why.
-  - Both groups exclude Monitors seen at an IP that's currently
-    `flagged` (`monitor_ip_stats.flagged`) or actively blocked
+- **`getMonitorQueue`** (since `0.53.0`): started as the AI-triage work
+  queue, replacing the old `clean_ai_queue` filter of `getVisitorsByIp`
+  (removed in that same version) — lists **Monitors**, not IPs, since
+  classification belongs to the `Monitor`. Params: `page`/`per_page` (same
+  as `getIpMonitors`), `group` (required, `422` on anything outside
+  `new`/`unclassified`/`all`/`clean`/`clean_bots`/`clean_humans` —
+  including the old `recheck`, removed in `0.55.0`, see below).
+  - `new`/`unclassified`: Monitors with no `kind` at all (no
+    `monitor_labels` row, or one with `kind` null), split only by age:
+    `new` (`created_at` newer than `ai_triage_min_age_hours`, config,
+    default `24` — purely informational, never surfaced for triage) and
+    `unclassified` (`created_at` at or past that threshold — the actual
+    manual/AI triage backlog). Both exclude Monitors seen at an IP that's
+    currently `flagged` (`monitor_ip_stats.flagged`) or actively blocked
     (`BlockedIp::active()`) — those already have their own work queue
     (`filter=flagged`/`blocked` on `getVisitorsByIp`), no need to also
     surface them here.
+  - **`all`/`clean`/`clean_bots`/`clean_humans`** (since `0.61.0`, for
+    the dashboard's "Monitors" tab): reuse this same action/method rather
+    than a parallel one, since the paginated response shape is identical.
+    - **`clean`**: a Monitor is "clean" when it has **not** been seen at
+      any IP with `monitor_ip_stats.flagged=true`, nor at any
+      currently-blocked IP (same exclusion set as `new`/`unclassified`
+      above) — independent of `kind`/age, so a `clean` Monitor can be
+      bot, human, or unclassified. Blocked-IP exclusion here is a safety
+      net only, not elaborate logic: `DataPruner` already deletes
+      Monitors at a blocked IP in batches, so they only exist briefly
+      either way.
+    - **`clean_bots`**/**`clean_humans`**: `clean` above, further
+      filtered by `monitor_labels.kind = 'bot'`/`'human'`.
+    - **`all`**: every Monitor, no exclusion at all. Each row gains a
+      read-only, display-only `inherited_flagged` boolean: `true` when
+      that Monitor has been seen at a `flagged` IP (not blocked — a
+      blocked IP's Monitors are already covered by `blocked` elsewhere
+      and are short-lived by design, see above). Never stored — computed
+      fresh on every call, same as everything else in this response.
   - Response shape is the same enxuto shape as `getIpMonitors`/
     `getUserMonitors` (via the shared `hydrateMonitorRows`, each row
     already carrying its own `kind`/`tags`/`note`/`source`/
-    `classified_at` — see "User listing" above). Cached the same way as
-    `getVisitorsByIp`/`getBlockedIps` (see "Paginated visitor/blocklist
-    listing" below).
+    `classified_at` — see "User listing" above), plus `inherited_flagged`
+    for `group=all`. Cached the same way as `getVisitorsByIp`/
+    `getBlockedIps` (see "Paginated visitor/blocklist listing" below).
 - **`getMonitorQueueCounts`** (since `0.53.0`): `{"success": true,
   "new": 7, "unclassified": 12}` — the same two groups as
   `getMonitorQueue`, unpaginated counts only, feeding the triage modal in
@@ -1501,6 +1536,28 @@ instead. New key `monitors_by_kind` (`{human, bot, unclassified, new}`,
 sums to `visitors_total`), see "Aggregated dashboard totals" above. No
 migration or new config key; `ai_triage_min_age_hours` now also sets the
 `new`/`unclassified` boundary of `monitors_by_kind`.
+
+### Upgrading to `0.61.0`
+
+**Breaking**: `setIpKind`, `setIpLabels`, and `setIpTags` are **removed**
+— no replacement action, no compatibility shim. Calling any of them now
+gets the generic `{"success": false, "message": "Invalid action"}`
+(`400`) response any unrecognized `action` gets. See the intro of "IP
+classification" above for why (IP-level writes leaked classification
+across people/devices sharing an IP) and for the `setMonitorKind`/
+`setMonitorTags` replacement path. If your integration polls/writes
+classification by IP, switch to resolving the Monitor(s) at that IP first
+(`getIpMonitors`) and writing per `monitor_id`.
+
+Run `php artisan migrate --force` after updating: a backfill migration
+adds the reserved `user` tag (see "Authenticated user tagging" above) to
+every `Monitor` that already has `data.user_id` set but doesn't have the
+tag yet (same mechanics as the `0.59.0` auto-human backfill) — safe to
+run on a large table, batched, and a no-op if there's nothing to do.
+
+No action needed for the new `getMonitorQueue` groups (`all`/`clean`/
+`clean_bots`/`clean_humans`) — purely additive, nothing stored or
+migrated for them.
 
 ## Paginated page listing (`getPages`)
 

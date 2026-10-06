@@ -11,10 +11,81 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
  * laravel-monitor 258 (v0.53.0): novas write actions `setMonitorKind`/
  * `setMonitorTags` — classificam/tagueiam UM Monitor direto por
  * `monitor_id`, sempre `source=manual`. Ver README "IP classification".
+ *
+ * laravel-monitor 295 (v0.61.0): desde que `setIpKind`/`setIpLabels`/
+ * `setIpTags` foram removidas (classificação por IP vazava entre
+ * pessoas/dispositivos diferentes atrás do mesmo IP compartilhado),
+ * `setMonitorKind`/`setMonitorTags` são as ÚNICAS write actions de
+ * classificação que restam. Este arquivo também cobre: as três actions
+ * removidas de fato não existem mais, e a tag reservada `user` não pode
+ * ser escrita manualmente via `setMonitorTags`.
  */
 class MonitorSetMonitorLabelTest extends TestCase
 {
     use RefreshDatabase;
+
+    /**
+     * laravel-monitor 295 (v0.61.0, breaking): sem camada de
+     * compatibilidade — chamar qualquer uma das três actions removidas
+     * cai no `default` do switch de `handle()`, igual qualquer action
+     * desconhecida (`400`, `"Invalid action"`).
+     */
+    public function test_removed_ip_write_actions_fall_back_to_invalid_action(): void
+    {
+        config(['monitor.local_token' => 'test-local-token']);
+
+        foreach (['setIpKind', 'setIpLabels', 'setIpTags'] as $action) {
+            $response = $this->callHandler(['action' => $action, 'ip' => '1.1.1.1', 'kind' => 'bot', 'tag' => 'vpn']);
+
+            $response->assertStatus(400);
+            $response->assertJsonPath('success', false);
+            $response->assertJsonPath('message', 'Invalid action');
+        }
+    }
+
+    /**
+     * laravel-monitor 295 (v0.61.0): a tag reservada `user` (gerenciada só
+     * pelo pacote, conforme `data.user_id`) não pode ser adicionada
+     * manualmente via `setMonitorTags` — rejeitada com `422`, nunca
+     * silenciosamente ignorada.
+     */
+    public function test_rejects_manually_adding_the_reserved_user_tag(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'setMonitorTags', 'monitor_id' => $monitor->id, 'tag' => 'user', 'op' => 'add']);
+
+        $response->assertStatus(422);
+        $this->assertNull(MonitorLabel::where('monitor_id', $monitor->id)->first());
+    }
+
+    /**
+     * Mesma rejeição pra `op=remove` — mesmo que o Monitor já tenha a tag
+     * (ex: autenticado de verdade), ninguém pode removê-la manualmente.
+     */
+    public function test_rejects_manually_removing_the_reserved_user_tag(): void
+    {
+        $monitor = Monitor::create(['data' => ['user_id' => 1]]);
+        MonitorLabel::create(['monitor_id' => $monitor->id, 'tags' => ['user']]);
+
+        $response = $this->callHandler(['action' => 'setMonitorTags', 'monitor_id' => $monitor->id, 'tag' => 'user', 'op' => 'remove']);
+
+        $response->assertStatus(422);
+        $this->assertSame(['user'], MonitorLabel::where('monitor_id', $monitor->id)->first()->tags);
+    }
+
+    /**
+     * Case-insensitive: `normalizeTags()` já lowercase antes da checagem
+     * de reserva, então `USER`/`User` são rejeitados do mesmo jeito.
+     */
+    public function test_rejects_the_reserved_user_tag_regardless_of_case(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'setMonitorTags', 'monitor_id' => $monitor->id, 'tag' => 'USER', 'op' => 'add']);
+
+        $response->assertStatus(422);
+    }
 
     public function test_sets_kind_on_a_monitor(): void
     {

@@ -86,6 +86,15 @@ class SessionVisitorTracker
      */
     protected function maybeAutoHumanClassify(int $monitorId): void
     {
+        // laravel-monitor 295 (v0.61.0): a tag reservada `user` é
+        // sincronizada ANTES do early-return de `kind` abaixo — ela não é
+        // protegida pela mesma regra de "não sobrescrever uma
+        // classificação manual" que `kind` é: um Monitor classificado
+        // manualmente como bot que loga continua bot, mas ainda deve
+        // ganhar a tag `user` (a tag só descreve "autenticado", não o
+        // julgamento bot/human).
+        $this->syncUserTag($monitorId, true);
+
         $label = MonitorLabel::firstOrNew(['monitor_id' => $monitorId]);
 
         if ($label->kind !== null) {
@@ -104,6 +113,49 @@ class SessionVisitorTracker
             $label->save();
         } catch (UniqueConstraintViolationException) {
             return;
+        }
+    }
+
+    /**
+     * laravel-monitor 295 (v0.61.0): mantém a tag reservada
+     * `MonitorLabel::TAG_USER` em sincronia com `data['user_id']` — chamado
+     * só a partir de `maybeAutoHumanClassify()` (mesmo gate: só na
+     * transição guest->autenticado, nunca a cada request). `$hasUserId`
+     * sempre chega `true` nos dois call sites de hoje (não existe, no
+     * pacote, nenhuma transição autenticado->guest que zere `user_id` de
+     * um Monitor já existente); o parâmetro fica genérico mesmo assim
+     * (`true` adiciona, `false` remove) pra não deixar a remoção
+     * implementada de forma incompleta se um dia existir essa transição —
+     * ver README "IP classification"/"Authenticated user tagging".
+     *
+     * Não usa `lockForUpdate()`/transaction (diferente de
+     * `setMonitorTags()`): mesmo raciocínio de `maybeAutoHumanClassify()`
+     * acima — o `unique` em `monitor_id` (migration 2026-10-04) já evita
+     * duplicar a linha numa corrida, e a pior consequência de perder uma
+     * corrida aqui é a MESMA tag não ser adicionada numa chamada
+     * concorrente, que nunca aconteceria de novo pro mesmo Monitor (só
+     * dispara na transição, uma vez por Monitor).
+     */
+    protected function syncUserTag(int $monitorId, bool $hasUserId): void
+    {
+        $label = MonitorLabel::firstOrNew(['monitor_id' => $monitorId]);
+        $tags = $label->tags ?? [];
+        $hasTag = in_array(MonitorLabel::TAG_USER, $tags, true);
+
+        if ($hasUserId === $hasTag) {
+            return;
+        }
+
+        $label->tags = $hasUserId
+            ? MonitorLabel::normalizeTags([...$tags, MonitorLabel::TAG_USER])
+            : array_values(array_filter($tags, fn ($t) => $t !== MonitorLabel::TAG_USER));
+
+        try {
+            $label->saveOrPrune();
+        } catch (UniqueConstraintViolationException) {
+            // Outra request concorrente já criou a linha enquanto esta
+            // calculava `$tags` — inofensivo: não há transição subsequente
+            // pro mesmo Monitor hoje (ver docblock acima) pra reaplicar.
         }
     }
 

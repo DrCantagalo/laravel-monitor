@@ -175,6 +175,137 @@ class MonitorQueueTest extends TestCase
         $response->assertJsonPath('new', 0);
     }
 
+    /**
+     * laravel-monitor 295 (v0.61.0): quatro grupos novos reaproveitando
+     * `getMonitorQueue`/`buildMonitorQueueResult` — pensados pra nova aba
+     * "Monitors" do dashboard (consumo é a home-page 296, que vem depois).
+     * `clean` = não visto em nenhum IP `flagged` nem bloqueado; `all` lista
+     * tudo, sem exclusão, com `inherited_flagged` calculado por linha.
+     */
+    public function test_clean_group_excludes_monitors_seen_from_a_flagged_ip(): void
+    {
+        IpStat::create(['ip' => '1.1.1.1', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
+
+        $flagged = Monitor::create(['data' => []]);
+        $flagged->recordIp('1.1.1.1');
+
+        $clean = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean']);
+
+        $response->assertOk();
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertContains($clean->id, $ids);
+        $this->assertNotContains($flagged->id, $ids);
+    }
+
+    public function test_clean_group_excludes_monitors_seen_from_a_blocked_ip(): void
+    {
+        BlockedIp::create(['ip' => '2.2.2.2']);
+
+        $blocked = Monitor::create(['data' => []]);
+        $blocked->recordIp('2.2.2.2');
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean']);
+
+        $this->assertNotContains($blocked->id, collect($response->json('data'))->pluck('id')->all());
+    }
+
+    public function test_clean_group_includes_monitors_regardless_of_kind_or_age(): void
+    {
+        $classified = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $classified->id, 'kind' => 'bot', 'source' => 'manual']);
+
+        $unclassified = $this->oldMonitor();
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean']);
+
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertContains($classified->id, $ids, 'clean não filtra por kind');
+        $this->assertContains($unclassified->id, $ids, 'clean não filtra por idade');
+    }
+
+    public function test_clean_bots_and_clean_humans_split_by_kind_within_clean(): void
+    {
+        $bot = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $bot->id, 'kind' => 'bot', 'source' => 'manual']);
+
+        $human = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $human->id, 'kind' => 'human', 'source' => 'manual']);
+
+        $unclassified = Monitor::create(['data' => []]);
+
+        $bots = collect($this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean_bots'])->json('data'))->pluck('id')->all();
+        $humans = collect($this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean_humans'])->json('data'))->pluck('id')->all();
+
+        $this->assertContains($bot->id, $bots);
+        $this->assertNotContains($human->id, $bots);
+        $this->assertNotContains($unclassified->id, $bots);
+
+        $this->assertContains($human->id, $humans);
+        $this->assertNotContains($bot->id, $humans);
+        $this->assertNotContains($unclassified->id, $humans);
+    }
+
+    public function test_clean_bots_excludes_monitors_seen_from_a_flagged_ip(): void
+    {
+        IpStat::create(['ip' => '3.3.3.3', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
+
+        $bot = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $bot->id, 'kind' => 'bot', 'source' => 'manual']);
+        $bot->recordIp('3.3.3.3');
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'clean_bots']);
+
+        $this->assertNotContains($bot->id, collect($response->json('data'))->pluck('id')->all());
+    }
+
+    public function test_all_group_lists_every_monitor_including_flagged_and_blocked(): void
+    {
+        IpStat::create(['ip' => '4.4.4.4', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
+
+        $flagged = Monitor::create(['data' => []]);
+        $flagged->recordIp('4.4.4.4');
+
+        $clean = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all']);
+
+        $response->assertOk();
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertContains($flagged->id, $ids);
+        $this->assertContains($clean->id, $ids);
+    }
+
+    public function test_all_group_marks_inherited_flagged_for_monitors_seen_from_a_flagged_ip(): void
+    {
+        IpStat::create(['ip' => '5.5.5.5', 'visit_count' => 1, 'first_seen' => now(), 'last_seen' => now(), 'flagged' => true]);
+
+        $flagged = Monitor::create(['data' => []]);
+        $flagged->recordIp('5.5.5.5');
+
+        $clean = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all']);
+        $rows = collect($response->json('data'))->keyBy('id');
+
+        $this->assertTrue($rows[$flagged->id]['inherited_flagged']);
+        $this->assertFalse($rows[$clean->id]['inherited_flagged']);
+    }
+
+    public function test_all_group_does_not_mark_inherited_flagged_for_a_merely_blocked_ip(): void
+    {
+        BlockedIp::create(['ip' => '6.6.6.6']);
+
+        $blocked = Monitor::create(['data' => []]);
+        $blocked->recordIp('6.6.6.6');
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all']);
+        $rows = collect($response->json('data'))->keyBy('id');
+
+        $this->assertFalse($rows[$blocked->id]['inherited_flagged']);
+    }
+
     public function test_rejects_unauthenticated_request(): void
     {
         $response = $this->postJson('/monitor/handler', ['action' => 'getMonitorQueue', 'group' => 'unclassified']);

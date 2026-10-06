@@ -78,7 +78,51 @@ class SessionVisitorTrackerAutoHumanTest extends TestCase
         $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
         $this->assertSame('human', $label->kind);
         $this->assertSame('auth', $label->source);
-        $this->assertSame(['vpn'], $label->tags);
+        // laravel-monitor 295 (v0.61.0): `maybeAutoHumanClassify()` agora
+        // também sincroniza a tag reservada `user` — `vpn` (já existente)
+        // é preservada, `user` é somada.
+        $this->assertEqualsCanonicalizing(['vpn', 'user'], $label->tags);
+    }
+
+    /**
+     * laravel-monitor 295 (v0.61.0): a tag reservada `user`
+     * (`MonitorLabel::TAG_USER`) é sincronizada sempre, mesmo quando o
+     * Monitor já tem uma classificação manual protegida (`kind`/`source`
+     * não mudam) — a tag só descreve "este Monitor está ligado a um
+     * user_id", independente do julgamento bot/human.
+     */
+    public function test_classify_adds_the_user_tag_even_when_kind_is_manually_protected(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'manual']);
+
+        $this->callMaybeAutoHumanClassify($monitor->id);
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame('bot', $label->kind);
+        $this->assertSame('manual', $label->source);
+        $this->assertSame(['user'], $label->tags);
+    }
+
+    public function test_classify_creates_the_user_tag_on_a_fresh_label_row(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $this->callMaybeAutoHumanClassify($monitor->id);
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame(['user'], $label->tags);
+    }
+
+    public function test_classify_does_not_duplicate_the_user_tag_when_called_twice(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $this->callMaybeAutoHumanClassify($monitor->id);
+        $this->callMaybeAutoHumanClassify($monitor->id);
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame(['user'], $label->tags);
     }
 
     public function test_classify_never_overwrites_an_existing_bot_classification(): void
@@ -143,6 +187,7 @@ class SessionVisitorTrackerAutoHumanTest extends TestCase
         $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
         $this->assertSame('human', $label->kind);
         $this->assertSame('auth', $label->source);
+        $this->assertSame(['user'], $label->tags);
     }
 
     public function test_track_classifies_existing_guest_monitor_on_the_request_it_first_logs_in(): void

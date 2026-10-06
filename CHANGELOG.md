@@ -4,6 +4,65 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.61.0] - 2026-10-06
+### ⚠️ Breaking — IP classification writes removed; classification is now Monitor-only
+- **`setIpKind`, `setIpLabels`, and `setIpTags` are removed.** No
+  replacement action, no compatibility shim — calling any of them now
+  falls through to the generic `{"success": false, "message": "Invalid
+  action"}` (`400`) response any unrecognized `action` gets. All three
+  wrote the same `kind`/`tags`/`note` to **every** `Monitor` ever seen
+  from a given IP in one call; on a shared IP (NAT/CGNAT, residential
+  proxy, a household behind one router) that let classifying one
+  person's/device's Monitor silently relabel a different person's or
+  device's Monitor that merely happened to share the same IP at some
+  point — a privacy/data-correctness issue, decided with the user on
+  2026-10-05. `setMonitorKind`/`setMonitorTags` (unchanged, already
+  scoped to one `monitor_id` since `0.53.0`) are now the **only** way to
+  write `kind`/`tags`. The IP-level listings
+  (`getVisitorsByIp`/`getBlockedIps`/`getIpMonitors`) are unaffected for
+  *reading* — they already derived `kind`/`tags` on the fly from the
+  Monitors seen at that IP, never stored it, since `0.53.0`.
+- **No write action sets `note` any more.** `setIpLabels` was the only
+  action that ever touched it; existing `note` values are preserved
+  (nothing prunes them), but there is currently no HTTP action to set a
+  new one. Tracked as a gap for a future task if a per-`Monitor` note
+  editor is needed — out of scope here.
+- See README "IP classification" for the full write/read reference and
+  "Upgrading to `0.61.0`" for the migration step.
+
+### Added
+- **Reserved `user` tag**: `MonitorLabel::TAG_USER` (`'user'`) is now
+  added to a Monitor's `monitor_labels.tags` automatically, in the same
+  place and under the same guest→authenticated transition gate as the
+  existing `kind=human, source=auth` auto-tagging
+  (`SessionVisitorTracker::maybeAutoHumanClassify()`, now also calling a
+  new `syncUserTag()`) — independent of, and never gated by, the `kind`
+  protection: a Monitor already manually classified `bot` that logs in
+  still gains the `user` tag. **Never writable by hand**:
+  `setMonitorTags` rejects (`422`) any manual `op=add`/`op=remove` call
+  with `tag=user`. A new migration backfills the tag onto every existing
+  Monitor that already has `data.user_id` but not yet the tag (same
+  batched, idempotent style as the `0.59.0` auto-human backfill). Lets
+  the IP-level listing distinguish authenticated visitors (at least one
+  Monitor at that IP carries `user`) from guests (none do) via the
+  existing generic `tag` filter on `getVisitorsByIp`/`getBlockedIps` — no
+  code change needed there, it already accepted any tag value.
+- **`getMonitorQueue`: four new `group` values** — `all`, `clean`,
+  `clean_bots`, `clean_humans` — for the dashboard's upcoming "Monitors"
+  tab (consumed by home-page 296, a separate follow-up task). Reuses the
+  existing action/method rather than a new one, since the paginated
+  response shape (via `hydrateMonitorRows`) is identical to `new`/
+  `unclassified`.
+  - `clean`: a Monitor not seen at any `monitor_ip_stats.flagged=true` IP
+    nor at any currently-blocked IP — independent of `kind`/age.
+  - `clean_bots`/`clean_humans`: `clean` + `monitor_labels.kind`.
+  - `all`: every Monitor, no exclusion; each row gains a read-only,
+    display-only `inherited_flagged` boolean (`true` if that Monitor was
+    seen at a `flagged` IP — blocked IPs intentionally excluded from this
+    indicator, see README).
+  - Purely additive: existing `group=new`/`group=unclassified` callers
+    are unaffected, no migration needed for the new groups.
+
 ## [0.60.1] - 2026-10-04
 ### Fixed
 - **`2026_10_04_000001_redesign_monitor_page_hits_with_day` (0.60.0) failed

@@ -49,6 +49,18 @@ class MonitorLabel extends Model
     public const MAX_TAG_LENGTH = 40;
 
     /**
+     * laravel-monitor 295 (v0.61.0): tag reservada, gerenciada
+     * automaticamente pelo pacote (`SessionVisitorTracker::
+     * maybeAutoHumanClassify()`/`syncUserTag()`) conforme o Monitor tem ou
+     * não `data.user_id` preenchido — nunca gravável/removível
+     * manualmente. `MonitorController::setMonitorTags()` rejeita (422)
+     * qualquer tentativa de `op=add`/`op=remove` com este valor. Permite
+     * distinguir, na listagem por IP, quem é usuário autenticado (tem a
+     * tag `user` em algum dos seus Monitors) de guest (nenhum tem).
+     */
+    public const TAG_USER = 'user';
+
+    /**
      * trim + lowercase + dedupe (preservando a ordem de primeira
      * aparição) + descarta vazias/longas demais + limita a quantidade.
      * Usado tanto pela escrita direta quanto pelo merge de tags.
@@ -94,5 +106,27 @@ class MonitorLabel extends Model
     public function monitor(): BelongsTo
     {
         return $this->belongsTo(Monitor::class);
+    }
+
+    /**
+     * laravel-monitor 295 (v0.61.0): "salva, ou apaga se ficou vazia" —
+     * antes só existia como `MonitorController::saveOrPruneLabel()`
+     * (protected, só pros write paths HTTP do controller); movido pro
+     * model e exposto publicamente pra `SessionVisitorTracker::
+     * syncUserTag()` (escrita interna, fora do controller) poder usar a
+     * mesma regra sem duplicá-la. `saveOrPruneLabel()` no controller
+     * agora só delega pra aqui.
+     */
+    public function saveOrPrune(): void
+    {
+        if ($this->isEmpty()) {
+            if ($this->exists) {
+                $this->delete();
+            }
+
+            return;
+        }
+
+        $this->save();
     }
 }
