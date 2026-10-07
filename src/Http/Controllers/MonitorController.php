@@ -2882,12 +2882,32 @@ class MonitorController extends Controller
     /**
      * laravel-monitor 258 (v0.53.0): classifica UM Monitor (visitante)
      * específico, direto por `monitor_id` — a ação por trás da
-     * classificação manual no detalhe do monitor (home-page 259). Sempre
-     * `source=manual`, nunca aceitou `source=ai`.
+     * classificação manual no detalhe do monitor (home-page 259).
      *
      * laravel-monitor 295 (v0.61.0): desde que `setIpKind` foi removida,
      * esta é a ÚNICA forma de gravar `kind` — não existe mais nenhum
-     * caminho de escrita em lote por IP.
+     * caminho de escrita em lote por IP. Ficou temporariamente só
+     * `source=manual` (gap rastreado, ver `test_ignores_source_param_and_
+     * always_writes_manual` daquela versão) porque a proteção antiga de
+     * `setIpKind` contra sobrescrever classificação manual operava por IP
+     * (todos os `monitor_id` vistos naquele IP) e não fazia sentido
+     * reaproveitar 1:1 pra escrita já escopada a um `monitor_id` só, sem
+     * reconsiderar a regra - decisão adiada pra esta task.
+     *
+     * laravel-monitor 303 (v0.62.0): `source` volta a ser aceito
+     * (`manual` default, `ai` opcional) - fecha o gap acima. Mesma regra
+     * de proteção que `setIpKind` tinha (ver git history pré-295): uma
+     * escrita `source=ai` nunca sobrescreve um `kind` já definido por
+     * `source=manual` no mesmo Monitor (ela É sobrescrita por uma escrita
+     * `source=ai` seguinte, porque a fila de triagem só processa Monitors
+     * do grupo `unclassified` - um Monitor com `kind` `ai` não devia
+     * voltar pra lá; isso só re-dispara em caso de corrida genuína). Uma
+     * escrita `source=manual` sempre vence e sempre grava
+     * `source=manual`, incondicional. Resposta ganha `applied` (bool) -
+     * `false` quando a proteção ignorou a escrita (Monitor já tinha
+     * `kind` manual) - `TriageMonitorIpsJob` do consumidor usa isso pra
+     * decidir se aplica as tags da IA também (mesma lógica que usava
+     * `applied`/`ignored` de `setIpKind`).
      */
     protected function setMonitorKind(Request $request)
     {
@@ -2910,23 +2930,34 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        DB::transaction(function () use ($monitorId, $kind) {
-            $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first()
-                ?? new MonitorLabel(['monitor_id' => $monitorId]);
+        $source = $request->input('source', 'manual') === 'ai' ? 'ai' : 'manual';
 
+        $applied = DB::transaction(function () use ($monitorId, $kind, $source) {
+            $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first();
+
+            if ($source === 'ai' && $label && $label->kind !== null && $label->source === 'manual') {
+                return false;
+            }
+
+            $label ??= new MonitorLabel(['monitor_id' => $monitorId]);
             $label->kind = $kind;
-            $label->source = 'manual';
+            $label->source = $source;
             $label->classified_at = now();
 
             $this->saveOrPruneLabel($label);
+
+            return true;
         });
 
-        $this->invalidateListingsCache();
+        if ($applied) {
+            $this->invalidateListingsCache();
+        }
 
         return response()->json([
             'success' => true,
             'monitor_id' => $monitorId,
-            'kind' => $kind,
+            'kind' => $applied ? $kind : MonitorLabel::where('monitor_id', $monitorId)->value('kind'),
+            'applied' => $applied,
         ]);
     }
 

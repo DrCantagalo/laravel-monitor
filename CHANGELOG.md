@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.62.0] - 2026-10-07
+### Added
+- **`setMonitorKind` accepts `source=ai` again.** Closes a gap left by
+  `0.61.0`: when `setIpKind`/`setIpLabels`/`setIpTags` were removed (bulk
+  write by IP, see `0.61.0` below), `setMonitorKind` kept the equivalent
+  per-`Monitor` write `source=manual`-only rather than carrying over the
+  old protection against an AI write clobbering a manual classification —
+  that protection operated on every `monitor_id` seen at an IP, which no
+  longer made sense once scoped to a single `monitor_id`, so it was left
+  for a follow-up instead of being ported as-is. Now: `source` (`manual`
+  default | `ai`; anything else falls back to `manual`) behaves like the
+  removed `setIpKind` did — a `source=ai` write is ignored (not applied)
+  if the Monitor already has a `kind` set with `source=manual`; a
+  `source=manual` write always applies regardless of the Monitor's
+  current `source`. Response gains `applied` (bool), `false` exactly when
+  the protection ignored the write (`kind` then reflects the Monitor's
+  unchanged current value). See README "IP classification" → "Write
+  actions".
+- Fixes a real regression in production: `home-page`'s AI Monitor triage
+  job (`TriageMonitorIpsJob`) depended on `setIpKind`'s `source=ai`
+  support and the manual-classification protection; since `0.61.0` it had
+  no equivalent write path at all for applying an AI classification
+  (`setMonitorKind` silently forced `source=manual`), so every triage run
+  burned a real AI call per Monitor and then failed to record the
+  result. See `home-page` 302.
+
 ## [0.61.1] - 2026-10-06
 ### Fixed
 - **`getMonitorQueueCounts` could diverge from `getMonitorQueue` for the

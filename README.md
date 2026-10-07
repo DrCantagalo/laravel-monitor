@@ -1410,15 +1410,22 @@ makes on purpose (see the intro above).
 
 - **`setMonitorKind`** (since `0.53.0`): `monitor_id` (`422` if
   missing/not an existing `Monitor`), `kind` (`bot`/`human`/`null`, `422`
-  if anything else). Always `source=manual` — no `source` param, this
-  action doesn't accept AI writes. This is the Monitor detail view's
-  classification control, and since `0.61.0` the only way to write `kind`
-  at all. Response: `{"success": true, "monitor_id": 10, "kind": "bot"}`.
+  if anything else), `source` (`manual` default | `ai`, since `0.62.0` —
+  any other value falls back to `manual`). This is the Monitor detail
+  view's classification control, and since `0.61.0` the only way to write
+  `kind` at all. A `source=ai` write is silently ignored (not applied) if
+  the Monitor already has a `kind` set with `source=manual` — a
+  `source=manual` write always applies, regardless of the Monitor's
+  current `source`. Response: `{"success": true, "monitor_id": 10,
+  "kind": "bot", "applied": true}` — `applied: false` when the write was
+  ignored by that protection (`kind` in the response is then the
+  Monitor's unchanged current value, not the one submitted).
 - **`setMonitorTags`** (since `0.53.0`): `monitor_id` (same validation as
   `setMonitorKind`), `tag` (single string, normalized; `422` if empty
   after normalization, `422` if it's the reserved `user` tag — see
-  above), `op` (`add` default | `remove`). Always `source=manual`, same
-  reasoning as `setMonitorKind`. Response: `{"success": true,
+  above), `op` (`add` default | `remove`). Always `source=manual`
+  semantics don't apply here — tags have no `source` tracking at all (see
+  the `source` field note above). Response: `{"success": true,
   "monitor_id": 10, "tag": "amazon", "op": "add"}`.
 
 ### Read actions

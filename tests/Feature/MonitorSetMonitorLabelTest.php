@@ -10,7 +10,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 /**
  * laravel-monitor 258 (v0.53.0): novas write actions `setMonitorKind`/
  * `setMonitorTags` — classificam/tagueiam UM Monitor direto por
- * `monitor_id`, sempre `source=manual`. Ver README "IP classification".
+ * `monitor_id`. Ver README "IP classification".
  *
  * laravel-monitor 295 (v0.61.0): desde que `setIpKind`/`setIpLabels`/
  * `setIpTags` foram removidas (classificação por IP vazava entre
@@ -18,7 +18,12 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
  * `setMonitorKind`/`setMonitorTags` são as ÚNICAS write actions de
  * classificação que restam. Este arquivo também cobre: as três actions
  * removidas de fato não existem mais, e a tag reservada `user` não pode
- * ser escrita manualmente via `setMonitorTags`.
+ * ser escrita manualmente via `setMonitorTags`. Naquela versão
+ * `setMonitorKind` só aceitava `source=manual` (gap temporário).
+ *
+ * laravel-monitor 303 (v0.62.0): `setMonitorKind` volta a aceitar
+ * `source=ai`, com a mesma proteção contra sobrescrever uma classificação
+ * manual que `setIpKind` tinha antes de ser removida.
  */
 class MonitorSetMonitorLabelTest extends TestCase
 {
@@ -103,11 +108,75 @@ class MonitorSetMonitorLabelTest extends TestCase
         $this->assertNotNull($label->classified_at);
     }
 
-    public function test_ignores_source_param_and_always_writes_manual(): void
+    /**
+     * laravel-monitor 303 (v0.62.0): `source=ai` agora é aceito (fecha o
+     * gap aberto na 295 - ver docblock de `setMonitorKind`). Num Monitor
+     * sem `kind` ainda, grava normal.
+     */
+    public function test_accepts_source_ai_on_a_monitor_with_no_prior_kind(): void
     {
         $monitor = Monitor::create(['data' => []]);
 
-        $this->callHandler(['action' => 'setMonitorKind', 'monitor_id' => $monitor->id, 'kind' => 'human', 'source' => 'ai']);
+        $response = $this->callHandler(['action' => 'setMonitorKind', 'monitor_id' => $monitor->id, 'kind' => 'human', 'source' => 'ai']);
+
+        $response->assertOk();
+        $response->assertJsonPath('applied', true);
+        $response->assertJsonPath('kind', 'human');
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame('ai', $label->source);
+        $this->assertSame('human', $label->kind);
+    }
+
+    /**
+     * Mesma proteção que `setIpKind` tinha antes de ser removida: uma
+     * escrita `source=ai` nunca sobrescreve um `kind` já definido por
+     * `source=manual` no mesmo Monitor.
+     */
+    public function test_source_ai_never_overwrites_an_existing_manual_kind(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'manual', 'classified_at' => now()]);
+
+        $response = $this->callHandler(['action' => 'setMonitorKind', 'monitor_id' => $monitor->id, 'kind' => 'human', 'source' => 'ai']);
+
+        $response->assertOk();
+        $response->assertJsonPath('applied', false);
+        $response->assertJsonPath('kind', 'bot');
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame('manual', $label->source);
+        $this->assertSame('bot', $label->kind);
+    }
+
+    /**
+     * Ao contrário: uma escrita `source=manual` sempre vence, mesmo sobre
+     * um `kind` já definido por `source=ai`.
+     */
+    public function test_manual_always_overwrites_an_existing_ai_kind(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'ai', 'classified_at' => now()]);
+
+        $response = $this->callHandler(['action' => 'setMonitorKind', 'monitor_id' => $monitor->id, 'kind' => 'human']);
+
+        $response->assertOk();
+        $response->assertJsonPath('applied', true);
+
+        $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
+        $this->assertSame('manual', $label->source);
+        $this->assertSame('human', $label->kind);
+    }
+
+    /**
+     * Qualquer valor de `source` fora de `ai` (incluindo ausente) cai no
+     * default `manual` - mesma normalização que `setIpKind` tinha.
+     */
+    public function test_unknown_source_value_falls_back_to_manual(): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $this->callHandler(['action' => 'setMonitorKind', 'monitor_id' => $monitor->id, 'kind' => 'bot', 'source' => 'bogus']);
 
         $label = MonitorLabel::where('monitor_id', $monitor->id)->first();
         $this->assertSame('manual', $label->source);
