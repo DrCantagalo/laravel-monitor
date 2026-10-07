@@ -10,6 +10,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Cleanup parcial de dados de tracking (`Monitor`/`monitor_ip_stats`) mais
@@ -244,6 +245,315 @@ class DataPruner
             'page_hits_deleted' => $pageHits['deleted'],
             'done' => $monitors['done'] && $visits['done'] && $cutoffVisits['done'] && $pageHits['done'],
         ];
+    }
+
+    /**
+     * laravel-monitor 308 (v0.63.0): núcleo compartilhado atrás da action
+     * HTTP `clearData` unificada (`older_than_days`/`categories[]`
+     * opcionais — ver `MonitorController::clearData()`/`previewClearData()`),
+     * do alias depreciado `pruneData` (mapeia pra cá com TODAS as
+     * categorias) e do novo `monitor:prune --category`.
+     *
+     * Duas categorias de comportamento, nunca misturadas:
+     *
+     * - **Todas as categorias** (`$categories` ausente de fato, ou as 5 de
+     *   `MonitorCategories::ALL` explicitamente — `MonitorCategories::
+     *   isAllCategories()`): sem filtro de categoria nenhum, byte a byte o
+     *   comportamento ANTIGO —
+     *   - `$olderThanDays === null` (sem corte de idade): equivalente ao
+     *     `clearData` de antes da task 308 (`Monitor::query()->delete()`,
+     *     NUNCA toca `monitor_ip_stats`/`monitor_visits`/
+     *     `monitor_page_hits`).
+     *   - `$olderThanDays` presente: delega pra `self::prune($olderThanDays,
+     *     false)` tal qual — o mesmo `pruneData`/`monitor:prune
+     *     --older-than-days=N` (sem `--only-blocked`) sempre fizeram.
+     * - **Subconjunto de categorias**: só `monitors` é apagado — o
+     *   cascade da FK já leva `monitor_page_hits`/`monitor_visit_ips`/
+     *   `monitor_visits` DAQUELES Monitors junto. `monitor_ip_stats` é por
+     *   IP, não por Monitor (não tem como restringir por categoria sem
+     *   reintroduzir a mesma classe de mismatch IP↔Monitor documentada no
+     *   topo deste arquivo), então fica INTOCADO sempre que o filtro não
+     *   é "todas as categorias" — regra explícita da task 308, não um
+     *   descuido. A categoria de cada Monitor usa a MESMA regra de
+     *   `MonitorCategories::categoryForMonitor()`/
+     *   `MonitorController::aggregateMonitorsByKind()` (`monitors_by_kind`),
+     *   nunca reimplementada aqui (`MonitorCategories::
+     *   sqlPredicateForCategory()`) — `unclassified` inclui de propósito o
+     *   bucket `new` de `monitors_by_kind` (ver docblock de
+     *   `MonitorCategories`).
+     *
+     * Chunked em qualquer um dos dois ramos de subconjunto (ver
+     * `deleteMonitorsByCategory()`): mesmo quando chamado manualmente (sem
+     * `$chunkSize` customizado), nunca um `DELETE` sem `LIMIT` pra um
+     * volume potencialmente grande — só um loop de lotes pequenos até
+     * esgotar o backlog, reconsultado do zero a cada volta (mesmo
+     * princípio de resiliência de `pruneMonitors()`/`deleteVisitsOlderThan()`
+     * acima, só sem precisar de um `$maxRows` finito porque aqui o
+     * objetivo É esgotar tudo numa chamada só).
+     *
+     * Invalida `monitor:pages:version`/`ListingsCache` (mesma condição de
+     * sempre: só quando algo de fato foi apagado) e, desde esta task,
+     * também a chave `monitor:data:monitors-by-kind` (cache de TTL fixo,
+     * `data_totals_cache_ttl_seconds`, nunca invalidado por escrita até
+     * aqui) sempre que `monitors` perdeu linhas — sem isso, o resumo de
+     * `getData`/dashboard podia continuar mostrando a contagem antiga por
+     * até 45s (default) depois de um `clearData` manual, uma janela
+     * pequena mas desnecessária pra uma ação explícita de administrador.
+     *
+     * @return array{monitors_deleted:int, ip_stats_deleted:int, visits_deleted:int, page_hits_deleted:int}
+     */
+    public static function pruneByCategory(?int $olderThanDays, array $categories): array
+    {
+        $categories = array_values(array_unique($categories));
+
+        if (MonitorCategories::isAllCategories($categories)) {
+            if ($olderThanDays === null) {
+                $deleted = Monitor::query()->delete();
+
+                if ($deleted > 0) {
+                    self::invalidatePagesCache();
+                    ListingsCache::invalidate();
+                    self::invalidateMonitorsByKindCache();
+                }
+
+                return [
+                    'monitors_deleted' => $deleted,
+                    'ip_stats_deleted' => 0,
+                    'visits_deleted' => 0,
+                    'page_hits_deleted' => 0,
+                ];
+            }
+
+            $result = self::prune($olderThanDays, false);
+
+            if ($result['monitors_deleted'] > 0) {
+                self::invalidateMonitorsByKindCache();
+            }
+
+            return [
+                'monitors_deleted' => $result['monitors_deleted'],
+                'ip_stats_deleted' => $result['ip_stats_deleted'],
+                'visits_deleted' => $result['visits_deleted'],
+                'page_hits_deleted' => $result['page_hits_deleted'],
+            ];
+        }
+
+        $deleted = self::deleteMonitorsByCategory($olderThanDays, $categories);
+
+        if ($deleted > 0) {
+            self::invalidatePagesCache();
+            ListingsCache::invalidate();
+            self::invalidateMonitorsByKindCache();
+        }
+
+        return [
+            'monitors_deleted' => $deleted,
+            'ip_stats_deleted' => 0,
+            'visits_deleted' => 0,
+            'page_hits_deleted' => 0,
+        ];
+    }
+
+    /**
+     * laravel-monitor 308 (v0.63.0): equivalente read-only de
+     * `pruneByCategory()` — MESMAS queries, `->count()` em vez de
+     * `->delete()`, nunca apaga nada. Usado por `MonitorController::
+     * previewClearData()` pra mostrar ao usuário quantas linhas seriam
+     * apagadas antes de confirmar.
+     *
+     * @return array{monitors_deleted:int, ip_stats_deleted:int, visits_deleted:int, page_hits_deleted:int}
+     */
+    public static function previewByCategory(?int $olderThanDays, array $categories): array
+    {
+        $categories = array_values(array_unique($categories));
+
+        if (MonitorCategories::isAllCategories($categories)) {
+            if ($olderThanDays === null) {
+                return [
+                    'monitors_deleted' => Monitor::count(),
+                    'ip_stats_deleted' => 0,
+                    'visits_deleted' => 0,
+                    'page_hits_deleted' => 0,
+                ];
+            }
+
+            $cutoff = now()->subDays($olderThanDays);
+
+            return [
+                'monitors_deleted' => Monitor::where('updated_at', '<', $cutoff)->count(),
+                'ip_stats_deleted' => self::previewIpStatsCount($cutoff),
+                'visits_deleted' => self::previewVisitsCount($cutoff),
+                'page_hits_deleted' => self::previewPageHitsCount(),
+            ];
+        }
+
+        return [
+            'monitors_deleted' => self::countMonitorsByCategory($olderThanDays, $categories),
+            'ip_stats_deleted' => 0,
+            'visits_deleted' => 0,
+            'page_hits_deleted' => 0,
+        ];
+    }
+
+    /**
+     * Mesma query de `prune()` pra `monitor_ip_stats` (`last_seen < $cutoff`),
+     * só contando em vez de apagar — ver `previewByCategory()`.
+     */
+    private static function previewIpStatsCount(Carbon $cutoff): int
+    {
+        try {
+            return IpStat::where('last_seen', '<', $cutoff)->count();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao contar monitor_ip_stats em previewByCategory. Erro original: '.$e->getMessage());
+
+            return 0;
+        }
+    }
+
+    /**
+     * Mesma contagem de `prune()` pra `monitor_visits`: UNIÃO (nunca soma,
+     * pra não contar a mesma linha duas vezes) de duas condições
+     * independentes, `updated_at < $cutoff` (o corte de `$olderThanDays`,
+     * sempre aplicado por `prune($olderThanDays, false)`) e
+     * `updated_at < retentionCutoff` (`monitor.visits_retention_days`, só
+     * quando `> 0`). Como as duas são "`updated_at` mais antigo que X", a
+     * união das duas é equivalente a "mais antigo que o cutoff MAIS
+     * recente dos dois" — por isso o `max()` em vez de somar as duas
+     * contagens separadas (que dariam um número maior que o `delete()`
+     * de verdade sempre que as duas janelas se sobrepõem, o caso comum).
+     */
+    private static function previewVisitsCount(Carbon $cutoff): int
+    {
+        $retentionDays = (int) config('monitor.visits_retention_days', 0);
+        $effectiveCutoff = $cutoff;
+
+        if ($retentionDays > 0) {
+            $retentionCutoff = now()->subDays($retentionDays);
+            $effectiveCutoff = $retentionCutoff->greaterThan($cutoff) ? $retentionCutoff : $cutoff;
+        }
+
+        try {
+            return DB::table('monitor_visits')->where('updated_at', '<', $effectiveCutoff)->count();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao contar monitor_visits em previewByCategory. Erro original: '.$e->getMessage());
+
+            return 0;
+        }
+    }
+
+    /**
+     * `monitor_page_hits` NUNCA é afetado por `$olderThanDays` (só por
+     * `monitor.visits_retention_days`, ver `prunePageHits()`) — mesma
+     * regra aqui, só contando.
+     */
+    private static function previewPageHitsCount(): int
+    {
+        $days = (int) config('monitor.visits_retention_days', 0);
+
+        if ($days <= 0) {
+            return 0;
+        }
+
+        try {
+            return DB::table('monitor_page_hits')->where('day', '<', now()->subDays($days)->toDateString())->count();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao contar monitor_page_hits em previewByCategory. Erro original: '.$e->getMessage());
+
+            return 0;
+        }
+    }
+
+    /**
+     * Conta Monitors que casam um subconjunto de categorias (sem apagar)
+     * — mesma query de `deleteMonitorsByCategory()`, só `->count()`.
+     */
+    private static function countMonitorsByCategory(?int $olderThanDays, array $categories): int
+    {
+        $cutoff = $olderThanDays === null ? null : now()->subDays($olderThanDays);
+
+        return self::monitorCategoryQuery($categories, $cutoff)->count();
+    }
+
+    /**
+     * Apaga, em lotes de `$chunkSize` (default 1000, mesma ordem de
+     * grandeza dos outros chunks deste arquivo), todo Monitor casando um
+     * subconjunto de categorias (+ corte de idade opcional) — re-consulta
+     * do zero a cada volta (nunca uma lista de IDs congelada), então
+     * sempre avança pro próximo lote depois que o anterior já foi
+     * apagado, até a query não retornar mais nada.
+     */
+    private static function deleteMonitorsByCategory(?int $olderThanDays, array $categories, int $chunkSize = 1000): int
+    {
+        $cutoff = $olderThanDays === null ? null : now()->subDays($olderThanDays);
+        $deleted = 0;
+
+        while (true) {
+            $ids = self::monitorCategoryQuery($categories, $cutoff)
+                ->orderBy('id')
+                ->limit($chunkSize)
+                ->pluck('id');
+
+            if ($ids->isEmpty()) {
+                break;
+            }
+
+            $deleted += Monitor::whereIn('id', $ids)->delete();
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Query base (join opcional com `monitor_labels`, mesmo fail-open de
+     * `MonitorController::aggregateMonitorsByKind()` — sem a tabela, todo
+     * Monitor conta como sem `kind`) que casa QUALQUER uma das categorias
+     * de `$categories` (`OR` entre os predicados de
+     * `MonitorCategories::sqlPredicateForCategory()`) + corte de idade
+     * opcional (`monitors.updated_at`, mesma coluna que `pruneMonitors()`
+     * já usa pra "antigo"). Sempre seleciona só `id` (explícito, nunca
+     * `*`) — com o join, `monitors.id`/`monitor_labels.id` colidiriam sem
+     * o alias.
+     */
+    private static function monitorCategoryQuery(array $categories, ?Carbon $cutoff)
+    {
+        $query = DB::table('monitors as m')->select('m.id as id');
+
+        if (Schema::hasTable('monitor_labels')) {
+            $query->leftJoin('monitor_labels as ml', 'ml.monitor_id', '=', 'm.id');
+            $kindSql = 'ml.kind';
+        } else {
+            $kindSql = 'NULL';
+        }
+
+        [$flaggedIds, $userIds] = MonitorCategories::idSets();
+
+        $predicates = array_map(
+            fn ($category) => MonitorCategories::sqlPredicateForCategory($category, $kindSql, 'm.id', $flaggedIds, $userIds),
+            $categories
+        );
+
+        $query->whereRaw('('.implode(') OR (', $predicates).')');
+
+        if ($cutoff !== null) {
+            $query->where('m.updated_at', '<', $cutoff);
+        }
+
+        return $query;
+    }
+
+    /**
+     * `monitor:data:monitors-by-kind` (`MonitorController::monitorsByKind()`)
+     * é um cache de TTL fixo (`data_totals_cache_ttl_seconds`, default
+     * 45s) — até esta task, NENHUM caminho de escrita o invalidava de
+     * propósito, só o próprio TTL expirando. `pruneByCategory()` chama
+     * isto sempre que apagou pelo menos um Monitor, pro resumo do
+     * dashboard não ficar com a contagem antiga por até 45s depois de uma
+     * ação explícita de administrador (`clearData`/`monitor:prune
+     * --category`).
+     */
+    private static function invalidateMonitorsByKindCache(): void
+    {
+        Cache::forget('monitor:data:monitors-by-kind');
     }
 
     /**

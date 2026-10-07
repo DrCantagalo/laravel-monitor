@@ -16,6 +16,7 @@ use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Support\DataSanitizer;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
 use Drcantagalo\LaravelMonitor\Support\ListingsCache;
+use Drcantagalo\LaravelMonitor\Support\MonitorCategories;
 use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
 use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Illuminate\Database\QueryException;
@@ -199,6 +200,9 @@ class MonitorController extends Controller
 
             case 'clearData':
                 return $this->clearData($request);
+
+            case 'previewClearData':
+                return $this->previewClearData($request);
 
             case 'pruneData':
                 return $this->pruneData($request);
@@ -498,8 +502,15 @@ class MonitorController extends Controller
      * manda: um Monitor classificado (`human`/`bot`) conta pela
      * classificação mesmo que tenha sido visto num IP flagado — só entra
      * em `flagged` quem NÃO tem `kind`.
+     *
+     * laravel-monitor 308 (v0.63.0): a regra em si (const + predicado)
+     * mudou de dono — vive agora em `Support\MonitorCategories::ALL`, pra
+     * poder ser reusada por `Support\DataPruner::pruneByCategory()` (a
+     * nova action HTTP `clearData` filtrada por categoria) sem duplicar.
+     * Mantido aqui só como alias, pra não precisar tocar todo call site
+     * existente (`timelineMonitorsNew()`/`timelineVisits()`).
      */
-    protected const MONITOR_CATEGORIES = ['human_user', 'human_guest', 'bot', 'flagged', 'unclassified'];
+    protected const MONITOR_CATEGORIES = MonitorCategories::ALL;
 
     /**
      * Categoria de um Monitor a partir do `kind` já resolvido (`null`/
@@ -509,18 +520,13 @@ class MonitorController extends Controller
      * dois booleanos pré-calculados pelo chamador (ver
      * `monitorCategoryIdSets()` — nunca calculados aqui dentro, pra não
      * rodar uma query por Monitor).
+     *
+     * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories`
+     * (fonte única da regra, também usada por `DataPruner::pruneByCategory()`).
      */
     protected function categoryForMonitor(?string $kind, bool $hasUserId, bool $isFlagged): string
     {
-        if ($kind === 'bot') {
-            return 'bot';
-        }
-
-        if ($kind === 'human') {
-            return $hasUserId ? 'human_user' : 'human_guest';
-        }
-
-        return $isFlagged ? 'flagged' : 'unclassified';
+        return MonitorCategories::categoryForMonitor($kind, $hasUserId, $isFlagged);
     }
 
     /**
@@ -538,59 +544,25 @@ class MonitorController extends Controller
      * mais conservadora (tudo que seria `flagged` cai em `unclassified`;
      * tudo que seria `human_user` cai em `human_guest`).
      *
+     * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories::idSets()`
+     * (mesmo fail-open de antes, só realocado — ver docblock de lá).
+     *
      * @return array{0: \Illuminate\Support\Collection<int,int>, 1: \Illuminate\Support\Collection<int,int>} [$flaggedMonitorIds, $monitorIdsWithUserId]
      */
     protected function monitorCategoryIdSets(): array
     {
-        try {
-            $flaggedIds = $this->excludedMonitorIdsForQueue();
-        } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] falha ao calcular Monitors flagados pras categorias — tratando como nenhum. Erro original: '.$e->getMessage());
-            $flaggedIds = collect();
-        }
-
-        try {
-            $userIds = $this->monitorIdsWithUserId();
-        } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] falha ao calcular Monitors com user_id pras categorias — tratando como nenhum. Erro original: '.$e->getMessage());
-            $userIds = collect();
-        }
-
-        return [$flaggedIds, $userIds];
+        return MonitorCategories::idSets();
     }
 
     /**
+     * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories` (fonte
+     * única, também usada por `DataPruner::pruneByCategory()`).
+     *
      * @return \Illuminate\Support\Collection<int,int>
      */
     protected function monitorIdsWithUserId()
     {
-        $query = DB::table('monitors')->select('id');
-
-        if ($query->getConnection()->getDriverName() === 'mysql') {
-            $query->whereNotNull('monitors_user_id');
-        } else {
-            $query->whereNotNull('data->user_id');
-        }
-
-        return $query->pluck('id');
-    }
-
-    /**
-     * Converte uma collection de IDs numa lista "1,2,3" segura pra embutir
-     * direto num `IN (...)` de SQL raw — cast pra int em cada item (nunca
-     * interpola um valor não confiável) e `-1` (nenhum Monitor tem esse id)
-     * quando a collection está vazia, pra manter `IN (...)` sintaticamente
-     * válido sem um `CASE WHEN` extra só pra lista vazia.
-     *
-     * @param  \Illuminate\Support\Collection<int,int>  $ids
-     */
-    protected function sqlIntList($ids): string
-    {
-        if ($ids->isEmpty()) {
-            return '-1';
-        }
-
-        return $ids->map(fn ($id) => (int) $id)->implode(',');
+        return MonitorCategories::monitorIdsWithUserId();
     }
 
     /**
@@ -618,8 +590,9 @@ class MonitorController extends Controller
      * (`$flaggedIds`/`$userIds`, calculadas uma vez só por
      * `monitorCategoryIdSets()`) entram como `IN (...)` embutido na mesma
      * query raw — não dá pra passar uma `Collection` como binding único,
-     * mas os valores são sempre inteiros castados (`sqlIntList()`), nunca
-     * interpolação de entrada externa.
+     * mas os valores são sempre inteiros castados
+     * (`MonitorCategories::sqlIntList()`), nunca interpolação de entrada
+     * externa.
      *
      * Fail-open: sem `monitor_labels` (instalação ainda não migrada pra
      * 0.53.0+) cai pra mesma agregação sem o join (todo Monitor conta
@@ -673,12 +646,14 @@ class MonitorController extends Controller
 
         // Sem `kind` = NULL ou (defensivo) qualquer valor fora de
         // human/bot — garante que os grupos cubram todo Monitor
-        // exatamente uma vez.
-        $noKind = "({$kindSql} IS NULL OR {$kindSql} NOT IN ('human', 'bot'))";
-        $notFlagged = 'm.id NOT IN ('.$this->sqlIntList($flaggedIds).')';
-        $isFlagged = 'm.id IN ('.$this->sqlIntList($flaggedIds).')';
-        $hasUserId = 'm.id IN ('.$this->sqlIntList($userIds).')';
-        $noUserId = 'm.id NOT IN ('.$this->sqlIntList($userIds).')';
+        // exatamente uma vez. laravel-monitor 308 (v0.63.0): fragmentos
+        // vêm de MonitorCategories (fonte única do predicado, também usada
+        // por DataPruner::pruneByCategory()) — nunca reconstruídos aqui.
+        $noKind = MonitorCategories::noKindSql($kindSql);
+        $notFlagged = MonitorCategories::notFlaggedSql('m.id', $flaggedIds);
+        $isFlagged = MonitorCategories::isFlaggedSql('m.id', $flaggedIds);
+        $hasUserId = MonitorCategories::hasUserIdSql('m.id', $userIds);
+        $noUserId = MonitorCategories::noUserIdSql('m.id', $userIds);
 
         $row = $query->selectRaw(
             "SUM(CASE WHEN {$kindSql} = 'human' AND {$hasUserId} THEN 1 ELSE 0 END) AS human_user_total, "
@@ -3097,7 +3072,7 @@ class MonitorController extends Controller
      */
     protected function monitorIdsAtFlaggedIps()
     {
-        return $this->monitorIdsForIps(IpStat::where('flagged', true)->pluck('ip'));
+        return MonitorCategories::monitorIdsAtFlaggedIps();
     }
 
     /**
@@ -3109,20 +3084,19 @@ class MonitorController extends Controller
      */
     protected function monitorIdsAtBlockedIps()
     {
-        return $this->monitorIdsForIps(BlockedIp::active()->pluck('ip'));
+        return MonitorCategories::monitorIdsAtBlockedIps();
     }
 
     /**
+     * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories` (fonte
+     * única, também usada por `DataPruner::pruneByCategory()`).
+     *
      * @param  \Illuminate\Support\Collection<int, string>  $ips
      * @return \Illuminate\Support\Collection<int, int>
      */
     protected function monitorIdsForIps($ips)
     {
-        if ($ips->isEmpty()) {
-            return collect();
-        }
-
-        return DB::table('monitor_visit_ips')->whereIn('ip', $ips)->distinct()->pluck('monitor_id');
+        return MonitorCategories::monitorIdsForIps($ips);
     }
 
     /**
@@ -3625,52 +3599,159 @@ class MonitorController extends Controller
         ]);
     }
 
+    /**
+     * laravel-monitor 308 (v0.63.0): `clearData` e `pruneData` (cleanup
+     * parcial, `older_than_days`) foram unificadas numa action só. Antes
+     * desta task, `clearData` não aceitava NENHUM parâmetro (sempre
+     * `Monitor::query()->delete()`, truncate total) e `pruneData` exigia
+     * `older_than_days` (apagando tudo mais antigo que o corte, +
+     * `monitor_ip_stats`/`monitor_visits`/`monitor_page_hits` pelo mesmo
+     * esquema de `Support\DataPruner::prune()`). Agora `clearData` aceita
+     * os dois PARÂMETROS OPCIONAIS, e cobre os dois comportamentos
+     * antigos como casos particulares — sem nenhum parâmetro, o
+     * comportamento é BYTE A BYTE o antigo `clearData` (ver
+     * `DataPruner::pruneByCategory()`):
+     *
+     * - `older_than_days` (int `>= 0`, opcional — ausente/vazio = sem
+     *   corte de idade, ou seja, todo mundo independente de idade).
+     * - `categories[]` (opcional — subconjunto de
+     *   `MonitorCategories::ALL`; ausente = todas as categorias).
+     *
+     * `422` pra qualquer valor inválido dos dois (nunca silenciosamente
+     * ignorado/normalizado) — ver `parseClearDataParams()`.
+     *
+     * **Regra do que é de fato apagado** (ver docblock de
+     * `DataPruner::pruneByCategory()` pro detalhe completo): com um
+     * filtro de categoria ativo (qualquer coisa além de "todas"), só
+     * `monitors` é apagado (cascade da FK leva o resto do MESMO Monitor
+     * junto) — `monitor_ip_stats` (por IP, não por Monitor) só é podado
+     * quando TODAS as categorias estão selecionadas, caso em que o
+     * comportamento é idêntico ao antigo `pruneData`
+     * (`$onlyBlocked=false`). `monitor_access_logs` nunca é tocado por
+     * nenhum caminho (regra de tasks anteriores, inalterada).
+     *
+     * Response: `monitors_deleted`/`ip_stats_deleted`/`visits_deleted`/
+     * `page_hits_deleted` (0 nos três últimos sempre que o filtro de
+     * categoria não cobre "todas").
+     */
     protected function clearData(Request $request)
     {
-        // futuramente: validação/admin check
-        //
-        // `delete()` (cascade da FK leva monitor_page_hits/monitor_visit_ips/
-        // monitor_visits junto), não `truncate()`: no MySQL, TRUNCATE numa
-        // tabela referenciada por FK falha (erro 1701) mesmo com as filhas
-        // vazias — e desde a 0.42.0 nada mais depende dos ids reiniciarem.
-        Monitor::query()->delete();
+        [$olderThanDays, $categories, $error] = $this->parseClearDataParams($request);
 
-        $this->invalidatePagesCache();
-        $this->invalidateListingsCache();
+        if ($error !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => $error,
+            ], 422);
+        }
+
+        $result = DataPruner::pruneByCategory($olderThanDays, $categories);
 
         return response()->json([
             'success' => true,
-            'message' => 'All monitor data cleared',
+            'monitors_deleted' => $result['monitors_deleted'],
+            'ip_stats_deleted' => $result['ip_stats_deleted'],
+            'visits_deleted' => $result['visits_deleted'],
+            'page_hits_deleted' => $result['page_hits_deleted'],
         ]);
     }
 
     /**
-     * Cleanup parcial, complementar ao truncate total de clearData: apaga
-     * linhas de `Monitor`/`monitor_ip_stats`/`monitor_visits` mais antigas
-     * que `older_than_days`.
+     * laravel-monitor 308 (v0.63.0): read-only, MESMOS parâmetros de
+     * `clearData` — devolve quantas linhas SERIAM apagadas (nunca apaga
+     * nada), pro dashboard mostrar um resumo de confirmação antes do
+     * usuário de fato clicar em apagar. `DataPruner::previewByCategory()`
+     * roda as MESMAS queries de `pruneByCategory()`, só com `->count()`
+     * em vez de `->delete()` — nunca uma lógica de contagem
+     * separada/divergente.
+     */
+    protected function previewClearData(Request $request)
+    {
+        [$olderThanDays, $categories, $error] = $this->parseClearDataParams($request);
+
+        if ($error !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => $error,
+            ], 422);
+        }
+
+        $result = DataPruner::previewByCategory($olderThanDays, $categories);
+
+        return response()->json([
+            'success' => true,
+            'monitors_deleted' => $result['monitors_deleted'],
+            'ip_stats_deleted' => $result['ip_stats_deleted'],
+            'visits_deleted' => $result['visits_deleted'],
+            'page_hits_deleted' => $result['page_hits_deleted'],
+        ]);
+    }
+
+    /**
+     * Validação/normalização compartilhada por `clearData`/
+     * `previewClearData` (MESMOS parâmetros, MESMAS regras) — nunca
+     * duplicada entre as duas actions.
      *
-     * **Breaking (laravel-monitor 242, v0.50.0)**: esta action HTTP não
-     * aceita mais `only_blocked` — sempre roda a varredura completa
-     * (`DataPruner::prune((int) $olderThanDays, false)`), igual ao antigo
-     * `only_blocked=false`. Um cliente desatualizado que ainda mande
-     * `only_blocked` no body é aceito normalmente e o parâmetro é apenas
-     * ignorado (nunca gera 422) — não podia quebrar um consumidor no meio
-     * de um deploy. A restrição a "só IPs confirmado-bloqueados"
-     * (`monitor_blocked_ips`) continua existindo, mas agora só via CLI:
-     * `php artisan monitor:prune --older-than-days=N --only-blocked` (ver
-     * `Console\Commands\MonitorPruneCommand`) — `DataPruner::prune()`
-     * mantém seu parâmetro `$onlyBlocked` intacto, só o argumento
-     * repassado por esta action HTTP virou uma constante.
+     * `older_than_days`: ausente ou string vazia = `null` (sem corte de
+     * idade); presente tem que ser inteiro `>= 0`, senão `422`.
      *
-     * Antes da task 81, o filtro (então chamado `only_scraper_flagged`)
-     * usava o sinal *automático* da heurística
-     * (`IpStat.flagged`/`Monitor.data.flags.scraper`) — trocado pra
-     * `monitor_blocked_ips` (IP de fato confirmado/bloqueado). Ver
-     * CHANGELOG v0.7.0/v0.50.0 pro histórico completo do parâmetro.
+     * `categories`: ausente = `self::MONITOR_CATEGORIES` (todas); presente
+     * tem que ser um array não vazio, só com valores de
+     * `self::MONITOR_CATEGORIES` (deduplicado), senão `422`.
      *
-     * Lógica de fato (chunked/indexado, invalidação de cache) delegada a
-     * `Support\DataPruner` (task 134) — reusada também pelo comando
-     * `monitor:prune`.
+     * @return array{0: ?int, 1: ?array<int,string>, 2: ?string} [$olderThanDays, $categories, $error]
+     */
+    protected function parseClearDataParams(Request $request): array
+    {
+        $olderThanDays = null;
+        $olderThanDaysRaw = $request->input('older_than_days');
+
+        if ($olderThanDaysRaw !== null && $olderThanDaysRaw !== '') {
+            if (! is_numeric($olderThanDaysRaw) || (int) $olderThanDaysRaw < 0) {
+                return [null, null, 'older_than_days must be a non-negative integer when present'];
+            }
+
+            $olderThanDays = (int) $olderThanDaysRaw;
+        }
+
+        if (! $request->has('categories')) {
+            return [$olderThanDays, self::MONITOR_CATEGORIES, null];
+        }
+
+        $categoriesRaw = $request->input('categories');
+
+        if (! is_array($categoriesRaw) || empty($categoriesRaw)) {
+            return [null, null, 'categories must be a non-empty array when present, with values from: '.implode(', ', self::MONITOR_CATEGORIES)];
+        }
+
+        $categories = array_values(array_unique($categoriesRaw));
+
+        foreach ($categories as $category) {
+            if (! is_string($category) || ! in_array($category, self::MONITOR_CATEGORIES, true)) {
+                return [null, null, 'Invalid category: must be one of '.implode(', ', self::MONITOR_CATEGORIES)];
+            }
+        }
+
+        return [$olderThanDays, $categories, null];
+    }
+
+    /**
+     * **Deprecated** (laravel-monitor 308, v0.63.0): alias de `clearData`
+     * com `categories` fixo em TODAS (`self::MONITOR_CATEGORIES`) —
+     * `older_than_days` continua OBRIGATÓRIO (`422` se ausente/inválido,
+     * exatamente como sempre foi; diferente de `clearData`, que trata
+     * ausência como "sem corte de idade"). Mapeia internamente pra
+     * `DataPruner::pruneByCategory()` (a MESMA lógica de `clearData`,
+     * nunca uma segunda implementação) mas devolve o shape de resposta
+     * ANTIGO — sem campos novos — pra um dashboard desatualizado no meio
+     * de um deploy continuar funcionando sem quebrar. Sem data de
+     * remoção definida; mantida enquanto consumidores antigos existirem.
+     *
+     * Antes da task 308, delegava direto pra `DataPruner::prune($olderThanDays,
+     * false)` — agora delega pra `pruneByCategory()`, que (com todas as
+     * categorias e um cutoff) chama EXATAMENTE `prune($olderThanDays,
+     * false)` por baixo (ver docblock de lá), então o resultado nunca
+     * muda pra quem já consumia esta action.
      */
     protected function pruneData(Request $request)
     {
@@ -3683,9 +3764,7 @@ class MonitorController extends Controller
             ], 422);
         }
 
-        // Sempre varredura completa (nunca restrita a IPs bloqueados) — ver
-        // docblock acima. `only_blocked`, se vier no body, é ignorado.
-        $result = DataPruner::prune((int) $olderThanDays, false);
+        $result = DataPruner::pruneByCategory((int) $olderThanDays, self::MONITOR_CATEGORIES);
 
         return response()->json([
             'success' => true,

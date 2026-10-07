@@ -554,7 +554,10 @@ application's backend — only a short-lived, read-only token does.
   `0.50.0`, `getAccessLog` since `0.51.0`, `getMonitorQueue`/
   `getMonitorQueueCounts` since `0.53.0`, `getConfig` since `0.54.0`,
   `getTimeline` since `0.58.0`)**.
-  `clearData`, `pruneData`,
+  `clearData`, `previewClearData` (since `0.63.0` — read-only, but kept
+  on the same `local_token`-only footing as `clearData`/`pruneData`
+  rather than the ephemeral-read-token list, since it's part of the same
+  admin cleanup flow), `pruneData`,
   `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
   permanent `local_token` — a read token cannot mint another token or
@@ -2233,19 +2236,111 @@ php artisan monitor:access-log --limit=200
 php artisan monitor:access-log --purge          # asks for confirmation, then deletes everything
 ```
 
-## Partial cleanup (`pruneData`)
+## Data cleanup (`clearData`, since `0.63.0` accepts parameters)
 
-`GET /monitor/handler?action=pruneData` — same auth as `clearData`/
+`POST /monitor/handler` with `action=clearData` — same auth as
 `updateBlockedIps`: requires the permanent `local_token`, **never**
 accepted with the ephemeral read token from `issueReadToken`.
 
-Complements `clearData` (full truncate of `Monitor`, unchanged) with a
-partial, filtered delete:
+**Since `0.63.0`**, `clearData` unifies what used to be two separate
+actions (`clearData`, a full truncate with no parameters, and
+`pruneData`, a partial/filtered delete requiring `older_than_days` —
+`pruneData` still exists, see "Deprecated: `pruneData`" below) into one,
+with two **optional** parameters:
 
-- `older_than_days` (required, non-negative integer — `422` if
-  missing or invalid): deletes `Monitor` rows whose `updated_at` is
-  older than `now() - older_than_days` days, and `monitor_ip_stats`
-  rows whose `last_seen` is older than the same cutoff.
+- `older_than_days` (non-negative integer; absent or empty string = **no
+  age cutoff**, i.e. every row regardless of age — this is what makes
+  "no parameters at all" behave exactly like the old `clearData`). `422`
+  if present and not a non-negative integer.
+- `categories[]` (array; absent = **all** categories). Each value must be
+  one of the 5 categories `getData.monitors_by_kind` already uses —
+  `human_user`, `human_guest`, `bot`, `flagged`, `unclassified` — see
+  "Aggregated dashboard totals" above and `Support\MonitorCategories`
+  (the single place this rule lives; `MonitorController` and
+  `Support\DataPruner` both read it from there, so the category used to
+  decide what to delete can never drift from the category used to count
+  `monitors_by_kind`). `422` on an empty array, a non-array, or any value
+  outside those 5. **`unclassified` here also covers the `new` bucket**
+  that `monitors_by_kind` reports separately (a Monitor with no `kind`,
+  not flagged, regardless of how recently it was created) — a deliberate
+  product decision, not an oversight: age only matters for `new` in that
+  one aggregate, never for deciding what a cleanup should delete.
+
+**What actually gets deleted**, given the two parameters above:
+
+- **No parameters at all**: byte-for-byte the pre-`0.63.0` `clearData` —
+  every `Monitor` row is deleted (`monitor_page_hits`/
+  `monitor_visit_ips`/`monitor_visits` of each go with it via the FK
+  `ON DELETE CASCADE`), and `monitor_ip_stats` is **never** touched.
+- **All 5 categories selected** (explicitly, or just by omitting
+  `categories`) **+ `older_than_days` present**: identical to the old
+  `pruneData` — `Monitor`/`monitor_ip_stats` rows older than the cutoff
+  are deleted, plus the `monitor_visits`/`monitor_page_hits` sweeps
+  described in "Visit retention" below.
+- **A category filter that is not "all 5"** (regardless of
+  `older_than_days`): **only `monitors` rows matching the category (and
+  the age cutoff, if given) are deleted** — the FK cascade takes care of
+  that Monitor's own `monitor_page_hits`/`monitor_visit_ips`/
+  `monitor_visits`. `monitor_ip_stats` is **per-IP, not per-Monitor** —
+  there's no way to restrict it by category without reintroducing the
+  IP↔Monitor mismatch problems `monitor_labels` was built to avoid (see
+  "IP classification" above) — so it's left completely untouched
+  whenever the category filter isn't "all 5", even if `older_than_days`
+  is also given. `monitor_access_logs` is **never** touched by any of
+  this, same pre-existing rule as always (see "Access log" above).
+
+Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
+"visits_deleted": 3, "page_hits_deleted": 1}` — `ip_stats_deleted`/
+`visits_deleted`/`page_hits_deleted` are always `0` whenever the category
+filter isn't "all 5" (see above).
+
+Chunked (`Support\DataPruner::pruneByCategory()`, same batching principle
+as the rest of `DataPruner` — never an unbounded `DELETE` for a
+potentially large table, even when called manually with no row cap).
+Invalidates the `getPages`/`getVisitorsByIp`/`getTableStats` listing
+cache version counters (`invalidatePagesCache`/`invalidateListingsCache`,
+same mechanism as `flagScraperPath`/`updateBlockedIps` etc. — only when
+something was actually deleted) **and**, new since `0.63.0`, the
+`monitor:data:monitors-by-kind` cache key whenever a `Monitor` row was
+deleted — that cache previously only expired on its own fixed TTL
+(`data_totals_cache_ttl_seconds`, default 45s), never invalidated by a
+write, so the dashboard's totals could lag a manual cleanup by up to 45s.
+
+### Preview (`previewClearData`, since `0.63.0`)
+
+`POST /monitor/handler` with `action=previewClearData` — **same
+parameters, same validation, same auth** as `clearData` above, but
+**read-only**: runs the exact same queries (`Support\DataPruner::
+previewByCategory()`, `->count()` instead of `->delete()` — never a
+second, hand-written counting query that could drift from what
+`clearData` actually deletes) and returns how many rows **would** be
+deleted, without deleting anything. Same response shape as `clearData`
+(`monitors_deleted`/`ip_stats_deleted`/`visits_deleted`/
+`page_hits_deleted`). Meant for the dashboard to show a confirmation
+summary ("this will delete N monitors, M IP stats, ...") before the user
+commits to the actual `clearData` call.
+
+### Deprecated: `pruneData`
+
+`pruneData` still works, mapped internally to `clearData` with the
+request's `older_than_days` and **all 5** categories — never a second
+implementation, see `Support\DataPruner::pruneByCategory()`. Two
+differences from calling `clearData` directly, kept on purpose so an
+out-of-date dashboard mid-deploy doesn't break:
+
+- `older_than_days` stays **required** here (`422` if missing or
+  invalid) — unlike `clearData`, where it's optional (absent = no age
+  cutoff). `pruneData` never had an "optional cutoff" concept, and
+  keeping it required avoids silently changing what an existing
+  `pruneData` call does.
+- The HTTP response keeps the **old** shape — the same 4 count fields
+  `clearData` returns today, but guaranteed never to gain a new field
+  silently, since an old consumer parses this response expecting exactly
+  these keys.
+- `categories`, if an updated client sends it anyway, is **silently
+  ignored** — `pruneData` has no concept of a category filter and always
+  sweeps all 5, same as `only_blocked` has been silently ignored here
+  since `0.50.0` (see below).
 
 > ⚠️ **Breaking change in `0.50.0`**: this HTTP action no longer accepts
 > `only_blocked` — it always runs the full sweep described above (the old
@@ -2277,24 +2372,9 @@ partial, filtered delete:
 > expired) — same check `MonitorMethod` itself uses to decide whether to
 > block a request (`BlockedIp::active()`).
 
-Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
-"visits_deleted": 3}`. `visits_deleted` (its value was already computed by
-`Support\DataPruner::prune()` since `0.42.0`, but this HTTP response never
-surfaced it until `0.46.0` — fixed here) now also reflects the
-`only_blocked=false` cutoff sweep described in "Visit retention" below.
-
-Bumps the `getPages`/`getVisitorsByIp`/`getTableStats` listing cache
-version counters (`invalidatePagesCache`/`invalidateListingsCache`)
-whenever something was actually deleted from any of `monitors`,
-`monitor_ip_stats` or `monitor_visits` (since `0.50.0` — `monitors`
-alone is now enough to invalidate, not just `ip_stats`/`visits`, so
-`getTableStats`'s row counts don't go stale after a prune that only
-touched `Monitor` rows), same mechanism as `flagScraperPath`/
-`updateBlockedIps` etc.
-
 ### `monitor:prune` (since `0.27.0`)
 
-Artisan equivalent of `pruneData` above, same underlying
+Artisan equivalent of `clearData`/`pruneData` above, same underlying
 `Support\DataPruner` (chunked/indexed, never `::all()`/`cursor()` over the
 whole `Monitor` table), same cache invalidation — meant to run from the
 consuming app's own scheduler instead of a manual HTTP request. Since
@@ -2308,11 +2388,22 @@ php artisan monitor:prune --only-blocked --older-than-days=0
 
 - `--older-than-days=` (required, non-negative integer — command fails
   with a non-zero exit code if missing or invalid): same cutoff semantics
-  as `pruneData`'s `older_than_days`.
+  as `clearData`'s `older_than_days` (but, unlike the HTTP action, always
+  required here, with or without `--category`).
 - `--only-blocked` (optional flag, default off, **CLI-only since
   `0.50.0`**): restrict the delete to rows belonging to a
   confirmed/blocked IP (`monitor_blocked_ips`) instead of every row past
   the cutoff.
+- `--category=` (optional, **repeatable**, since `0.63.0`): restrict the
+  delete to a subset of the same 5 categories `clearData`'s
+  `categories[]` accepts (`human_user`/`human_guest`/`bot`/`flagged`/
+  `unclassified`) — same rule, same `monitor_ip_stats`/`monitor_visits`/
+  `monitor_page_hits` carve-out (only pruned when every category is
+  given). **Mutually exclusive with `--only-blocked`** — the command
+  fails with a non-zero exit code if both are passed, since they filter
+  along different axes (IP reputation vs. Monitor classification) and
+  combining them isn't supported. Example:
+  `php artisan monitor:prune --older-than-days=30 --category=bot --category=flagged`.
 
 **Automatic since `0.32.0`** — you no longer need to schedule anything
 for this: `Support\DataPruner::maybeCleanup()` runs `prune(0, true)`

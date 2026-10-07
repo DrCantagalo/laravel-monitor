@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.63.0] - 2026-10-07
+### Added
+- **`clearData` unifies the old full-truncate `clearData` and the
+  partial-cleanup `pruneData` into one action**, with two new optional
+  parameters:
+  - `older_than_days` (int `>= 0`; absent/empty = no age cutoff, i.e.
+    every row regardless of age — same as the old `clearData`).
+  - `categories[]` (subset of `human_user`/`human_guest`/`bot`/
+    `flagged`/`unclassified`; absent = all categories).
+
+  No parameters at all = byte-for-byte the old `clearData` (full
+  `Monitor` truncate, `monitor_ip_stats`/`monitor_visits`/
+  `monitor_page_hits` untouched). With a category filter active (anything
+  other than all 5), only `monitors` rows matching are deleted — the
+  FK cascade takes care of that Monitor's `monitor_page_hits`/
+  `monitor_visit_ips`/`monitor_visits`. `monitor_ip_stats` is per-IP, not
+  per-Monitor, so it's **only** pruned when all 5 categories are
+  selected (explicitly, or by omitting `categories`) — in which case the
+  behavior for `monitor_ip_stats`/`monitor_visits`/`monitor_page_hits` is
+  identical to the old `pruneData`. `monitor_access_logs` is never
+  touched by any of this (pre-existing rule, unchanged). `422` for any
+  invalid `older_than_days`/`categories` value. Category selection uses
+  the exact same rule as `getData.monitors_by_kind`/`categoryForMonitor()`
+  — extracted into `Support\MonitorCategories`, the single source for
+  both, so they can never diverge. `unclassified` here deliberately
+  *includes* the `new` bucket that `monitors_by_kind` breaks out
+  separately (a Monitor with no `kind`, not flagged, regardless of age)
+  — a product decision, not an oversight. Chunked (never an unbounded
+  `DELETE` even when run manually). Invalidates the pages cache,
+  `ListingsCache`, and — new since this task — the
+  `monitor:data:monitors-by-kind` cache key (previously only expired on
+  its own 45s TTL, never invalidated by a write) whenever a `Monitor` row
+  was actually deleted. See README "Data cleanup (`clearData`)".
+- **New read-only action `previewClearData`**: same parameters as
+  `clearData`, returns the counts that *would* be deleted
+  (`monitors_deleted`/`ip_stats_deleted`/`visits_deleted`/
+  `page_hits_deleted`) without deleting anything — runs the exact same
+  queries as `clearData`, just `->count()` instead of `->delete()`, so
+  the dashboard can show a confirmation summary before the user commits.
+- **`monitor:prune` gains a repeatable `--category=` option**, same
+  filtering rule as `clearData`'s `categories[]`. Mutually exclusive with
+  `--only-blocked` (different filter axes — IP reputation vs. Monitor
+  classification — combining them isn't supported). `--older-than-days`
+  stays required as before, with or without `--category`.
+
+### Deprecated
+- **`pruneData` is now a deprecated alias of `clearData`** — internally
+  maps to `clearData` with the request's `older_than_days` and all 5
+  categories selected (`older_than_days` stays *required* here, `422` if
+  missing/invalid, unlike the new `clearData` where it's optional). Its
+  HTTP response keeps the **old** shape (`monitors_deleted`/
+  `ip_stats_deleted`/`visits_deleted`/`page_hits_deleted`, no new fields)
+  so an out-of-date dashboard mid-deploy keeps working unchanged. A
+  stray `categories` field in the request body (from a client that
+  doesn't know about this deprecation) is silently ignored, same as
+  `only_blocked` already was since `0.50.0`. No removal date set.
+
 ## [0.62.0] - 2026-10-07
 ### Added
 - **`setMonitorKind` accepts `source=ai` again.** Closes a gap left by
