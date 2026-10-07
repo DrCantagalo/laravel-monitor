@@ -37,11 +37,16 @@ class MonitorPageHitsDayMigrationTest extends TestCase
 
     public function test_up_creates_monitor_settings_and_records_exact_since(): void
     {
+        // `RefreshDatabase` já rodou `up()` no `setUp()`, com o relógio
+        // real — antes deste método ter a chance de congelar o tempo.
+        // Por isso, mesmo padrão dos testes irmãos abaixo: `down()` +
+        // `up()` de novo, agora com `setTestNow()` já congelado.
         Carbon::setTestNow(Carbon::create(2026, 10, 4, 15, 0, 0, 'UTC'));
 
-        // `up()` já rodou normalmente via RefreshDatabase — só confere o
-        // estado resultante, sem rodar de novo (ver teste de backfill
-        // abaixo pra isso).
+        $migration = $this->migration();
+        $migration->down();
+        $migration->up();
+
         $this->assertTrue(Schema::hasTable('monitor_settings'));
         $this->assertSame(
             '2026-10-04',
