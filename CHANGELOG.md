@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.65.0] - 2026-10-09
+### Added
+- **Visitor origin tagging**: a brand-new `Monitor` now gets its traffic
+  source recorded as an ordinary custom tag (`utm_source`/`lm` → known
+  click ID → `Referer` domain, first match wins) — never as a
+  classification, and only on creation (first-touch). Toggle with
+  `config('monitor.origin_tagging')` (default on). See README "Visitor
+  origin tagging".
+
 ## [0.64.0] - 2026-10-09
 ### Added
 - **`php artisan monitor:dashboard on|off|status`**: runtime toggle for

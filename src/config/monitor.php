@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.64.0',
+    'version' => '0.65.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -286,5 +286,52 @@ return [
     // classification". Desde a 0.56.0 também define a fronteira
     // `new`/`unclassified` de `getData.monitors_by_kind`.
     'ai_triage_min_age_hours' => 24,
+
+    // laravel-monitor 319: liga/desliga a tag de origem do visitante
+    // (first-touch) gravada automaticamente na criação de um Monitor
+    // novo — ver README "Visitor origin tagging". Desligar não remove
+    // tags já gravadas, só para de gravar novas.
+    'origin_tagging' => true,
+
+    // Click IDs conhecidos (parâmetro de query => fonte fixa), checados
+    // em ordem de detecção depois de utm_source/lm, antes do domínio do
+    // Referer — ver Support\VisitorOriginDetector. Mapa extensível.
+    'origin_click_ids' => [
+        'gclid' => 'google',
+        'gbraid' => 'google',
+        'wbraid' => 'google',
+        'fbclid' => 'facebook',
+        'msclkid' => 'bing',
+        'ttclid' => 'tiktok',
+        'li_fat_id' => 'linkedin',
+        'twclid' => 'twitter',
+    ],
+
+    // Domínios conhecidos do Referer (host, sem "www.") => fonte fixa —
+    // usado só quando a request não tem utm_source/lm nem click ID
+    // conhecido. Aceita wildcard "*" (ex: "google.*" cobre google.com,
+    // google.co.uk, google.com.br, etc — mesma sintaxe de Str::is()).
+    // Um Referer de domínio que não bate aqui (e não é o próprio site)
+    // cai no domínio registrável cru (ex: "example.com") — ver
+    // Support\VisitorOriginDetector::registrableDomain(). Mapa
+    // extensível.
+    'origin_referer_domains' => [
+        'google.*' => 'google',
+        'bing.com' => 'bing',
+        'duckduckgo.com' => 'duckduckgo',
+        'linkedin.com' => 'linkedin',
+        'lnkd.in' => 'linkedin',
+        'facebook.com' => 'facebook',
+        'fb.com' => 'facebook',
+        'm.facebook.com' => 'facebook',
+        'l.facebook.com' => 'facebook',
+        'instagram.com' => 'instagram',
+        'l.instagram.com' => 'instagram',
+        't.co' => 'twitter',
+        'x.com' => 'twitter',
+        'twitter.com' => 'twitter',
+        'youtube.com' => 'youtube',
+        'github.com' => 'github',
+    ],
 
 ];

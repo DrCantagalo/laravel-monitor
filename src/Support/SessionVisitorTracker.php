@@ -19,11 +19,14 @@ class SessionVisitorTracker
 
     protected BlockedIpCleaner $blockedIpCleaner;
 
-    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null)
+    protected VisitorOriginDetector $visitorOriginDetector;
+
+    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null, ?VisitorOriginDetector $visitorOriginDetector = null)
     {
         $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector;
         $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker;
         $this->blockedIpCleaner = $blockedIpCleaner ?? new BlockedIpCleaner;
+        $this->visitorOriginDetector = $visitorOriginDetector ?? new VisitorOriginDetector;
     }
 
     /**
@@ -156,6 +159,37 @@ class SessionVisitorTracker
             // Outra request concorrente já criou a linha enquanto esta
             // calculava `$tags` — inofensivo: não há transição subsequente
             // pro mesmo Monitor hoje (ver docblock acima) pra reaplicar.
+        }
+    }
+
+    /**
+     * laravel-monitor 319: grava a tag de origem (`VisitorOriginDetector`)
+     * no Monitor RECÉM-CRIADO — único call site, no ramo de criação de
+     * `track()` abaixo, nunca em visita subsequente do mesmo Monitor
+     * (first-touch). Mesmo padrão de `syncUserTag()` acima: `firstOrNew`
+     * (sempre uma linha nova em termos de tags nesta chamada, mas
+     * escrito do jeito defensivo de sempre) + `normalizeTags()` (dedupe/
+     * limite, nunca usado pra sanitizar o VALOR em si — isso já foi
+     * feito por `VisitorOriginDetector::sanitize()`) +
+     * `UniqueConstraintViolationException` ignorada (corrida rara,
+     * inofensiva: não há tag nenhuma pra perder numa linha que acabou
+     * de nascer).
+     */
+    protected function maybeTagOrigin(int $monitorId, Request $request): void
+    {
+        $origin = $this->visitorOriginDetector->detect($request);
+
+        if ($origin === null) {
+            return;
+        }
+
+        $label = MonitorLabel::firstOrNew(['monitor_id' => $monitorId]);
+        $label->tags = MonitorLabel::normalizeTags([...($label->tags ?? []), $origin]);
+
+        try {
+            $label->saveOrPrune();
+        } catch (UniqueConstraintViolationException) {
+            // Ver docblock acima.
         }
     }
 
@@ -293,6 +327,7 @@ class SessionVisitorTracker
 
         $user = Monitor::create(['data' => $data, 'id_token' => $rememberToken]);
         session(['monitor_id' => $user->id]);
+        $this->maybeTagOrigin($user->id, $request);
 
         if (isset($data['user_id'])) {
             $this->maybeAutoHumanClassify($user->id);

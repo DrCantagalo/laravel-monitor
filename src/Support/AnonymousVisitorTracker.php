@@ -4,6 +4,8 @@ namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -15,11 +17,36 @@ class AnonymousVisitorTracker
 
     protected BlockedIpCleaner $blockedIpCleaner;
 
-    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null)
+    protected VisitorOriginDetector $visitorOriginDetector;
+
+    public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null, ?VisitorOriginDetector $visitorOriginDetector = null)
     {
         $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
         $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker();
         $this->blockedIpCleaner = $blockedIpCleaner ?? new BlockedIpCleaner();
+        $this->visitorOriginDetector = $visitorOriginDetector ?? new VisitorOriginDetector();
+    }
+
+    /**
+     * laravel-monitor 319: mesmo helper/raciocínio de
+     * `SessionVisitorTracker::maybeTagOrigin()` — ver docblock lá.
+     */
+    protected function maybeTagOrigin(int $monitorId, Request $request): void
+    {
+        $origin = $this->visitorOriginDetector->detect($request);
+
+        if ($origin === null) {
+            return;
+        }
+
+        $label = MonitorLabel::firstOrNew(['monitor_id' => $monitorId]);
+        $label->tags = MonitorLabel::normalizeTags([...($label->tags ?? []), $origin]);
+
+        try {
+            $label->saveOrPrune();
+        } catch (UniqueConstraintViolationException) {
+            // Ver docblock de SessionVisitorTracker::maybeTagOrigin().
+        }
     }
 
     /**
@@ -92,6 +119,7 @@ class AnonymousVisitorTracker
         ];
 
         $user = Monitor::create(['data' => $data]);
+        $this->maybeTagOrigin($user->id, $request);
         $user->recordHit($path, $notFound);
         $user->recordIp($ip);
     }

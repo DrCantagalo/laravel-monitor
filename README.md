@@ -1578,6 +1578,70 @@ No action needed for the new `getMonitorQueue` groups (`all`/`clean`/
 `clean_bots`/`clean_humans`) — purely additive, nothing stored or
 migrated for them.
 
+## Visitor origin tagging (since `0.65.0`)
+
+When a brand-new `Monitor` is created, the package detects where that
+visitor came from and records it as an ordinary custom tag in
+`monitor_labels.tags` (the same tags you can add by hand) — **not** as a
+classification. Only on creation (first-touch): later visits from the
+same `Monitor` never change the tag, and `Monitor`s that already existed
+before this feature are never retroactively tagged.
+
+Detection order, first match wins, none matching means no tag at all:
+
+1. **`utm_source`** on the entry URL (the market-standard convention,
+   e.g. `?utm_source=linkedin&utm_medium=social`). A short alias, `lm=`,
+   is accepted as a fallback when `utm_source` is absent (never merged
+   with it).
+2. **Known click ID** on the entry URL → a fixed source, via
+   `config('monitor.origin_click_ids')` (extensible): `gclid`/`gbraid`/
+   `wbraid` → `google`, `fbclid` → `facebook`, `msclkid` → `bing`,
+   `ttclid` → `tiktok`, `li_fat_id` → `linkedin`, `twclid` → `twitter`.
+3. **`Referer` domain**, via `config('monitor.origin_referer_domains')`
+   (extensible, wildcards like `"google.*"` accepted): a mapped domain →
+   its fixed source; a `Referer` pointing at your **own** site (same
+   host) → ignored, it's not an origin; any other domain → the raw
+   registrable domain (e.g. `example.com`). The registrable-domain
+   fallback is a simple "last two labels" heuristic with no public-suffix
+   list, so a two-part TLD like `.co.uk`/`.com.br` yields just that
+   suffix instead of the full domain — a known, accepted limitation (the
+   worst case is a slightly odd tag, never an error).
+
+`utm_source`/`lm` is free text coming straight from the visitor: the
+value is lowercased, restricted to `[a-z0-9._-]`, and run through
+`MonitorLabel::normalizeTags()` (length cap) before being stored, and can
+**never** produce the reserved `user` tag (or any other reserved tag) —
+a value that sanitizes to empty, too long, or reserved falls through to
+the next method in the order instead of giving up entirely.
+
+A `MonitorLabel` row created with only the origin tag (no `kind`, no
+`note`) still counts as **unclassified** everywhere in the package and
+in whatever the dashboard builds on top of it (`getMonitorQueue`,
+`getData.monitors_by_kind`, the AI triage queue) — classification is
+decided purely by `kind`, which this feature never touches. The tag
+merges normally with anything added by hand later (including the
+reserved `user` tag synced by `maybeAutoHumanClassify()`, if the same
+request also happens to be a first-time login) — a user can edit or
+remove it like any other tag.
+
+Toggle with `config('monitor.origin_tagging')` (default **on** — no
+action needed on upgrade, and turning it off never removes a tag already
+recorded, it only stops recording new ones). Captured at the exact same
+point a `Monitor` is created today (`SessionVisitorTracker`/
+`AnonymousVisitorTracker`), with no extra query on a request for a
+`Monitor` that already exists.
+
+```
+https://example.com/landing?utm_source=linkedin&utm_medium=social
+```
+
+Note: links opened from inside the LinkedIn, WhatsApp, or Instagram apps
+often arrive with **no** `Referer` at all (in-app browsers commonly strip
+it) — step 3 above never fires for them. Put `utm_source` on any link you
+publish yourself if you want it reliably tagged; click IDs (step 2) and
+`Referer` (step 3) are best-effort fallbacks for traffic you don't
+control the link for.
+
 ## Paginated page listing (`getPages`)
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the
