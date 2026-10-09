@@ -3,6 +3,10 @@
 namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor as MonitorModel;
+use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class Monitor
 {
@@ -76,6 +80,201 @@ class Monitor
         $user->save();
 
         return true;
+    }
+
+    /**
+     * laravel-monitor 320 (v0.66.0): API pública pro host app marcar
+     * conversões (cadastro, venda, qualquer evento que o dono queira
+     * observar) como tag custom no `MonitorLabel` do visitante — grava em
+     * `monitor_labels.tags`, nada a ver com `tag()`/`data` acima (ver
+     * README "Custom conversion tags" pra não confundir os dois).
+     *
+     * Atalho de `addTags()` com um único valor — ver docblock lá pro
+     * contrato completo (sessão exigida, sanitização, nunca lança).
+     */
+    public function addTag(string $tag): bool
+    {
+        return $this->addTags([$tag]);
+    }
+
+    /**
+     * Mesmo uso de `tag()`/`recognize()`: exige uma sessão de monitor já
+     * ativa (`session('monitor_id')`) — é a request do próprio visitante,
+     * ex. o momento de um cadastro bem-sucedido. Pra eventos sem sessão
+     * (webhook de pagamento, job em fila), ver `addTagForUser()`.
+     *
+     * Cada tag passa por `sanitizeCustomTags()` ([a-z0-9._-], minúsculas,
+     * `MonitorLabel::MAX_TAG_LENGTH`, nunca a tag reservada `user` nem
+     * qualquer outra reservada futura) e depois por
+     * `MonitorLabel::normalizeTags()` (dedupe contra as tags já existentes
+     * do Monitor + `MAX_TAGS`) — idempotente, tag já presente não duplica.
+     * Igual a `maybeTagOrigin()`/`syncUserTag()` (`SessionVisitorTracker`),
+     * uma linha nova fica só com `tags` (sem `kind`/`classified_at`): o
+     * Monitor continua NÃO classificado.
+     *
+     * Nunca lança exceção — falha de banco/sessão vira log warning + `false`,
+     * pro cadastro/fluxo do site nunca quebrar por causa do monitor.
+     * Retorna `false` sem nenhum log quando não há sessão de monitor ou
+     * nenhuma tag sobrou depois da sanitização (chamada vazia, não é erro).
+     */
+    public function addTags(array $tags): bool
+    {
+        $monitorId = session('monitor_id');
+
+        if (! $monitorId) {
+            return false;
+        }
+
+        $clean = $this->sanitizeCustomTags($tags);
+
+        if (empty($clean)) {
+            return false;
+        }
+
+        try {
+            return $this->applyCustomTags((int) $monitorId, $clean);
+        } catch (Throwable $e) {
+            Log::warning('[laravel-monitor] Monitor::addTags falhou. Erro original: '.$e->getMessage());
+
+            return false;
+        }
+    }
+
+    /**
+     * Mesma tag custom, mas pra eventos SEM sessão do visitante (webhook
+     * de pagamento, job em fila) — aplica em TODOS os `Monitor`s ligados a
+     * esse usuário (mesmo vínculo `data.user_id` que sustenta a tag
+     * reservada `user`, via `Monitor::scopeForUserId()`). Aceita o próprio
+     * model autenticável (usa `getKey()`) ou já o id (int/string numérica).
+     *
+     * Retorna quantos Monitors foram tagueados (0 se nenhum — usuário sem
+     * `user_id` ligado a nenhum Monitor, ou nenhuma tag válida sobrou da
+     * sanitização). Idempotente por Monitor, mesmo contrato de `addTags()`
+     * (dedupe, `MAX_TAGS`, nunca a reservada `user`, nunca classifica,
+     * nunca lança — chamadores concorrentes pra mesma compra, ex.
+     * `captureOrder()` E o webhook, podem rodar sem duplicar a tag).
+     */
+    public function addTagForUser(mixed $user, string|array $tags): int
+    {
+        $userId = is_object($user) && method_exists($user, 'getKey') ? $user->getKey() : $user;
+
+        if (! is_numeric($userId)) {
+            Log::warning('[laravel-monitor] Monitor::addTagForUser chamado com user inválido.');
+
+            return 0;
+        }
+
+        $clean = $this->sanitizeCustomTags(is_array($tags) ? $tags : [$tags]);
+
+        if (empty($clean)) {
+            return 0;
+        }
+
+        try {
+            $monitorIds = MonitorModel::forUserId((int) $userId)->pluck('id');
+        } catch (Throwable $e) {
+            Log::warning('[laravel-monitor] Monitor::addTagForUser falhou ao buscar os Monitors do usuário. Erro original: '.$e->getMessage());
+
+            return 0;
+        }
+
+        $count = 0;
+
+        // Cada Monitor é tagueado na sua própria transaction (`applyCustomTags()`):
+        // uma falha isolada (ex: corrida rara com `UniqueConstraintViolationException`
+        // num Monitor específico) não pode derrubar a contagem dos demais já
+        // tagueados com sucesso nesta mesma chamada.
+        foreach ($monitorIds as $monitorId) {
+            try {
+                if ($this->applyCustomTags((int) $monitorId, $clean)) {
+                    $count++;
+                }
+            } catch (Throwable $e) {
+                Log::warning("[laravel-monitor] Monitor::addTagForUser falhou pro monitor_id {$monitorId}. Erro original: ".$e->getMessage());
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Sanitização própria das tags custom, aplicada ANTES de
+     * `MonitorLabel::normalizeTags()` — mesmo padrão de
+     * `VisitorOriginDetector::sanitize()` (restringe a `[a-z0-9._-]`, mais
+     * estrito que `normalizeTags()`), porque o valor aqui vem direto do
+     * código do host app (string literal tipo `'registered'`/`'buyer'`),
+     * não de input HTTP, mas ainda assim não documentado/controlado por
+     * este pacote. Valor inválido (vazio depois da limpeza, longo demais,
+     * ou a tag reservada `user`) é descartado com log, nunca um erro.
+     *
+     * @param  array<int, mixed>  $tags
+     * @return array<int, string>
+     */
+    protected function sanitizeCustomTags(array $tags): array
+    {
+        $clean = [];
+
+        foreach ($tags as $tag) {
+            if (! is_string($tag)) {
+                continue;
+            }
+
+            $value = mb_strtolower(trim($tag));
+            $value = preg_replace('/[^a-z0-9._-]/', '', $value) ?? '';
+
+            if ($value === '' || mb_strlen($value) > MonitorLabel::MAX_TAG_LENGTH) {
+                Log::warning('[laravel-monitor] Monitor::addTag(s) descartou uma tag inválida.', ['tag' => $tag]);
+
+                continue;
+            }
+
+            if (in_array($value, [MonitorLabel::TAG_USER], true)) {
+                Log::warning('[laravel-monitor] Monitor::addTag(s) descartou a tag reservada.', ['tag' => $tag]);
+
+                continue;
+            }
+
+            $clean[] = $value;
+        }
+
+        return MonitorLabel::normalizeTags($clean);
+    }
+
+    /**
+     * Mescla `$tags` (já sanitizadas por `sanitizeCustomTags()`) nas tags
+     * existentes do `MonitorLabel` do Monitor `$monitorId` — `firstOrNew`
+     * + `lockForUpdate()` dentro de uma transaction, mesmo padrão de
+     * concorrência de `MonitorController::setMonitorTags()` (aqui
+     * relevante de verdade: `addTagForUser()` pode rodar duas vezes pra
+     * mesma compra, `captureOrder()` e o webhook). `MAX_TAGS` pode
+     * descartar alguma tag do pedido (merge com as já existentes) — log,
+     * nunca erro. Nunca toca `kind`/`classified_at`: uma linha nova fica
+     * NÃO classificada.
+     *
+     * @param  array<int, string>  $tags
+     */
+    protected function applyCustomTags(int $monitorId, array $tags): bool
+    {
+        return DB::transaction(function () use ($monitorId, $tags) {
+            $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first()
+                ?? new MonitorLabel(['monitor_id' => $monitorId, 'tags' => []]);
+
+            $existing = $label->tags ?? [];
+            $merged = MonitorLabel::normalizeTags([...$existing, ...$tags]);
+            $dropped = array_diff($tags, $merged);
+
+            if (! empty($dropped)) {
+                Log::warning('[laravel-monitor] Monitor::addTag(s) descartou tag(s) por exceder MAX_TAGS.', [
+                    'monitor_id' => $monitorId,
+                    'dropped' => array_values($dropped),
+                ]);
+            }
+
+            $label->tags = $merged;
+            $label->saveOrPrune();
+
+            return true;
+        });
     }
 
     /**

@@ -1642,6 +1642,65 @@ publish yourself if you want it reliably tagged; click IDs (step 2) and
 `Referer` (step 3) are best-effort fallbacks for traffic you don't
 control the link for.
 
+## Custom conversion tags (since `0.66.0`)
+
+Lets the host app record a conversion (signup, sale, or anything else the
+site owner wants to observe) as an ordinary custom tag in
+`monitor_labels.tags` — the same tags you see on the dashboard and can add
+by hand. **Not** the same as `Monitor::tag(array $data)` above: that one
+writes to `Monitor.data` (arbitrary key/value, segmentation), this one
+writes to `monitor_labels.tags` (the dashboard's tags). Don't confuse the
+two.
+
+- **`Monitor::addTag(string $tag): bool`** / **`Monitor::addTags(array
+  $tags): bool`** — tags the **current visitor's** `Monitor`. Same
+  precondition as `Monitor::tag()`/`recognize()`: requires an active
+  monitor session (`MonitorMethod` must have already run at least once for
+  this visitor). Use it from the request that completes the conversion
+  itself, e.g. right after a successful signup:
+
+  ```php
+  use Drcantagalo\LaravelMonitor\Facades\Monitor;
+
+  Monitor::addTag('registered');
+  ```
+
+- **`Monitor::addTagForUser(mixed $user, string|array $tags): int`** — for
+  conversions with **no visitor session**, e.g. a payment webhook or a
+  queued job. Accepts either the host app's user model (anything with a
+  `getKey()` method) or a raw user id, and applies the tag(s) to **every**
+  `Monitor` linked to that user (the same `data.user_id` link the reserved
+  `user` tag relies on — see "Authenticated user tagging" below). Returns
+  how many `Monitor`s got tagged (`0` if the user has none, or no tag
+  survived sanitization):
+
+  ```php
+  Monitor::addTagForUser($order->user_id, 'buyer');
+  ```
+
+  Safe to call from more than one code path for the same conversion (e.g.
+  both `TokenPaymentService::captureOrder()` and the
+  `PAYMENT.CAPTURE.COMPLETED` webhook, whichever runs first or both) —
+  idempotent, the tag is never duplicated.
+
+- **Sanitization**: each tag is lowercased, restricted to `[a-z0-9._-]`
+  (same restriction as visitor-origin tags above), capped at
+  `MonitorLabel::MAX_TAG_LENGTH`, and run through
+  `MonitorLabel::normalizeTags()` against the Monitor's existing tags
+  (dedupe + `MonitorLabel::MAX_TAGS`). A tag that doesn't survive
+  sanitization, that doesn't fit under `MAX_TAGS`, or that collides with
+  the reserved `user` tag (or any other reserved tag) is silently dropped
+  with a log warning — never an error.
+- **Never throws**: a database or session failure logs a warning and
+  returns `false`/`0` — a broken monitor call can never break the site's
+  signup/checkout flow, by design (same contract as `Monitor::tag()`).
+- A `MonitorLabel` row created with only a conversion tag (no `kind`, no
+  `note`) is still **unclassified**, same rule as visitor-origin tags
+  above — classification is decided purely by `kind`, untouched here.
+- No built-in timestamp/event log: reconstruct *when* a conversion
+  happened from the Monitor's own visits, or from the host app's own data
+  (e.g. the purchase row) — deliberately out of scope here.
+
 ## Paginated page listing (`getPages`)
 
 `GET /monitor/handler?action=getPages` — same auth as `getData` (the

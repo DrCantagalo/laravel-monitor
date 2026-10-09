@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.66.0] - 2026-10-09
+### Added
+- **Custom conversion tags**: `Monitor::addTag(string $tag): bool` /
+  `Monitor::addTags(array $tags): bool` (current visitor session) and
+  `Monitor::addTagForUser($user, $tags): int` (no session — webhook/job,
+  applies to every `Monitor` linked to that user) let the host app record
+  conversions (signup, sale, anything worth observing) as an ordinary
+  custom tag on `monitor_labels.tags` — distinct from `Monitor::tag()`,
+  which writes to `Monitor.data` instead (see README "Custom conversion
+  tags" vs "Arbitrary visitor data"). Sanitized (`[a-z0-9._-]`,
+  lowercased, length-capped, never the reserved `user` tag), idempotent,
+  never throws, never classifies the `Monitor` (`kind` untouched). See
+  README "Custom conversion tags".
+
 ## [0.65.0] - 2026-10-09
 ### Added
 - **Visitor origin tagging**: a brand-new `Monitor` now gets its traffic
