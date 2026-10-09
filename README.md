@@ -2236,6 +2236,61 @@ php artisan monitor:access-log --limit=200
 php artisan monitor:access-log --purge          # asks for confirmation, then deletes everything
 ```
 
+## Dashboard remote access toggle (`monitor:dashboard`, since `0.64.0`)
+
+Turn the hosted dashboard's (`monitor.cantagalo.it`) remote access to
+*this* site on or off at runtime, without touching code or redeploying:
+
+```
+php artisan monitor:dashboard status            # shows on/off (+ expiration, if any)
+php artisan monitor:dashboard off                # closes remote access now
+php artisan monitor:dashboard on                 # opens it again, no expiration
+php artisan monitor:dashboard on --for=2h        # opens it for 2 hours, then closes by itself
+php artisan monitor:dashboard on --for=30m       # minutes
+php artisan monitor:dashboard on --for=1d        # days
+```
+
+This is **deliberately separate** from `config('monitor.dashboard.enabled')`:
+that config key is an *installation* choice ("does this site use the
+dashboard at all?") made once via `monitor:install`, decides whether the
+`/monitor/handler` route is even registered, and lives in versioned code
+(`config/monitor.php`). `monitor:dashboard`, instead, is a *runtime*
+toggle a site owner flips whenever they want to open the dashboard for a
+bit and close it again — state lives in `storage/monitor/dashboard-access.json`
+(next to `installation.json`, not in versioned config, so a deploy never
+overwrites it or leaves the working tree dirty), and is read **on every
+request with no cache**, so a toggle takes effect on the very next call.
+
+With access off, `/monitor/handler` stays registered, but **every**
+action through it (there is no site-initiated action on this route today
+— registration is outbound, from the site to the dashboard, and there is
+no heartbeat — so the gate applies uniformly, with no exception list)
+gets rejected with a stable, specific response, HTTP `403`:
+
+```json
+{
+  "success": false,
+  "message": "Dashboard access has been turned off by the site owner",
+  "code": "dashboard_access_disabled"
+}
+```
+
+The dashboard recognizes `code: "dashboard_access_disabled"` and shows a
+clear message instead of a generic error. This check runs **before**
+token auth — even a request with a valid `local_token` is rejected while
+access is off, since the point is to fully close remote access, not just
+hide it from unauthenticated callers.
+
+**Nothing else changes**: tracking, blocking, pruning and every other
+local job keep running normally with access off — only the *remote*
+(dashboard-initiated) path is closed. An `on --for=<duration>` expiration
+is checked on read, not by a scheduler — so it reliably closes itself
+even if nothing else runs in the meantime.
+
+**Upgrading**: existing installations default to access **on** (no
+`dashboard-access.json` file = on) — updating the package never locks
+anyone out of a dashboard they were already using.
+
 ## Data cleanup (`clearData`, since `0.63.0` accepts parameters)
 
 `POST /monitor/handler` with `action=clearData` — same auth as
@@ -2293,6 +2348,21 @@ Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
 "visits_deleted": 3, "page_hits_deleted": 1}` — `ip_stats_deleted`/
 `visits_deleted`/`page_hits_deleted` are always `0` whenever the category
 filter isn't "all 5" (see above).
+
+> **Fixed in `0.64.0`**: with the "all 5 categories + `older_than_days`"
+> branch above, `visits_deleted`/`page_hits_deleted` used to **undercount**
+> whenever a `monitor_visits`/`monitor_page_hits` row's own `Monitor` was
+> *also* old enough to be pruned in the same call — `Support\DataPruner::
+> pruneMonitors()` deletes that `Monitor` first, and the FK's
+> `ON DELETE CASCADE` removes those child rows immediately, before the
+> separate `monitor_visits`/`monitor_page_hits` sweeps that follow ever
+> get a chance to count them. No data was ever lost or left behind (the
+> right rows were always deleted) — only the number reported in the
+> response/`monitor:prune` output could be lower than the real count.
+> Fixed by counting each `Monitor`'s cascade-bound children right before
+> deleting it (`DataPruner::countCascadedChildren()`) and adding that into
+> the totals — see `bugs/laravel-monitor.md` history in `claude-manager`
+> for how this was found.
 
 Chunked (`Support\DataPruner::pruneByCategory()`, same batching principle
 as the rest of `DataPruner` — never an unbounded `DELETE` for a

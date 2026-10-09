@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.64.0] - 2026-10-09
+### Added
+- **`php artisan monitor:dashboard on|off|status`**: runtime toggle for
+  the hosted dashboard's (`monitor.cantagalo.it`) *remote* access to this
+  site — the site owner opens access only while using the dashboard and
+  closes it again, with no code change or deploy. Separate from
+  `config('monitor.dashboard.enabled')` (an installation-time choice,
+  versioned code, decides whether the `/monitor/handler` route exists at
+  all) — state lives in `storage/monitor/dashboard-access.json`, read on
+  every request with no cache, so a toggle takes effect immediately.
+  `on --for=<duration>` (e.g. `2h`, `30m`, `1d`) opens access with an
+  expiration that closes it by itself, checked on read (no scheduler
+  dependency). Default for every existing installation remains **on** (no
+  file = on) — upgrading never locks anyone out. With access off, every
+  action through `/monitor/handler` (there is no site-initiated action on
+  this route today) is rejected with a stable `403` and
+  `code: "dashboard_access_disabled"` — see README "Dashboard remote
+  access toggle".
+### Fixed
+- **`DataPruner::prune()` undercounted `visits_deleted`/`page_hits_deleted`**
+  whenever a `monitor_visits`/`monitor_page_hits` row's owning `Monitor`
+  was *also* old enough to be pruned in the same call — the `ON DELETE
+  CASCADE` removed those child rows before the separate counting sweeps
+  that follow `pruneMonitors()` could see them. No data was ever lost;
+  only the reported count (HTTP `clearData`/`pruneData` response and
+  `monitor:prune` output) could read lower than what was actually
+  deleted. Fixed by counting each pruned `Monitor`'s cascade-bound
+  children before deleting it. See README "Data cleanup" and
+  `bugs/laravel-monitor.md` (claude-manager, 2026-10-07) for the original
+  report.
+
 ## [0.63.0] - 2026-10-07
 ### Added
 - **`clearData` unifies the old full-truncate `clearData` and the

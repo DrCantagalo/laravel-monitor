@@ -12,6 +12,7 @@ use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
 use Drcantagalo\LaravelMonitor\Support\AccessLogger;
+use Drcantagalo\LaravelMonitor\Support\DashboardAccess;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Support\DataSanitizer;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
@@ -49,10 +50,40 @@ class MonitorController extends Controller
     ];
 
     /**
+     * laravel-monitor 317: código de erro ESTÁVEL (parte do contrato
+     * público desta action, não só texto pra humano) devolvido quando o
+     * dono do site desligou o acesso remoto via `monitor:dashboard off`
+     * — o dashboard (home-page 318) reconhece este `code` especificamente
+     * pra mostrar uma mensagem clara em vez do genérico "Could not ...".
+     */
+    protected const DASHBOARD_ACCESS_DISABLED_CODE = 'dashboard_access_disabled';
+
+    /**
      * Handler principal para ações do monitor
      */
     public function handle(Request $request)
     {
+        // laravel-monitor 317: TODA action deste handler é uma chamada
+        // REMOTA do dashboard (monitor.cantagalo.it) — não existe, hoje,
+        // nenhuma action de registro/heartbeat iniciada pelo próprio site
+        // que passe por aqui (o registro em `monitor:install` é OUTBOUND,
+        // o site chamando `monitor.cantagalo.it/api/registerinstallation`,
+        // nunca o inverso; não existe heartbeat). Por isso o gate roda
+        // ANTES de qualquer coisa — auth, parsing de `action` — e se
+        // aplica uniformemente a toda chamada, sem lista de exceção
+        // (documentado aqui por ser a decisão explícita da task, não um
+        // descuido: ver historico/laravel-monitor.md). Leitura sem cache
+        // (`DashboardAccess::isEnabled()`) pra uma troca via
+        // `monitor:dashboard on|off` ter efeito imediato na próxima
+        // chamada, sem esperar TTL nenhum.
+        if (! DashboardAccess::isEnabled()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Dashboard access has been turned off by the site owner',
+                'code' => self::DASHBOARD_ACCESS_DISABLED_CODE,
+            ], 403);
+        }
+
         $token = $request->bearerToken();
         $expected = config('monitor.local_token');
         // input() (não query()): as actions de escrita (updateBlockedIps,

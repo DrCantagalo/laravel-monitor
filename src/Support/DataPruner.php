@@ -213,7 +213,21 @@ class DataPruner
         // de prunePageHits().
         $pageHits = self::prunePageHits($maxRows);
 
-        if ($monitors['deleted'] > 0 || $pageHits['deleted'] > 0) {
+        // laravel-monitor 317 (bugs/laravel-monitor.md, 2026-10-07):
+        // pruneMonitors() acima já apagou, via ON DELETE CASCADE, as
+        // monitor_visits/monitor_page_hits dos Monitors podados — os
+        // deletes explícitos de pruneVisits()/prunePageHits()/
+        // deleteVisitsOlderThan() só acham o que SOBROU (dono não
+        // podado no mesmo corte), e por isso nunca contam essas linhas
+        // já cascadeadas. monitors['visits_deleted']/['page_hits_deleted']
+        // (contados ANTES do delete em pruneMonitors(), ver
+        // countCascadedChildren()) cobrem exatamente essa lacuna, sem
+        // sobreposição possível (uma linha só pode ter sido apagada por
+        // cascade OU pelo delete explícito, nunca os dois).
+        $visitsDeleted = $visits['deleted'] + $monitors['visits_deleted'];
+        $pageHitsDeleted = $pageHits['deleted'] + $monitors['page_hits_deleted'];
+
+        if ($monitors['deleted'] > 0 || $pageHitsDeleted > 0) {
             self::invalidatePagesCache();
         }
 
@@ -221,7 +235,7 @@ class DataPruner
             ? ['deleted' => 0, 'done' => true]
             : self::deleteVisitsOlderThan($cutoff, $maxRows);
 
-        $visitsDeleted = $visits['deleted'] + $cutoffVisits['deleted'];
+        $visitsDeleted += $cutoffVisits['deleted'];
 
         // laravel-monitor 242 (v0.50.0): passou a incluir
         // `monitors['deleted']` (antes só ip_stats/visits) — a nova
@@ -234,7 +248,7 @@ class DataPruner
         // já são invalidadas com mais frequência do que precisam noutros
         // pontos do código, invalidar aqui também só significa um cache
         // miss a mais, nunca um dado errado.
-        if ($monitors['deleted'] > 0 || $ipStatsDeleted > 0 || $visitsDeleted > 0 || $pageHits['deleted'] > 0) {
+        if ($monitors['deleted'] > 0 || $ipStatsDeleted > 0 || $visitsDeleted > 0 || $pageHitsDeleted > 0) {
             ListingsCache::invalidate();
         }
 
@@ -242,7 +256,7 @@ class DataPruner
             'monitors_deleted' => $monitors['deleted'],
             'ip_stats_deleted' => $ipStatsDeleted,
             'visits_deleted' => $visitsDeleted,
-            'page_hits_deleted' => $pageHits['deleted'],
+            'page_hits_deleted' => $pageHitsDeleted,
             'done' => $monitors['done'] && $visits['done'] && $cutoffVisits['done'] && $pageHits['done'],
         ];
     }
@@ -734,16 +748,37 @@ class DataPruner
     public static function pruneMonitors(Carbon $cutoff, bool $onlyBlocked, ?int $maxRows = null): array
     {
         if (! $onlyBlocked) {
+            if ($maxRows === null) {
+                $cascaded = self::countCascadedChildren(
+                    fn ($query) => $query->select('id')->from('monitors')->where('updated_at', '<', $cutoff)
+                );
+
+                return [
+                    'deleted' => Monitor::where('updated_at', '<', $cutoff)->delete(),
+                    'done' => true,
+                ] + $cascaded;
+            }
+
+            $ids = Monitor::where('updated_at', '<', $cutoff)->orderBy('id')->limit($maxRows + 1)->pluck('id');
+            $done = $ids->count() <= $maxRows;
+            $ids = $ids->take($maxRows);
+
+            if ($ids->isEmpty()) {
+                return ['deleted' => 0, 'done' => $done, 'visits_deleted' => 0, 'page_hits_deleted' => 0];
+            }
+
+            $cascaded = self::countCascadedChildren($ids);
+
             return [
-                'deleted' => Monitor::where('updated_at', '<', $cutoff)->delete(),
-                'done' => true,
-            ];
+                'deleted' => Monitor::whereIn('id', $ids)->delete(),
+                'done' => $done,
+            ] + $cascaded;
         }
 
         $blockedIps = BlockedIp::active()->pluck('ip');
 
         if ($blockedIps->isEmpty()) {
-            return ['deleted' => 0, 'done' => true];
+            return ['deleted' => 0, 'done' => true, 'visits_deleted' => 0, 'page_hits_deleted' => 0];
         }
 
         $query = DB::table('monitor_visit_ips')
@@ -754,13 +789,16 @@ class DataPruner
             $ids = $query->pluck('monitor_id');
 
             if ($ids->isEmpty()) {
-                return ['deleted' => 0, 'done' => true];
+                return ['deleted' => 0, 'done' => true, 'visits_deleted' => 0, 'page_hits_deleted' => 0];
             }
 
+            $eligibleIds = Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->pluck('id');
+            $cascaded = self::countCascadedChildren($eligibleIds);
+
             return [
-                'deleted' => Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete(),
+                'deleted' => Monitor::whereIn('id', $eligibleIds)->delete(),
                 'done' => true,
-            ];
+            ] + $cascaded;
         }
 
         $ids = $query->orderBy('monitor_id')->limit($maxRows + 1)->pluck('monitor_id');
@@ -768,13 +806,55 @@ class DataPruner
         $ids = $ids->take($maxRows);
 
         if ($ids->isEmpty()) {
-            return ['deleted' => 0, 'done' => $done];
+            return ['deleted' => 0, 'done' => $done, 'visits_deleted' => 0, 'page_hits_deleted' => 0];
         }
 
+        $eligibleIds = Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->pluck('id');
+        $cascaded = self::countCascadedChildren($eligibleIds);
+
         return [
-            'deleted' => Monitor::whereIn('id', $ids)->where('updated_at', '<', $cutoff)->delete(),
+            'deleted' => Monitor::whereIn('id', $eligibleIds)->delete(),
             'done' => $done,
-        ];
+        ] + $cascaded;
+    }
+
+    /**
+     * laravel-monitor 317 (bugs/laravel-monitor.md, 2026-10-07): conta
+     * `monitor_visits`/`monitor_page_hits` dos Monitors em `$monitorIds`
+     * (Collection de ids, OU Closure de subquery — usado pelo ramo sem
+     * `$maxRows`, pra não materializar em PHP um backlog potencialmente
+     * grande só pra contar) ANTES de `pruneMonitors()` apagar esses
+     * Monitors — o `ON DELETE CASCADE` da FK removeria essas linhas antes
+     * de qualquer contagem posterior conseguir vê-las (ver docblock de
+     * `prune()`). Fail-open por tabela, mesmo padrão do resto da classe:
+     * uma tabela ainda não migrada não pode derrubar o prune.
+     *
+     * @param  \Illuminate\Support\Collection<int,int>|\Closure  $monitorIds
+     * @return array{visits_deleted: int, page_hits_deleted: int}
+     */
+    private static function countCascadedChildren($monitorIds): array
+    {
+        if ($monitorIds instanceof \Illuminate\Support\Collection && $monitorIds->isEmpty()) {
+            return ['visits_deleted' => 0, 'page_hits_deleted' => 0];
+        }
+
+        try {
+            $visits = DB::table('monitor_visits')->whereIn('monitor_id', $monitorIds)->count();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao contar monitor_visits cascadeadas em pruneMonitors. Erro original: '.$e->getMessage());
+
+            $visits = 0;
+        }
+
+        try {
+            $pageHits = DB::table('monitor_page_hits')->whereIn('monitor_id', $monitorIds)->count();
+        } catch (QueryException $e) {
+            Log::warning('[laravel-monitor] falha ao contar monitor_page_hits cascadeadas em pruneMonitors. Erro original: '.$e->getMessage());
+
+            $pageHits = 0;
+        }
+
+        return ['visits_deleted' => $visits, 'page_hits_deleted' => $pageHits];
     }
 
     /**
