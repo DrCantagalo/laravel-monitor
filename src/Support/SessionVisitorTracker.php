@@ -194,6 +194,45 @@ class SessionVisitorTracker
     }
 
     /**
+     * laravel-monitor 331: aplica as tags custom pendentes guardadas por
+     * `Monitor::addTags()` (`PendingCustomTags`) quando o controller/rota
+     * chamou `addTag()`/`addTags()` ANTES de `session('monitor_id')`
+     * existir nesta mesma request — primeira request de um visitante
+     * novo (criação), ou visitante reconectado via remember-me/cookie
+     * depois de uma sessão PHP expirada (achado, não criado) — ambos os
+     * call sites abaixo cobrem esse "criar OU achar" (ver
+     * `track()`: quem seta `session('monitor_id')` via remember_me/
+     * cookie cai no mesmo bloco `if (session('monitor_id'))` de quem já
+     * tinha a sessão de visitas anteriores).
+     *
+     * Mesmo caminho de merge que `Monitor::applyCustomTags()` já usa
+     * (`MonitorLabel::mergeCustomTags()`: dedupe, `MAX_TAGS`, nunca a tag
+     * reservada `user`, nunca classifica) — convive normalmente com
+     * `maybeTagOrigin()` (a tag pendente do controller e a de origem
+     * automática podem entrar juntas no mesmo Monitor, sem uma
+     * sobrescrever a outra, respeitados os mesmos limites de sempre).
+     * Sempre esvazia `PendingCustomTags` ao final, mesmo sem nada a
+     * aplicar.
+     *
+     * Numa request onde o tracking de verdade não roda (`avoid-monitor`,
+     * `skipTracking()`, IP ignorado, visitante bloqueado, console) este
+     * método nunca é chamado — a lista pendente simplesmente nunca é
+     * consumida e se perde junto com o container da request (ver
+     * docblock de `PendingCustomTags`).
+     */
+    protected function applyPendingCustomTags(int $monitorId): void
+    {
+        $pending = app(PendingCustomTags::class);
+        $tags = $pending->all();
+
+        if (! empty($tags)) {
+            MonitorLabel::mergeCustomTags($monitorId, $tags);
+        }
+
+        $pending->flush();
+    }
+
+    /**
      * Rastreia o visitante com sessão (web): remember-me, criação/
      * atualização do registro Monitor e cookie de remember quando um
      * Monitor novo é criado.
@@ -292,6 +331,7 @@ class SessionVisitorTracker
                 $user->recordHit($path, $notFound);
                 $this->recordIpIfChanged($user, $ip);
                 VisitRecorder::record($user, $path, $isScraper, $ip);
+                $this->applyPendingCustomTags($user->id);
 
                 // touch(), não save(): `updated_at` é a "última atividade"
                 // (filtro de datas de getPages, DataPruner, last_activity
@@ -328,6 +368,7 @@ class SessionVisitorTracker
         $user = Monitor::create(['data' => $data, 'id_token' => $rememberToken]);
         session(['monitor_id' => $user->id]);
         $this->maybeTagOrigin($user->id, $request);
+        $this->applyPendingCustomTags($user->id);
 
         if (isset($data['user_id'])) {
             $this->maybeAutoHumanClassify($user->id);

@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.67.0] - 2026-10-11
+### Fixed
+- **`Monitor::addTag()`/`addTags()` lost the tag on a brand-new visitor's
+  first request**: `MonitorMethod` only creates/finds the `Monitor` in
+  its "return" phase (after `$next($request)`), so a controller calling
+  `addTag()` on that same first request found no `session('monitor_id')`
+  yet and the call silently returned `false` — the tag never got
+  recorded (this blocked a `/go/{origin}` style route from tagging the
+  visitor's origin from inside the controller on their very first hit).
+  `addTags()` now queues a tag it can't apply yet as **pending**
+  (`PendingCustomTags`, a request-scoped container binding — never
+  `Cache`, which is global across visitors, and never the session, which
+  doesn't exist for this visitor yet either) and returns `true` as long
+  as something survived sanitization, same success contract as before.
+  `SessionVisitorTracker`/`AnonymousVisitorTracker` apply any pending
+  tag right after creating **or finding** the request's `Monitor`
+  (through the exact same merge path `addTags()` already used —
+  dedupe, `MonitorLabel::MAX_TAGS`, never the reserved `user` tag, never
+  classifies) and then clear the pending list. It coexists with
+  first-touch origin tagging (laravel-monitor 319/0.65.0) — both tags
+  can land on the same `Monitor` from the same request. On a request
+  where tracking doesn't actually run (an ignored IP, a route behind
+  `avoid-monitor`, `Monitor::skipTracking()`, a blocked visitor, or a
+  console/Artisan execution) the pending tag is simply dropped — no
+  error, no warning log, nothing to apply it. See README "Custom
+  conversion tags".
+
 ## [0.66.0] - 2026-10-09
 ### Added
 - **Custom conversion tags**: `Monitor::addTag(string $tag): bool` /

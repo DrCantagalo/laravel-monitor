@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 use Drcantagalo\LaravelMonitor\Facades\Monitor as MonitorFacade;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
+use Drcantagalo\LaravelMonitor\Support\PendingCustomTags;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -14,6 +15,14 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
  * webhook/job) — tags custom de conversão em `monitor_labels.tags`,
  * nada a ver com `Monitor::tag()`/`data` (não testado aqui, ver
  * `tag()` no Support/Monitor.php).
+ *
+ * laravel-monitor 331: a partir desta task, chamar `addTag()`/
+ * `addTags()` ANTES de existir `session('monitor_id')` não é mais um
+ * no-op — a tag fica pendente em `PendingCustomTags` (ver docblock da
+ * classe) até o Monitor da request existir. O fluxo de ponta a ponta
+ * (criar/achar o Monitor e consumir a lista) é testado em
+ * `PendingCustomTagsTest`; aqui só a "metade" de `addTags()` (guardar +
+ * retornar `true`/`false` conforme a sanitização).
  */
 class MonitorAddTagTest extends TestCase
 {
@@ -43,10 +52,23 @@ class MonitorAddTagTest extends TestCase
 
     // --- addTag()/addTags(): visitante da sessão atual ---
 
-    public function test_add_tag_returns_false_without_an_active_monitor_session(): void
+    public function test_add_tag_without_an_active_monitor_session_queues_it_as_pending_and_returns_true(): void
     {
-        $this->assertFalse(MonitorFacade::addTag('registered'));
+        // laravel-monitor 331: antes desta task, chamar addTag() sem
+        // session('monitor_id') ainda não existir era um no-op (false,
+        // tag perdida). Agora a tag fica pendente (ver PendingCustomTags)
+        // pra ser aplicada quando o Monitor desta request existir -
+        // nenhum MonitorLabel é criado aqui porque nada consumiu a lista
+        // ainda (nenhum tracker rodou nesta chamada isolada).
+        $this->assertTrue(MonitorFacade::addTag('registered'));
         $this->assertSame(0, MonitorLabel::count());
+        $this->assertSame(['registered'], app(PendingCustomTags::class)->all());
+    }
+
+    public function test_add_tags_without_an_active_monitor_session_returns_false_when_nothing_survives_sanitization(): void
+    {
+        $this->assertFalse(MonitorFacade::addTags(['!!!', 'user']));
+        $this->assertTrue(app(PendingCustomTags::class)->isEmpty());
     }
 
     public function test_add_tag_creates_an_unclassified_label_with_the_tag(): void

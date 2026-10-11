@@ -12,6 +12,7 @@ use Drcantagalo\LaravelMonitor\Console\Commands\MonitorUpdateCommand;
 use Drcantagalo\LaravelMonitor\Http\Middleware\AvoidMonitor;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
 use Drcantagalo\LaravelMonitor\Support\Monitor;
+use Drcantagalo\LaravelMonitor\Support\PendingCustomTags;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Routing\Router;
@@ -106,5 +107,17 @@ class MonitorServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__.'/config/monitor.php', 'monitor');
 
         $this->app->singleton('monitor', fn () => new Monitor);
+
+        // Scoped: lista de tags custom pendentes de `Monitor::addTags()`
+        // enquanto `session('monitor_id')` ainda não existe (primeira
+        // request de um visitante novo) — ver docblock de
+        // `PendingCustomTags`. NUNCA Cache (global entre
+        // requests/usuários) nem sessão (ainda não existe pra esse
+        // visitante nesse ponto). `scoped()` (em vez de `singleton()`) é
+        // só uma garantia extra pra quando o pacote roda sob Octane/
+        // workers de fila de vida longa, que reciclam bindings `scoped`
+        // entre execuções — em PHP-FPM/`artisan serve` tradicional cada
+        // request já ganha um container novo por conta própria.
+        $this->app->scoped(PendingCustomTags::class);
     }
 }

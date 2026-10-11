@@ -4,7 +4,6 @@ namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor as MonitorModel;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -98,37 +97,57 @@ class Monitor
     }
 
     /**
-     * Mesmo uso de `tag()`/`recognize()`: exige uma sessão de monitor já
-     * ativa (`session('monitor_id')`) — é a request do próprio visitante,
-     * ex. o momento de um cadastro bem-sucedido. Pra eventos sem sessão
-     * (webhook de pagamento, job em fila), ver `addTagForUser()`.
+     * Mesmo uso de `tag()`/`recognize()`: normalmente exige uma sessão de
+     * monitor já ativa (`session('monitor_id')`) — é a request do próprio
+     * visitante, ex. o momento de um cadastro bem-sucedido. Pra eventos
+     * sem sessão (webhook de pagamento, job em fila), ver
+     * `addTagForUser()`.
+     *
+     * laravel-monitor 331: quando chamado ANTES de `session('monitor_id')`
+     * existir — a primeira request de um visitante novo, se o
+     * controller/rota chama `addTag()`/`addTags()` antes da "lógica de
+     * volta" de `MonitorMethod` criar/achar o Monitor desta sessão — a
+     * tag não é mais descartada. Em vez disso é guardada em
+     * `PendingCustomTags` (singleton scoped no container, NUNCA Cache —
+     * seria global entre requests/usuários — nem sessão, que é justamente
+     * o que ainda não existe aqui) e aplicada depois por
+     * `SessionVisitorTracker`/`AnonymousVisitorTracker::
+     * applyPendingCustomTags()` assim que o Monitor desta mesma request é
+     * criado ou achado. Numa request onde o tracking de verdade não roda
+     * (IP ignorado, `avoid-monitor`, `skipTracking()`, visitante
+     * bloqueado, console/Artisan) nada consome essa lista — ela é
+     * descartada junto com o container da request, sem erro nem log (ver
+     * docblock de `PendingCustomTags`).
      *
      * Cada tag passa por `sanitizeCustomTags()` ([a-z0-9._-], minúsculas,
      * `MonitorLabel::MAX_TAG_LENGTH`, nunca a tag reservada `user` nem
-     * qualquer outra reservada futura) e depois por
-     * `MonitorLabel::normalizeTags()` (dedupe contra as tags já existentes
-     * do Monitor + `MAX_TAGS`) — idempotente, tag já presente não duplica.
-     * Igual a `maybeTagOrigin()`/`syncUserTag()` (`SessionVisitorTracker`),
-     * uma linha nova fica só com `tags` (sem `kind`/`classified_at`): o
-     * Monitor continua NÃO classificado.
+     * qualquer outra reservada futura) e, quando já há sessão de monitor
+     * ativa, por `MonitorLabel::normalizeTags()` (dedupe contra as tags já
+     * existentes do Monitor + `MAX_TAGS`) — idempotente, tag já presente
+     * não duplica. Igual a `maybeTagOrigin()`/`syncUserTag()`
+     * (`SessionVisitorTracker`), uma linha nova fica só com `tags` (sem
+     * `kind`/`classified_at`): o Monitor continua NÃO classificado.
      *
      * Nunca lança exceção — falha de banco/sessão vira log warning + `false`,
      * pro cadastro/fluxo do site nunca quebrar por causa do monitor.
-     * Retorna `false` sem nenhum log quando não há sessão de monitor ou
-     * nenhuma tag sobrou depois da sanitização (chamada vazia, não é erro).
+     * Retorna `true` se sobrou alguma tag válida depois da sanitização
+     * (mesmo sem sessão de monitor ainda — fica pendente), `false` se
+     * nenhuma tag sobreviveu à sanitização (chamada vazia, não é erro).
      */
     public function addTags(array $tags): bool
     {
-        $monitorId = session('monitor_id');
-
-        if (! $monitorId) {
-            return false;
-        }
-
         $clean = $this->sanitizeCustomTags($tags);
 
         if (empty($clean)) {
             return false;
+        }
+
+        $monitorId = session('monitor_id');
+
+        if (! $monitorId) {
+            app(PendingCustomTags::class)->push($clean);
+
+            return true;
         }
 
         try {
@@ -242,39 +261,22 @@ class Monitor
 
     /**
      * Mescla `$tags` (já sanitizadas por `sanitizeCustomTags()`) nas tags
-     * existentes do `MonitorLabel` do Monitor `$monitorId` — `firstOrNew`
-     * + `lockForUpdate()` dentro de uma transaction, mesmo padrão de
-     * concorrência de `MonitorController::setMonitorTags()` (aqui
-     * relevante de verdade: `addTagForUser()` pode rodar duas vezes pra
-     * mesma compra, `captureOrder()` e o webhook). `MAX_TAGS` pode
-     * descartar alguma tag do pedido (merge com as já existentes) — log,
-     * nunca erro. Nunca toca `kind`/`classified_at`: uma linha nova fica
-     * NÃO classificada.
+     * existentes do `MonitorLabel` do Monitor `$monitorId`. Desde
+     * laravel-monitor 331, só delega pra `MonitorLabel::mergeCustomTags()`
+     * (lógica de merge/lock/transaction movida pra lá) — extraído pra ser
+     * o MESMO caminho que `SessionVisitorTracker`/
+     * `AnonymousVisitorTracker::applyPendingCustomTags()` usam ao aplicar
+     * as tags que ficaram pendentes em `PendingCustomTags` (ver docblock
+     * de `addTags()` acima), sem duplicar a lógica de merge em dois
+     * lugares. Mantido aqui (em vez de inlinado nos call sites) só pra
+     * não mudar a assinatura/visibilidade que `addTags()`/
+     * `addTagForUser()` já chamam.
      *
      * @param  array<int, string>  $tags
      */
     protected function applyCustomTags(int $monitorId, array $tags): bool
     {
-        return DB::transaction(function () use ($monitorId, $tags) {
-            $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first()
-                ?? new MonitorLabel(['monitor_id' => $monitorId, 'tags' => []]);
-
-            $existing = $label->tags ?? [];
-            $merged = MonitorLabel::normalizeTags([...$existing, ...$tags]);
-            $dropped = array_diff($tags, $merged);
-
-            if (! empty($dropped)) {
-                Log::warning('[laravel-monitor] Monitor::addTag(s) descartou tag(s) por exceder MAX_TAGS.', [
-                    'monitor_id' => $monitorId,
-                    'dropped' => array_values($dropped),
-                ]);
-            }
-
-            $label->tags = $merged;
-            $label->saveOrPrune();
-
-            return true;
-        });
+        return MonitorLabel::mergeCustomTags($monitorId, $tags);
     }
 
     /**

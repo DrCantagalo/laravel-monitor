@@ -50,6 +50,28 @@ class AnonymousVisitorTracker
     }
 
     /**
+     * laravel-monitor 331: mesmo helper/raciocínio de
+     * `SessionVisitorTracker::applyPendingCustomTags()` — ver docblock
+     * lá. Aqui, como este tracker nunca usa sessão, qualquer chamada de
+     * `Monitor::addTags()` feita antes deste `track()` (dentro da mesma
+     * request anônima) sempre passa por este caminho, tanto na criação
+     * quanto no reencontro do Monitor via IP — não só na criação, porque
+     * `session('monitor_id')` nunca existe de verdade pra um visitante
+     * sem sessão.
+     */
+    protected function applyPendingCustomTags(int $monitorId): void
+    {
+        $pending = app(PendingCustomTags::class);
+        $tags = $pending->all();
+
+        if (! empty($tags)) {
+            MonitorLabel::mergeCustomTags($monitorId, $tags);
+        }
+
+        $pending->flush();
+    }
+
+    /**
      * laravel-monitor 96: promoção automática de flagged->blocked quando os
      * sinais de scraper da request atual passam de `auto_block_signal_threshold`
      * (separado e mais alto que `scraper_signal_threshold`, que só decide
@@ -102,6 +124,7 @@ class AnonymousVisitorTracker
 
             $user->data = $data;
             $user->recordHit($path, $notFound);
+            $this->applyPendingCustomTags($user->id);
 
             // touch(), não save(): ver comentário equivalente em
             // SessionVisitorTracker — `updated_at` é a última atividade.
@@ -120,6 +143,7 @@ class AnonymousVisitorTracker
 
         $user = Monitor::create(['data' => $data]);
         $this->maybeTagOrigin($user->id, $request);
+        $this->applyPendingCustomTags($user->id);
         $user->recordHit($path, $notFound);
         $user->recordIp($ip);
     }

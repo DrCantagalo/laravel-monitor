@@ -1653,17 +1653,39 @@ writes to `monitor_labels.tags` (the dashboard's tags). Don't confuse the
 two.
 
 - **`Monitor::addTag(string $tag): bool`** / **`Monitor::addTags(array
-  $tags): bool`** — tags the **current visitor's** `Monitor`. Same
-  precondition as `Monitor::tag()`/`recognize()`: requires an active
-  monitor session (`MonitorMethod` must have already run at least once for
-  this visitor). Use it from the request that completes the conversion
-  itself, e.g. right after a successful signup:
+  $tags): bool`** — tags the **current visitor's** `Monitor`. Use it from
+  the request that completes the conversion itself, e.g. right after a
+  successful signup:
 
   ```php
   use Drcantagalo\LaravelMonitor\Facades\Monitor;
 
   Monitor::addTag('registered');
   ```
+
+  Unlike `Monitor::tag()`/`recognize()`, this one does **not** require
+  `session('monitor_id')` to already exist. `MonitorMethod` only
+  creates/finds the visitor's `Monitor` in its "return" phase (after the
+  controller runs), so on a brand-new visitor's **first** request there
+  is no `monitor_id` in the session yet when the controller calls
+  `addTag()`. In that case the tag is queued as **pending** (kept in a
+  request-scoped container binding, never `Cache` — that would leak the
+  tag across visitors — and never the session, which is exactly what
+  doesn't exist yet) and applied automatically right after the `Monitor`
+  for this same request is created or found, through the same
+  sanitize/dedupe/`MAX_TAGS` path described below. `addTag()`/`addTags()`
+  still return `true` in this case (the tag survived sanitization and
+  will land on the `Monitor`), even though nothing is in the database
+  yet at the moment of the call. On every request **after** the first,
+  `session('monitor_id')` is already set and the tag is applied directly
+  as before — nothing changes for a returning visitor.
+
+  On a request where tracking doesn't actually run — the visitor's IP is
+  in `monitor.ignore_ips`, the route is behind the `avoid-monitor`
+  middleware, `Monitor::skipTracking()` was called, the visitor is
+  blocked, or the call happens in a console/Artisan context — nothing
+  ever consumes the pending tag, so it's silently dropped with the rest
+  of that request: no error, no warning log, it just has nowhere to go.
 
 - **`Monitor::addTagForUser(mixed $user, string|array $tags): int`** — for
   conversions with **no visitor session**, e.g. a payment webhook or a

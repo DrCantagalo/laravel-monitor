@@ -4,6 +4,8 @@ namespace Drcantagalo\LaravelMonitor\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * laravel-monitor 258 (v0.53.0): classificação bot/human + tags custom +
@@ -128,5 +130,49 @@ class MonitorLabel extends Model
         }
 
         $this->save();
+    }
+
+    /**
+     * laravel-monitor 320/331: mescla `$tags` (já sanitizadas - ver
+     * `Support\Monitor::sanitizeCustomTags()`) nas tags existentes do
+     * `MonitorLabel` do Monitor `$monitorId`. Extraído de
+     * `Support\Monitor::applyCustomTags()` (que agora só delega pra cá)
+     * pra ser o MESMO caminho usado por `SessionVisitorTracker`/
+     * `AnonymousVisitorTracker::applyPendingCustomTags()` (laravel-monitor
+     * 331) ao aplicar as tags que `Monitor::addTags()` deixou pendentes
+     * (`PendingCustomTags`) enquanto o Monitor da request ainda não
+     * existia - sem duplicar a lógica de merge em dois lugares.
+     *
+     * `firstOrNew` + `lockForUpdate()` dentro de uma transaction, mesmo
+     * padrão de concorrência de `MonitorController::setMonitorTags()`
+     * (relevante pra `addTagForUser()`, que pode rodar duas vezes pra
+     * mesma compra). `MAX_TAGS` pode descartar alguma tag do pedido
+     * (merge com as já existentes) - log, nunca erro. Nunca toca
+     * `kind`/`classified_at`: uma linha nova fica NÃO classificada.
+     *
+     * @param  array<int, string>  $tags
+     */
+    public static function mergeCustomTags(int $monitorId, array $tags): bool
+    {
+        return DB::transaction(function () use ($monitorId, $tags) {
+            $label = self::where('monitor_id', $monitorId)->lockForUpdate()->first()
+                ?? new self(['monitor_id' => $monitorId, 'tags' => []]);
+
+            $existing = $label->tags ?? [];
+            $merged = self::normalizeTags([...$existing, ...$tags]);
+            $dropped = array_diff($tags, $merged);
+
+            if (! empty($dropped)) {
+                Log::warning('[laravel-monitor] Monitor::addTag(s) descartou tag(s) por exceder MAX_TAGS.', [
+                    'monitor_id' => $monitorId,
+                    'dropped' => array_values($dropped),
+                ]);
+            }
+
+            $label->tags = $merged;
+            $label->saveOrPrune();
+
+            return true;
+        });
     }
 }
