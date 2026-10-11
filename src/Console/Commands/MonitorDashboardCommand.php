@@ -41,7 +41,7 @@ class MonitorDashboardCommand extends Command
             'invalid_state' => 'Stato non valido: deve essere "on", "off" o "status".',
             'for_only_with_on' => '--for può essere usato solo con "on".',
             'invalid_for' => 'Valore --for non valido (previsto un intero seguito da m, h o d, es: 30m, 2h, 1d):',
-            'turned_off' => "🔒 Accesso remoto alla dashboard DISATTIVATO. Il sito continua a tracciare/bloccare/pulire localmente; solo la dashboard (monitor.cantagalo.it) viene negata.",
+            'turned_off' => '🔒 Accesso remoto alla dashboard DISATTIVATO. Il sito continua a tracciare/bloccare/pulire localmente; solo la dashboard (monitor.cantagalo.it) viene negata.',
             'turned_on' => '🔓 Accesso remoto alla dashboard ATTIVATO (senza scadenza).',
             'turned_on_for' => '🔓 Accesso remoto alla dashboard ATTIVATO fino a',
             'status_off' => '🔒 L\'accesso remoto alla dashboard è DISATTIVATO.',

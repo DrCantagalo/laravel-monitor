@@ -11,6 +11,8 @@ use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 /**
  * laravel-monitor 319: tag de origem do visitante (first-touch) gravada
@@ -279,8 +281,8 @@ class VisitorOriginTaggingTest extends TestCase
 
     public function test_session_tracker_merges_origin_tag_with_the_reserved_user_tag_on_the_same_request(): void
     {
-        \Illuminate\Support\Facades\Auth::shouldReceive('check')->andReturn(true);
-        \Illuminate\Support\Facades\Auth::shouldReceive('id')->andReturn(42);
+        Auth::shouldReceive('check')->andReturn(true);
+        Auth::shouldReceive('id')->andReturn(42);
 
         $request = Request::create('/landing', 'GET', ['utm_source' => 'linkedin']);
         app(SessionVisitorTracker::class)->track($request, new Response, '/landing', 'test-agent', '203.0.113.9');
@@ -304,7 +306,7 @@ class VisitorOriginTaggingTest extends TestCase
 
         app(AnonymousVisitorTracker::class)->track($request, '/api/ping', 'curl/8.0', '198.51.100.7');
 
-        $monitorId = \Illuminate\Support\Facades\DB::table('monitor_visit_ips')->where('ip', '198.51.100.7')->value('monitor_id');
+        $monitorId = DB::table('monitor_visit_ips')->where('ip', '198.51.100.7')->value('monitor_id');
         $this->assertNotNull($monitorId);
 
         $label = MonitorLabel::where('monitor_id', $monitorId)->first();
@@ -316,7 +318,7 @@ class VisitorOriginTaggingTest extends TestCase
         $firstRequest = Request::create('/api/ping', 'GET', ['gclid' => 'abc123']);
         app(AnonymousVisitorTracker::class)->track($firstRequest, '/api/ping', 'curl/8.0', '198.51.100.7');
 
-        $monitorId = \Illuminate\Support\Facades\DB::table('monitor_visit_ips')->where('ip', '198.51.100.7')->value('monitor_id');
+        $monitorId = DB::table('monitor_visit_ips')->where('ip', '198.51.100.7')->value('monitor_id');
 
         $secondRequest = Request::create('/api/other', 'GET', ['fbclid' => 'xyz987']);
         app(AnonymousVisitorTracker::class)->track($secondRequest, '/api/other', 'curl/8.0', '198.51.100.7');

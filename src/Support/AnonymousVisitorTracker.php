@@ -21,10 +21,10 @@ class AnonymousVisitorTracker
 
     public function __construct(?ScraperSignalDetector $scraperSignalDetector = null, ?ScraperBlocker $scraperBlocker = null, ?BlockedIpCleaner $blockedIpCleaner = null, ?VisitorOriginDetector $visitorOriginDetector = null)
     {
-        $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector();
-        $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker();
-        $this->blockedIpCleaner = $blockedIpCleaner ?? new BlockedIpCleaner();
-        $this->visitorOriginDetector = $visitorOriginDetector ?? new VisitorOriginDetector();
+        $this->scraperSignalDetector = $scraperSignalDetector ?? new ScraperSignalDetector;
+        $this->scraperBlocker = $scraperBlocker ?? new ScraperBlocker;
+        $this->blockedIpCleaner = $blockedIpCleaner ?? new BlockedIpCleaner;
+        $this->visitorOriginDetector = $visitorOriginDetector ?? new VisitorOriginDetector;
     }
 
     /**
@@ -111,9 +111,9 @@ class AnonymousVisitorTracker
         }
 
         $data = [
-            'ua'    => $userAgent,
+            'ua' => $userAgent,
             'flags' => [
-                'scraper'         => $isScraper,
+                'scraper' => $isScraper,
                 'scraper_signals' => $signals,
             ],
         ];

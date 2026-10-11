@@ -7,6 +7,7 @@ use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -829,12 +830,12 @@ class DataPruner
      * `prune()`). Fail-open por tabela, mesmo padrão do resto da classe:
      * uma tabela ainda não migrada não pode derrubar o prune.
      *
-     * @param  \Illuminate\Support\Collection<int,int>|\Closure  $monitorIds
+     * @param  Collection<int,int>|\Closure  $monitorIds
      * @return array{visits_deleted: int, page_hits_deleted: int}
      */
     private static function countCascadedChildren($monitorIds): array
     {
-        if ($monitorIds instanceof \Illuminate\Support\Collection && $monitorIds->isEmpty()) {
+        if ($monitorIds instanceof Collection && $monitorIds->isEmpty()) {
             return ['visits_deleted' => 0, 'page_hits_deleted' => 0];
         }
 

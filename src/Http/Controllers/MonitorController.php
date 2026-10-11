@@ -25,6 +25,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
@@ -578,7 +579,7 @@ class MonitorController extends Controller
      * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories::idSets()`
      * (mesmo fail-open de antes, só realocado — ver docblock de lá).
      *
-     * @return array{0: \Illuminate\Support\Collection<int,int>, 1: \Illuminate\Support\Collection<int,int>} [$flaggedMonitorIds, $monitorIdsWithUserId]
+     * @return array{0: Collection<int,int>, 1: Collection<int,int>} [$flaggedMonitorIds, $monitorIdsWithUserId]
      */
     protected function monitorCategoryIdSets(): array
     {
@@ -589,7 +590,7 @@ class MonitorController extends Controller
      * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories` (fonte
      * única, também usada por `DataPruner::pruneByCategory()`).
      *
-     * @return \Illuminate\Support\Collection<int,int>
+     * @return Collection<int,int>
      */
     protected function monitorIdsWithUserId()
     {
@@ -629,8 +630,8 @@ class MonitorController extends Controller
      * 0.53.0+) cai pra mesma agregação sem o join (todo Monitor conta
      * como sem `kind`); sem `monitors`, zeros.
      *
-     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
-     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @param  Collection<int,int>  $flaggedIds
+     * @param  Collection<int,int>  $userIds
      * @return array{human: int, human_guest: int, human_user: int, bot: int, flagged: int, unclassified: int, new: int}
      */
     protected function monitorsByKind(): array
@@ -660,8 +661,8 @@ class MonitorController extends Controller
     }
 
     /**
-     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
-     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @param  Collection<int,int>  $flaggedIds
+     * @param  Collection<int,int>  $userIds
      * @return array{human: int, human_guest: int, human_user: int, bot: int, flagged: int, unclassified: int, new: int}
      */
     protected function aggregateMonitorsByKind(Carbon $cutoff, bool $withLabels, $flaggedIds, $userIds): array
@@ -1614,7 +1615,7 @@ class MonitorController extends Controller
      * `MonitorIpLabel::where('kind', ...)->pluck('ip')` sem paginação
      * antes da 258).
      *
-     * @return \Illuminate\Support\Collection<int, string>
+     * @return Collection<int, string>
      */
     protected function ipsWithMonitorKind(string $kind)
     {
@@ -1631,7 +1632,7 @@ class MonitorController extends Controller
      * desde a 258 (v0.53.0), já que tags também passaram a pertencer ao
      * Monitor.
      *
-     * @return \Illuminate\Support\Collection<int, string>
+     * @return Collection<int, string>
      */
     protected function ipsWithMonitorTag(string $tag)
     {
@@ -1653,8 +1654,8 @@ class MonitorController extends Controller
      * kind (+ `unclassified`) — nunca uma linha gravada, tudo calculado na
      * hora (ver README "IP classification").
      *
-     * @param  \Illuminate\Support\Collection<int, string>  $ips
-     * @return \Illuminate\Support\Collection<string, array<string, mixed>>
+     * @param  Collection<int, string>  $ips
+     * @return Collection<string, array<string, mixed>>
      */
     protected function derivedLabelsForIps($ips)
     {
@@ -2434,8 +2435,8 @@ class MonitorController extends Controller
      * timezone ($tz), tratando a string do banco como hora-relógio
      * nesse timezone — nunca misturando com UTC de verdade.
      *
-     * @return array{0: \Illuminate\Support\Carbon, 1: \Illuminate\Support\Carbon, 2: array<int, string>}
-     *                                                                              [$startBound, $endBound, $dayKeys]
+     * @return array{0: Carbon, 1: Carbon, 2: array<int, string>}
+     *                                                            [$startBound, $endBound, $dayKeys]
      */
     protected function timelineWindow(string $tz, int $days): array
     {
@@ -2491,8 +2492,8 @@ class MonitorController extends Controller
      * em lookup O(1) (`array_flip`) ANTES do chunk, pra nunca rodar uma
      * query (nem uma busca O(n) em array) por linha.
      *
-     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
-     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @param  Collection<int,int>  $flaggedIds
+     * @param  Collection<int,int>  $userIds
      * @return array<string, array<string,int>> chaves de self::MONITOR_CATEGORIES
      */
     protected function timelineMonitorsNew(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys, $flaggedIds, $userIds): array
@@ -2560,8 +2561,8 @@ class MonitorController extends Controller
      * TODOS os Monitors, só os donos de visitas dentro da janela), lookups
      * O(1) pros conjuntos pré-calculados.
      *
-     * @param  \Illuminate\Support\Collection<int,int>  $flaggedIds
-     * @param  \Illuminate\Support\Collection<int,int>  $userIds
+     * @param  Collection<int,int>  $flaggedIds
+     * @param  Collection<int,int>  $userIds
      * @return array<string, array<string,int>> chaves de self::MONITOR_CATEGORIES
      */
     protected function timelineVisits(string $tz, Carbon $startBound, Carbon $endBound, array $dayKeys, $flaggedIds, $userIds): array
@@ -3099,7 +3100,7 @@ class MonitorController extends Controller
      * só existem por pouco tempo de qualquer forma (`DataPruner` já os
      * apaga em lote).
      *
-     * @return \Illuminate\Support\Collection<int, int>
+     * @return Collection<int, int>
      */
     protected function monitorIdsAtFlaggedIps()
     {
@@ -3111,7 +3112,7 @@ class MonitorController extends Controller
      * exclusão de `excludedMonitorIdsForQueue()`: IDs de Monitor vistos em
      * pelo menos um IP atualmente bloqueado (`BlockedIp::active()`).
      *
-     * @return \Illuminate\Support\Collection<int, int>
+     * @return Collection<int, int>
      */
     protected function monitorIdsAtBlockedIps()
     {
@@ -3122,8 +3123,8 @@ class MonitorController extends Controller
      * laravel-monitor 308 (v0.63.0): delega pra `MonitorCategories` (fonte
      * única, também usada por `DataPruner::pruneByCategory()`).
      *
-     * @param  \Illuminate\Support\Collection<int, string>  $ips
-     * @return \Illuminate\Support\Collection<int, int>
+     * @param  Collection<int, string>  $ips
+     * @return Collection<int, int>
      */
     protected function monitorIdsForIps($ips)
     {
@@ -3142,7 +3143,7 @@ class MonitorController extends Controller
      * antes da 258 (aquele filtro partia de `IpStat` com `flagged=false` e
      * excluía `$blockedIps`).
      *
-     * @return \Illuminate\Support\Collection<int, int>
+     * @return Collection<int, int>
      */
     protected function excludedMonitorIdsForQueue()
     {

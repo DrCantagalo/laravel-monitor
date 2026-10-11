@@ -5,6 +5,7 @@ namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 
 /**
  * laravel-monitor 272 (v0.57.0): nome/e-mail estáveis entre Monitors do
@@ -92,7 +93,7 @@ class MonitorUserContactTest extends TestCase
         $deviceWithoutName->recordIp('5.5.5.5');
 
         $queries = 0;
-        \Illuminate\Support\Facades\DB::listen(function () use (&$queries) {
+        DB::listen(function () use (&$queries) {
             $queries++;
         });
 

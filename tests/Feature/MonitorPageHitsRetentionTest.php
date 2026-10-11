@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Tests\Feature;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor;
+use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -75,7 +76,7 @@ class MonitorPageHitsRetentionTest extends TestCase
         $monitor = Monitor::create(['data' => []]);
         $this->hitOnDay($monitor, '2020-01-01');
 
-        $this->assertSame(0, \Drcantagalo\LaravelMonitor\Models\MonitorVisit::count());
+        $this->assertSame(0, MonitorVisit::count());
 
         Carbon::setTestNow(Carbon::create(2026, 10, 4));
 

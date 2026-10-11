@@ -1,8 +1,8 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use Drcantagalo\LaravelMonitor\Http\Controllers\MonitorController;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorCors;
+use Illuminate\Support\Facades\Route;
 
 Route::middleware(['api', MonitorCors::class])->prefix('monitor')->group(function () {
     Route::any('/handler', [MonitorController::class, 'handle']);

@@ -2,8 +2,8 @@
 
 namespace Drcantagalo\LaravelMonitor\Console\Commands;
 
-use Illuminate\Console\Command;
 use Drcantagalo\LaravelMonitor\Support\DenylistExporter;
+use Illuminate\Console\Command;
 
 class MonitorExportDenylistCommand extends Command
 {

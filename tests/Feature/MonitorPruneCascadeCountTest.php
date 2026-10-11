@@ -147,7 +147,7 @@ class MonitorPruneCascadeCountTest extends TestCase
         $monitorB = $this->seedOldMonitorWithVisitAndPageHit();
         $monitorB->recordIp($ip);
 
-        \Drcantagalo\LaravelMonitor\Models\BlockedIp::create(['ip' => $ip, 'source' => 'manual']);
+        BlockedIp::create(['ip' => $ip, 'source' => 'manual']);
 
         $result = DataPruner::prune(1, true, 1);
 
