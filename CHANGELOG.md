@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.69.0] - 2026-10-12
+### Added
+- **`getMonitorQueue` accepts `date_from`/`date_to`/`tag` filters**:
+  previously the only way to narrow the Monitor queue was `group`. Now
+  `date_from`/`date_to` filter by the Monitor's `created_at` (same
+  convention as `getVisitorsByIp`) and `tag` filters by
+  `monitor_labels.tags` (same lowercase/trim normalization as
+  `getVisitorsByIp`'s `tag` param) — all three are optional and
+  combinable with any `group` and with each other. `buildMonitorQueueResult`
+  now takes the three as optional parameters, and all three are part of
+  the cache key (`listingsCacheKey`), so a filtered and an unfiltered
+  call never share a cached page.
+
 ## [0.68.0] - 2026-10-12
 ### Fixed
 - **`PathsAuditor` only excluded `Route::fallback()`, not catch-all routes

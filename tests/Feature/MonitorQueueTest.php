@@ -370,6 +370,83 @@ class MonitorQueueTest extends TestCase
         $this->assertSame($countsAfter->json('unclassified'), count($queueAfterIds));
     }
 
+    /**
+     * laravel-monitor 342: `date_from`/`date_to` filtram por `created_at`
+     * do Monitor, combinável com qualquer `group` (aqui `all`, sem
+     * exclusão nenhuma, pra isolar só o efeito do filtro de data).
+     */
+    public function test_date_from_and_date_to_filter_by_monitor_created_at(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 1, 15, 12, 0, 0, 'UTC'));
+
+        $old = Monitor::create(['data' => []]);
+        $old->forceFill(['created_at' => Carbon::create(2026, 1, 1, 0, 0, 0, 'UTC')])->save();
+
+        $middle = Monitor::create(['data' => []]);
+        $middle->forceFill(['created_at' => Carbon::create(2026, 1, 10, 0, 0, 0, 'UTC')])->save();
+
+        $recent = Monitor::create(['data' => []]);
+        $recent->forceFill(['created_at' => Carbon::create(2026, 1, 14, 0, 0, 0, 'UTC')])->save();
+
+        $response = $this->callHandler([
+            'action' => 'getMonitorQueue',
+            'group' => 'all',
+            'date_from' => '2026-01-05',
+            'date_to' => '2026-01-12',
+        ]);
+
+        $response->assertOk();
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertContains($middle->id, $ids);
+        $this->assertNotContains($old->id, $ids);
+        $this->assertNotContains($recent->id, $ids);
+    }
+
+    /**
+     * laravel-monitor 342: `tag` filtra por `monitor_labels.tags`, mesma
+     * normalização (minúsculo/trim) de `getVisitorsByIp`.
+     */
+    public function test_tag_filter_matches_monitor_labels_tags_case_and_whitespace_insensitively(): void
+    {
+        $tagged = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $tagged->id, 'tags' => ['vpn']]);
+
+        $untagged = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all', 'tag' => '  VPN  ']);
+
+        $response->assertOk();
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertContains($tagged->id, $ids);
+        $this->assertNotContains($untagged->id, $ids);
+    }
+
+    /**
+     * laravel-monitor 342: `date_from`/`date_to`/`tag` precisam entrar na
+     * chave de cache — senão uma chamada filtrada serve do cache de uma
+     * chamada sem filtro (ou vice-versa), já que antes a chave só incluía
+     * `page`/`per_page`/`group`.
+     */
+    public function test_date_and_tag_filters_do_not_share_cache_with_the_unfiltered_query(): void
+    {
+        $tagged = Monitor::create(['data' => []]);
+        MonitorLabel::create(['monitor_id' => $tagged->id, 'tags' => ['vpn']]);
+
+        $other = Monitor::create(['data' => []]);
+
+        // Popula o cache da chamada SEM filtro primeiro.
+        $unfiltered = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all']);
+        $unfilteredIds = collect($unfiltered->json('data'))->pluck('id')->all();
+        $this->assertContains($tagged->id, $unfilteredIds);
+        $this->assertContains($other->id, $unfilteredIds);
+
+        // A chamada filtrada por tag não pode servir do cache acima.
+        $filtered = $this->callHandler(['action' => 'getMonitorQueue', 'group' => 'all', 'tag' => 'vpn']);
+        $filteredIds = collect($filtered->json('data'))->pluck('id')->all();
+        $this->assertContains($tagged->id, $filteredIds);
+        $this->assertNotContains($other->id, $filteredIds);
+    }
+
     public function test_rejects_unauthenticated_request(): void
     {
         $response = $this->postJson('/monitor/handler', ['action' => 'getMonitorQueue', 'group' => 'unclassified']);

@@ -1445,7 +1445,12 @@ makes on purpose (see the intro above).
   classification belongs to the `Monitor`. Params: `page`/`per_page` (same
   as `getIpMonitors`), `group` (required, `422` on anything outside
   `new`/`unclassified`/`all`/`clean`/`clean_bots`/`clean_humans` —
-  including the old `recheck`, removed in `0.55.0`, see below).
+  including the old `recheck`, removed in `0.55.0`, see below). Since
+  `0.69.0`: `date_from`/`date_to` (optional, filter by the Monitor's own
+  `created_at`, same convention as `getVisitorsByIp`) and `tag` (optional,
+  filters by `monitor_labels.tags`, same lowercase/trim normalization as
+  `getVisitorsByIp`'s `tag` param) — all combinable with any `group` and
+  with each other, and part of the cache key below.
   - `new`/`unclassified`: Monitors with no `kind` at all (no
     `monitor_labels` row, or one with `kind` null), split only by age:
     `new` (`created_at` newer than `ai_triage_min_age_hours`, config,

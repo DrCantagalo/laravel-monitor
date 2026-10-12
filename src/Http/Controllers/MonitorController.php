@@ -3167,12 +3167,22 @@ class MonitorController extends Controller
      * a definição de cada um. Response no mesmo shape enxuto de
      * `getIpMonitors`/`getUserMonitors` (via `hydrateMonitorRows`) em
      * todos os seis grupos.
+     *
+     * laravel-monitor 342: `date_from`/`date_to` (sobre `created_at` do
+     * Monitor, mesma convenção de `getVisitorsByIp`) e `tag` (sobre
+     * `monitor_labels.tags`, mesma normalização — minúsculo/trim — de
+     * `getVisitorsByIp`) são filtros opcionais, combináveis com qualquer
+     * `group`.
      */
     protected function getMonitorQueue(Request $request)
     {
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
         $group = (string) $request->input('group', 'unclassified');
+        $dateFrom = $request->input('date_from');
+        $dateTo = $request->input('date_to');
+        $tag = $request->input('tag');
+        $tag = is_string($tag) && $tag !== '' ? mb_strtolower(trim($tag)) : null;
 
         if (! in_array($group, self::MONITOR_QUEUE_GROUPS, true)) {
             return response()->json([
@@ -3185,7 +3195,7 @@ class MonitorController extends Controller
         // cutoff móvel (aiTriageCutoffBucket()) — incluído na chave só pra
         // esses dois grupos, pra nunca divergir de getMonitorQueueCounts
         // (ver aiTriageCutoffBucket()).
-        $cacheParams = [$page, $perPage, $group];
+        $cacheParams = [$page, $perPage, $group, $dateFrom, $dateTo, $tag];
 
         if (in_array($group, ['new', 'unclassified'], true)) {
             $cacheParams[] = $this->aiTriageCutoffBucket();
@@ -3194,16 +3204,28 @@ class MonitorController extends Controller
         $cacheKey = $this->listingsCacheKey('monitor-queue', $cacheParams);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
-        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $group) {
-            return $this->buildMonitorQueueResult($page, $perPage, $group);
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $group, $dateFrom, $dateTo, $tag) {
+            return $this->buildMonitorQueueResult($page, $perPage, $group, $dateFrom, $dateTo, $tag);
         });
 
         return response()->json(['success' => true] + $result);
     }
 
-    protected function buildMonitorQueueResult(int $page, int $perPage, string $group): array
+    protected function buildMonitorQueueResult(int $page, int $perPage, string $group, ?string $dateFrom = null, ?string $dateTo = null, ?string $tag = null): array
     {
         $query = Monitor::query();
+
+        if ($dateFrom) {
+            $query->where('created_at', '>=', $dateFrom);
+        }
+
+        if ($dateTo) {
+            $query->where('created_at', '<=', $dateTo);
+        }
+
+        if ($tag !== null) {
+            $query->whereHas('label', fn ($q) => $q->whereJsonContains('tags', $tag));
+        }
 
         switch ($group) {
             case 'new':

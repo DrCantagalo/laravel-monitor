@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.68.0',
+    'version' => '0.69.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
