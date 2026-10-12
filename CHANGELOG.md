@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.68.0] - 2026-10-12
+### Fixed
+- **`PathsAuditor` only excluded `Route::fallback()`, not catch-all routes
+  in general**: a real-world collision on ed.eco.br —
+  `Route::domain('www.vai.ed.eco.br')->any('{any?}', $redirect)->where('any', '.*')`
+  (a www → canonical domain redirect) — matched literally any path, and
+  since the audit intentionally ignores route domain (mirroring
+  `MonitorMethod::isPathBlocked()`), that one route "covered" every path
+  in every domain the installation serves. `isFallback` is only set for
+  `Route::fallback(...)`, so this normal catch-all route sailed through
+  unflagged, and the audit reported **115 of 117** `trap`/`safe` paths as
+  colliding with a real route. `PathsAuditor::compiledRoutes()` now also
+  detects a catch-all by behavior: each route's compiled regex is tested
+  against two random, essentially-impossible probe paths (one segment,
+  two segments — `bin2hex(random_bytes(8))`, generated once per
+  `audit()` call) and any route matching either is excluded, in addition
+  to the existing `isFallback` exclusion. A route with a restricted
+  parameter (e.g. `posts/{id}` with a numeric constraint) or a static
+  route is unaffected and still generates findings as before.
+
 ## [0.67.0] - 2026-10-11
 ### Fixed
 - **`Monitor::addTag()`/`addTags()` lost the tag on a brand-new visitor's

@@ -100,28 +100,72 @@ class PathsAuditor
      * standalone) - `toSymfonyRoute()->compile()` (público) força a
      * compilação sem depender disso.
      *
-     * Rotas de fallback (`Route::fallback(...)`, usada pela própria app
-     * consumidora pra deixar o path chegar até `MonitorMethod`) são
-     * excluídas de propósito: o regex delas casa literalmente qualquer
-     * path por design, o que tornaria a checagem (a) sempre positiva e
-     * inútil.
+     * Rotas catch-all são excluídas de propósito: o regex delas casa
+     * (quase) qualquer path, o que tornaria a checagem (a) sempre
+     * positiva e inútil. Duas formas de detectar isso, usadas juntas
+     * (laravel-monitor 339): `$route->isFallback` (flag explícita de
+     * `Route::fallback(...)`) e, pra pegar catch-all "normais" que não
+     * usam essa flag (ex: `Route::any('{any?}', ...)->where('any',
+     * '.*')`, usada em redirects de domínio - bug real visto no
+     * ed.eco.br, onde essa rota "cobria" os 117 paths de
+     * `monitor_paths`), testar o regex compilado de cada rota contra
+     * paths-sonda aleatórios (um de um segmento, um de dois,
+     * `bin2hex(random_bytes(8))` - gerados uma vez por chamada, não por
+     * rota) que não têm chance realista de bater em rota alguma por
+     * coincidência: qualquer rota cujo regex aceite esses paths é, por
+     * comportamento, um catch-all, com ou sem a flag.
      *
      * Domínio da rota é ignorado de propósito (não faz parte do regex de
      * path testado aqui) - o bloqueio em si também ignora host
      * (`MonitorMethod::isPathBlocked()`), então o audit precisa espelhar
      * exatamente essa mesma superfície de risco: "essa rota existe em
-     * qualquer domínio que a installation atende".
+     * qualquer domínio que a installation atende". Isso vale também pra
+     * detecção de catch-all por comportamento acima: uma rota com
+     * `domain()` que case os paths-sonda ainda é excluída, porque ela
+     * "cobre" paths em qualquer domínio do ponto de vista do bloqueio.
      */
     private static function compiledRoutes()
     {
+        $probes = self::catchAllProbePaths();
+
         return collect(Route::getRoutes())
             ->reject(fn ($route) => $route->isFallback)
             ->map(fn ($route) => [
                 'uri' => $route->uri(),
                 'regex' => $route->toSymfonyRoute()->compile()->getRegex(),
             ])
+            ->reject(fn ($route) => self::matchesAnyProbe($route['regex'], $probes))
             ->unique('uri')
             ->values();
+    }
+
+    /**
+     * Paths-sonda improváveis usados por `compiledRoutes()` pra detectar
+     * catch-all por comportamento: um de um segmento e um de dois, cada
+     * um com 16 hex bytes aleatórios - não têm chance realista de bater
+     * em rota real alguma (estática ou com parâmetro restrito), só em
+     * catch-all. Gerados uma vez por chamada de `audit()` (via
+     * `compiledRoutes()`), não recalculados por rota.
+     *
+     * @return array<int, string>
+     */
+    private static function catchAllProbePaths(): array
+    {
+        return [
+            '/'.bin2hex(random_bytes(8)),
+            '/'.bin2hex(random_bytes(8)).'/'.bin2hex(random_bytes(8)),
+        ];
+    }
+
+    private static function matchesAnyProbe(string $regex, array $probes): bool
+    {
+        foreach ($probes as $probe) {
+            if (@preg_match($regex, $probe) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
