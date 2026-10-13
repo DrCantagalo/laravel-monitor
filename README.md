@@ -20,21 +20,34 @@ blocked — see "Fail-safe against cache store outages" below.
 
 First-time setup is `composer require drcantagalo/laravel-monitor` followed
 by `php artisan monitor:install` (interactive: terms, publish
-config/migrations, migrate, register the installation). `monitor:install`
-is **not** meant to run again on every update — running it a second time
-would re-ask every prompt for a project that's already set up.
+config/migrations, migrate, main domain, register the installation).
+`monitor:install` is **not** meant to run again on every update — running it
+a second time would re-ask every prompt for a project that's already set up.
 
-**Dashboard is optional (since `0.31.0`)**: right before asking for the
-site URL, `monitor:install` asks whether you want to use the hosted
-dashboard/interface (monitor.cantagalo.it). Answering no skips the URL
-question and the remote registration entirely — no `local_token` is
-generated, and the package's public route (`/monitor/handler`) is never
+**Main domain (since `0.70.0`)**: right after the migration prompt (and
+before the dashboard question below), `monitor:install` asks for the site's
+main domain — plain text, with or without scheme/path/port, normalized down
+to a bare lowercase host (`www.` stripped too); an answer that doesn't look
+like a valid domain is rejected and asked again. Default is the host of
+`config('app.url')`. This is collected and persisted (`main_domain` in
+`storage/monitor/installation.json`) **regardless** of whether you use the
+hosted dashboard below, because it also drives local visitor-origin tagging
+— see "Visitor origin tagging" further down. If you do use the dashboard,
+the same value is reused as the `site_url` sent on registration (no separate
+URL question). Existing installations that predate this (e.g. upgrading from
+an older version) get asked the same question once, the next time
+`monitor:update` runs — see below.
+
+**Dashboard is optional (since `0.31.0`)**: `monitor:install` asks whether
+you want to use the hosted dashboard/interface (monitor.cantagalo.it).
+Answering no skips the remote registration entirely — no `local_token` is
+sent anywhere, and the package's public route (`/monitor/handler`) is never
 registered (`config('monitor.dashboard.enabled', true)`, checked in
 `MonitorServiceProvider::boot()`). You still get local tracking (the
-`Monitor` model, `monitor:audit-paths`, `monitor:export-denylist`, etc) —
-just nothing sent to or exposed for the SaaS dashboard. Default is `true`
-(yes), so existing installations that never rerun `monitor:install` keep
-working exactly as before.
+`Monitor` model, `monitor:audit-paths`, `monitor:export-denylist`, visitor
+origin tagging, etc) — just nothing sent to or exposed for the SaaS
+dashboard. Default is `true` (yes), so existing installations that never
+rerun `monitor:install` keep working exactly as before.
 
 Declining is guaranteed to take effect (since `0.35.0`): if
 `config/monitor.php` hasn't been published yet (you answered no to the
@@ -78,6 +91,12 @@ touching anything you've customized:
 - Warns about any key your published file still has that no longer
   exists in the current template — usually means it was removed or
   renamed in a breaking change (check `CHANGELOG.md`).
+
+Also asks for the site's main domain (since `0.70.0`), same question/
+default/normalization as `monitor:install` above, but **only** if
+`storage/monitor/installation.json` doesn't have `main_domain` yet — this
+is how an installation done before `0.70.0` migrates. Once the key exists,
+later runs never ask again.
 
 Always safe to run again — it's idempotent (a second run with no new
 package version is a no-op).
@@ -1604,13 +1623,27 @@ Detection order, first match wins, none matching means no tag at all:
    `ttclid` → `tiktok`, `li_fat_id` → `linkedin`, `twclid` → `twitter`.
 3. **`Referer` domain**, via `config('monitor.origin_referer_domains')`
    (extensible, wildcards like `"google.*"` accepted): a mapped domain →
-   its fixed source; a `Referer` pointing at your **own** site (same
-   host) → ignored, it's not an origin; any other domain → the raw
-   registrable domain (e.g. `example.com`). The registrable-domain
-   fallback is a simple "last two labels" heuristic with no public-suffix
-   list, so a two-part TLD like `.co.uk`/`.com.br` yields just that
-   suffix instead of the full domain — a known, accepted limitation (the
-   worst case is a slightly odd tag, never an error).
+   its fixed source; a `Referer` pointing at your **own** site → ignored,
+   it's not an origin; any other domain → the raw registrable domain
+   (e.g. `example.com`). The registrable-domain fallback is a simple
+   "last two labels" heuristic with no public-suffix list, so a two-part
+   TLD like `.co.uk`/`.com.br` yields just that suffix instead of the
+   full domain — a known, accepted limitation (the worst case is a
+   slightly odd tag, never an error).
+
+**What counts as "your own site" (since `0.70.0`)**: the main domain
+collected by `monitor:install`/`monitor:update` (`main_domain` in
+`storage/monitor/installation.json`, see "Updating" above) **and any
+subdomain of it** — so a visit on `app.example.com` with a `Referer` from
+`example.com`, or vice-versa, is correctly recognized as internal
+navigation either way. Installations that haven't been asked yet (no
+`main_domain` key — run `monitor:update` to migrate) fall back to the
+*current* request's host and its subdomains, which only catches
+same-direction navigation (landing on the same host the Referer points
+at, or a subdomain of it) — it deliberately never falls back to the
+"last two labels" shortcut above, which on a `.com.br`/`.co.uk` site would
+silently swallow every Referer under that same composite suffix as
+"internal", hiding real external traffic.
 
 `utm_source`/`lm` is free text coming straight from the visitor: the
 value is lowercased, restricted to `[a-z0-9._-]`, and run through

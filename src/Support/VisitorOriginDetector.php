@@ -25,6 +25,17 @@ use Illuminate\Support\Str;
  *    "google.*") → fonte fixa; domínio do PRÓPRIO site → ignorado (não
  *    é origem); qualquer outro domínio → o domínio registrável cru (ver
  *    `registrableDomain()`).
+ *
+ * "Próprio site" (passo 3) é `main_domain` **e qualquer subdomínio
+ * dele** — gravado em `installation.json` por `monitor:install`/
+ * `monitor:update` (task 345) e exposto em runtime como
+ * `config('monitor.main_domain')` por `MonitorServiceProvider::boot()`,
+ * que já lê o arquivo uma vez por request (mesmo mecanismo de
+ * `monitor.local_token`). Sem essa chave (install antigo ou arquivo
+ * ausente) → fallback pro host da própria request e subdomínios dele,
+ * NUNCA os 2 últimos labels (`registrableDomain()`): num site
+ * `.com.br`/`.co.uk` isso faria todo referer do mesmo sufixo composto
+ * virar "próprio site" e sumir em silêncio.
  */
 class VisitorOriginDetector
 {
@@ -80,10 +91,8 @@ class VisitorOriginDetector
             return null;
         }
 
-        // Referer do próprio site não é origem — nunca gera tag.
-        $ownHost = $this->stripWww(strtolower((string) $request->getHost()));
-
-        if ($host === $ownHost) {
+        // Referer do próprio site (ou subdomínio dele) não é origem — nunca gera tag.
+        if ($this->isOwnSite($host, $request)) {
             return null;
         }
 
@@ -99,6 +108,28 @@ class VisitorOriginDetector
     protected function stripWww(string $host): string
     {
         return preg_replace('/^www\./', '', $host) ?? $host;
+    }
+
+    /**
+     * Ver docblock da classe pra regra completa. `$host` já chega aqui
+     * sem "www." (ver `detectFromReferer()`).
+     */
+    protected function isOwnSite(string $host, Request $request): bool
+    {
+        $base = $this->ownSiteBase($request);
+
+        return $host === $base || Str::endsWith($host, '.'.$base);
+    }
+
+    protected function ownSiteBase(Request $request): string
+    {
+        $mainDomain = config('monitor.main_domain');
+
+        if (is_string($mainDomain) && $mainDomain !== '') {
+            return $this->stripWww(strtolower($mainDomain));
+        }
+
+        return $this->stripWww(strtolower((string) $request->getHost()));
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace Drcantagalo\LaravelMonitor\Console\Commands;
 
 use Composer\InstalledVersions;
+use Drcantagalo\LaravelMonitor\Support\DomainNormalizer;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 
@@ -41,6 +42,8 @@ class MonitorUpdateCommand extends Command
             'removed_keys' => 'Keys present in your config but removed/renamed in the current package template (check the CHANGELOG):',
             'pending_migrations' => 'Package migrations not yet applied:',
             'confirm_migrate' => 'Can we run the pending migrations now?',
+            'ask_main_domain' => "Enter your site's main domain, without scheme (e.g., example.com). Any subdomain of it (e.g., app.example.com) is treated as part of your own site, never as a referral source.",
+            'invalid_domain' => "That doesn't look like a valid domain. Please try again.",
         ],
         'it' => [
             'not_published' => "config/monitor.php non è pubblicato in questo progetto. Esegui prima 'php artisan vendor:publish --tag=monitor-config'.",
@@ -53,6 +56,8 @@ class MonitorUpdateCommand extends Command
             'removed_keys' => 'Chiavi presenti nella tua config ma rimosse/rinominate nel template attuale del pacchetto (controlla il CHANGELOG):',
             'pending_migrations' => 'Migrazioni del pacchetto ancora non applicate:',
             'confirm_migrate' => 'Possiamo eseguire ora le migrazioni pendenti?',
+            'ask_main_domain' => 'Inserisci il dominio principale del tuo sito, senza schema (es: example.com). Qualsiasi sottodominio (es: app.example.com) verrà considerato parte del tuo sito, non come fonte di referral.',
+            'invalid_domain' => 'Non sembra un dominio valido. Riprova.',
         ],
         'pt' => [
             'not_published' => "config/monitor.php não está publicado neste projeto. Rode 'php artisan vendor:publish --tag=monitor-config' primeiro.",
@@ -65,6 +70,8 @@ class MonitorUpdateCommand extends Command
             'removed_keys' => 'Chaves presentes na sua config mas removidas/renomeadas no template atual do pacote (confira o CHANGELOG):',
             'pending_migrations' => 'Migrations do pacote ainda não aplicadas:',
             'confirm_migrate' => 'Podemos rodar as migrations pendentes agora?',
+            'ask_main_domain' => 'Informe o domínio principal do seu site, sem o esquema (ex: meusite.com). Qualquer subdomínio dele (ex: app.meusite.com) será tratado como parte do mesmo site, nunca como origem de referência.',
+            'invalid_domain' => 'Isso não parece um domínio válido. Tente novamente.',
         ],
     ];
 
@@ -73,6 +80,7 @@ class MonitorUpdateCommand extends Command
     public function handle(): int
     {
         $this->lang = $this->resolveLang();
+        $this->ensureMainDomain();
 
         $publishedPath = config_path('monitor.php');
         $templatePath = __DIR__.'/../../config/monitor.php';
@@ -176,6 +184,45 @@ class MonitorUpdateCommand extends Command
     protected function t(string $key): string
     {
         return $this->translations[$this->lang][$key];
+    }
+
+    /**
+     * task 345: migra installs existentes (ex: cantagalo.it, ed.eco.br)
+     * que nunca ganharam `main_domain` porque foram instaladas antes
+     * dessa chave existir - mesma pergunta/default/normalização de
+     * `MonitorInstallCommand::askMainDomain()`. Não pergunta de novo se a
+     * chave já existe (comando roda repetido a cada `composer update`).
+     */
+    protected function ensureMainDomain(): void
+    {
+        $configFile = storage_path('monitor/installation.json');
+        $config = File::exists($configFile) ? (json_decode(File::get($configFile), true) ?? []) : [];
+
+        $current = $config['main_domain'] ?? null;
+
+        if (is_string($current) && $current !== '') {
+            return;
+        }
+
+        $default = (string) (parse_url((string) config('app.url'), PHP_URL_HOST) ?? '');
+
+        do {
+            $answer = $this->ask($this->t('ask_main_domain'), $default !== '' ? $default : null);
+            $normalized = DomainNormalizer::normalize($answer);
+
+            if ($normalized === null) {
+                $this->warn($this->t('invalid_domain'));
+            }
+        } while ($normalized === null);
+
+        $config['main_domain'] = $normalized;
+
+        $storagePath = storage_path('monitor');
+        if (! File::exists($storagePath)) {
+            File::makeDirectory($storagePath, 0755, true);
+        }
+
+        File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
     }
 
     /**

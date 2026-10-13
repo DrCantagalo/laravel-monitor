@@ -24,17 +24,23 @@ class MonitorServiceProvider extends ServiceProvider
     {
         $jsonPath = storage_path('monitor/installation.json');
 
-        // installation.json (escrito por MonitorInstallCommand) guarda 5
-        // campos, mas só local_token é lido de volta em algum lugar do
-        // pacote (MonitorController::handle(), pra autenticar chamadas do
-        // dashboard) — os outros 4 (installation_hash/external_token/
+        // installation.json (escrito por MonitorInstallCommand) guarda 6
+        // campos, mas só local_token (MonitorController::handle(), pra
+        // autenticar chamadas do dashboard) e, desde a task 345,
+        // main_domain (VisitorOriginDetector::ownSiteBase() — domínio
+        // principal do site + subdomínios dele = "próprio site", nunca
+        // origem de referer) são lidos de volta em algum lugar do pacote
+        // — os outros 4 (installation_hash/external_token/
         // installation_code/installed_at) continuam só no arquivo, sem
-        // custo de reprocessar em todo boot sem consumidor.
+        // custo de reprocessar em todo boot sem consumidor. Ler aqui (uma
+        // vez por boot = uma vez por request nos setups tradicionais)
+        // evita reabrir o arquivo a cada chamada de detect().
         if (file_exists($jsonPath)) {
             $data = json_decode(file_get_contents($jsonPath), true);
 
             config([
                 'monitor.local_token' => $data['local_token'] ?? null,
+                'monitor.main_domain' => $data['main_domain'] ?? null,
             ]);
         }
 

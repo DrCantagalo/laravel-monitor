@@ -56,6 +56,11 @@ class VisitorOriginTaggingTest extends TestCase
         return Request::create('/landing', 'GET', $query, [], [], ['HTTP_REFERER' => $referer]);
     }
 
+    protected function requestWithHostAndReferer(string $host, string $referer): Request
+    {
+        return Request::create('https://'.$host.'/landing', 'GET', [], [], [], ['HTTP_REFERER' => $referer]);
+    }
+
     // --- Ordem de detecção ---------------------------------------------
 
     public function test_detect_returns_null_when_nothing_matches(): void
@@ -210,6 +215,63 @@ class VisitorOriginTaggingTest extends TestCase
         $request = Request::create('/landing', 'GET', ['utm_source' => 'linkedin']);
 
         $this->assertNull($this->detector()->detect($request));
+    }
+
+    // --- main_domain (task 345): subdomínios do próprio site --------------
+
+    public function test_referer_from_a_subdomain_of_the_configured_main_domain_is_ignored(): void
+    {
+        config(['monitor.main_domain' => 'ed.eco.br']);
+
+        $request = $this->requestWithHostAndReferer('app.ed.eco.br', 'https://vai.ed.eco.br/previous-page');
+
+        $this->assertNull($this->detector()->detect($request));
+    }
+
+    public function test_referer_from_the_main_domain_itself_is_ignored_from_any_subdomain(): void
+    {
+        config(['monitor.main_domain' => 'ed.eco.br']);
+
+        $request = $this->requestWithHostAndReferer('app.ed.eco.br', 'https://ed.eco.br/previous-page');
+
+        $this->assertNull($this->detector()->detect($request));
+    }
+
+    public function test_referer_from_an_external_domain_is_still_tagged_with_main_domain_configured(): void
+    {
+        config(['monitor.main_domain' => 'ed.eco.br']);
+
+        $request = $this->requestWithHostAndReferer('app.ed.eco.br', 'https://blog.example.com/post-1');
+
+        $this->assertSame('example.com', $this->detector()->detect($request));
+    }
+
+    /**
+     * Sem `main_domain` configurado (install antigo, ainda não migrado
+     * por `monitor:update`), o fallback é o host da própria request e
+     * subdomínios dele - cobre o caso em que o referer vem exatamente do
+     * host que a request está servindo, de qualquer direção.
+     */
+    public function test_without_main_domain_falls_back_to_the_request_host_and_its_subdomains(): void
+    {
+        $request = $this->requestWithHostAndReferer('ed.eco.br', 'https://vai.ed.eco.br/previous-page');
+
+        $this->assertNull($this->detector()->detect($request));
+    }
+
+    /**
+     * Bug original da task 345: sem `main_domain`, um referer de um
+     * subdomínio IRMÃO (nem igual ao host da request, nem subdomínio
+     * dele) continua caindo no fallback de `registrableDomain()` (últimos
+     * 2 labels) e gerando tag - só migrar (`monitor:update` -> grava
+     * `main_domain`) corrige esse caso. Documenta o antes/depois, não é
+     * um bug novo sendo introduzido aqui.
+     */
+    public function test_without_main_domain_a_sibling_subdomain_is_still_tagged_via_registrable_domain(): void
+    {
+        $request = $this->requestWithHostAndReferer('app.ed.eco.br', 'https://vai.ed.eco.br/previous-page');
+
+        $this->assertSame('eco.br', $this->detector()->detect($request));
     }
 
     // --- Integração: SessionVisitorTracker ------------------------------

@@ -2,6 +2,7 @@
 
 namespace Drcantagalo\LaravelMonitor\Console\Commands;
 
+use Drcantagalo\LaravelMonitor\Support\DomainNormalizer;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
@@ -22,8 +23,9 @@ class MonitorInstallCommand extends Command
             'pub_config' => 'Can we publish the package configuration archive? (If not, you will need to publish it manually later).',
             'pub_migration' => 'Can we publish the package migration archive? (If not, you will need to publish it manually later).',
             'migrate' => "Can we migrate the package's Eloquent model to your database? (If not, you will need to migrate it manually later).",
+            'ask_main_domain' => "Enter your site's main domain, without scheme (e.g., example.com). Any subdomain of it (e.g., app.example.com) is treated as part of your own site, never as a referral source.",
+            'invalid_domain' => "That doesn't look like a valid domain. Please try again.",
             'use_dashboard' => 'Do you want to use the hosted dashboard/interface (monitor.cantagalo.it)? (If not, the package still tracks locally, but its public route/registration are skipped).',
-            'ask_url' => 'Enter your site URL (e.g., https://example.com)',
             'hash_found' => 'Existing installation configuration found.',
             'hash_created' => 'New installation configuration created.',
             'gitignore' => 'Would you like to add storage/monitor/installation.json to your .gitignore?',
@@ -40,8 +42,9 @@ class MonitorInstallCommand extends Command
             'pub_config' => "Possiamo pubblicare l'archivio di configurazione del pacchetto? (In caso contrario, sarà necessario pubblicarlo manualmente in seguito).",
             'pub_migration' => "Possiamo pubblicare l'archivio di migrazione del pacchetto? (In caso contrario, sarà necessario pubblicarlo manualmente in seguito).",
             'migrate' => 'Possiamo migrare il modello Eloquent del pacchetto nel tuo database? (In caso contrario, dovrai migrarlo manualmente in seguito).',
+            'ask_main_domain' => 'Inserisci il dominio principale del tuo sito, senza schema (es: example.com). Qualsiasi sottodominio (es: app.example.com) verrà considerato parte del tuo sito, non come fonte di referral.',
+            'invalid_domain' => 'Non sembra un dominio valido. Riprova.',
             'use_dashboard' => 'Vuoi usare la dashboard/interfaccia ospitata (monitor.cantagalo.it)? (In caso contrario, il pacchetto continua a tracciare localmente, ma la rotta pubblica/registrazione vengono saltate).',
-            'ask_url' => "Inserisci l'URL del tuo sito (es: https://example.com)",
             'hash_found' => 'Trovata configurazione di installazione esistente.',
             'hash_created' => 'Nuova configurazione di installazione creata.',
             'gitignore' => 'Vuoi aggiungere storage/monitor/installation.json al tuo file .gitignore?',
@@ -58,8 +61,9 @@ class MonitorInstallCommand extends Command
             'pub_config' => 'Podemos publicar o arquivo de configuração do pacote? (Caso contrário, você precisará publicá-lo manualmente mais tarde).',
             'pub_migration' => 'Podemos publicar o arquivo de migração do pacote? (Caso contrário, você precisará publicá-lo manualmente mais tarde).',
             'migrate' => 'Podemos migrar o modelo Eloquent do pacote para o seu banco de dados? (Caso contrário, você precisará migrá-lo manualmente mais tarde).',
+            'ask_main_domain' => 'Informe o domínio principal do seu site, sem o esquema (ex: meusite.com). Qualquer subdomínio dele (ex: app.meusite.com) será tratado como parte do mesmo site, nunca como origem de referência.',
+            'invalid_domain' => 'Isso não parece um domínio válido. Tente novamente.',
             'use_dashboard' => 'Você quer usar a interface/dashboard hospedado (monitor.cantagalo.it)? (Caso contrário, o pacote continua rastreando localmente, mas a rota pública e o registro são pulados).',
-            'ask_url' => 'Informe a URL pública do seu site (ex: https://meusite.com)',
             'hash_found' => 'Configuração de instalação existente encontrada.',
             'hash_created' => 'Nova configuração de instalação criada.',
             'gitignore' => 'Deseja adicionar o arquivo storage/monitor/installation.json ao seu .gitignore?',
@@ -107,17 +111,13 @@ class MonitorInstallCommand extends Command
             $this->call('migrate');
         }
 
-        $useDashboard = $this->confirm($t('use_dashboard'), true);
-
-        if (! $this->persistDashboardEnabled($useDashboard) && ! $useDashboard) {
-            $this->warn($t('dashboard_not_persisted'));
-        }
-
-        if (! $useDashboard) {
-            return 0;
-        }
-
-        $siteUrl = $this->ask($t('ask_url'));
+        // task 345: domínio principal do site, perguntado ANTES do
+        // dashboard porque `main_domain` alimenta o runtime
+        // (VisitorOriginDetector, via config('monitor.main_domain'))
+        // independente de o dashboard hospedado estar ligado ou não — e
+        // porque o mesmo valor substitui a antiga pergunta separada de
+        // URL (`ask_url`), usada só se o dashboard fosse aceito.
+        $mainDomain = $this->askMainDomain($t);
 
         $storagePath = storage_path('monitor');
         if (! File::exists($storagePath)) {
@@ -128,8 +128,8 @@ class MonitorInstallCommand extends Command
 
         if (File::exists($configFile)) {
             $config = json_decode(File::get($configFile), true);
-            $installationHash = $config['installation_hash'];
-            $localToken = $config['local_token'];
+            $installationHash = $config['installation_hash'] ?? hash('sha256', config('app.key').Str::uuid());
+            $localToken = $config['local_token'] ?? Str::random(64);
             $this->info($t('hash_found'));
         } else {
             $installationHash = hash('sha256', config('app.key').Str::uuid());
@@ -142,10 +142,13 @@ class MonitorInstallCommand extends Command
             $this->info($t('hash_created'));
         }
 
-        // Persistido pra monitor:update ler sem perguntar de novo a cada
-        // execução (comando repetido, ao contrário deste, que roda uma vez
-        // só) - ver MonitorUpdateCommand::resolveLang().
+        // lang: persistido pra monitor:update ler sem perguntar de novo a
+        // cada execução (comando repetido, ao contrário deste, que roda
+        // uma vez só) - ver MonitorUpdateCommand::resolveLang().
+        // main_domain: sempre gravado aqui, independente do dashboard -
+        // ver comentário acima de askMainDomain().
         $config['lang'] = $this->lang;
+        $config['main_domain'] = $mainDomain;
         File::put($configFile, json_encode($config, JSON_PRETTY_PRINT));
 
         $gitignore = $this->confirm($t('gitignore'), true);
@@ -160,12 +163,22 @@ class MonitorInstallCommand extends Command
             }
         }
 
+        $useDashboard = $this->confirm($t('use_dashboard'), true);
+
+        if (! $this->persistDashboardEnabled($useDashboard) && ! $useDashboard) {
+            $this->warn($t('dashboard_not_persisted'));
+        }
+
+        if (! $useDashboard) {
+            return 0;
+        }
+
         $this->info($t('checking'));
 
         $response = Http::post('https://monitor.cantagalo.it/api/registerinstallation', [
             'lang' => $this->lang,
             'installation_hash' => $installationHash,
-            'site_url' => $siteUrl,
+            'site_url' => $mainDomain,
             'package_version' => config('monitor.version'),
             'sanctum_token' => $localToken,
         ]);
@@ -187,6 +200,28 @@ class MonitorInstallCommand extends Command
         }
 
         return 0;
+    }
+
+    /**
+     * Default = host de `config('app.url')`, pra quem não quer pensar e
+     * só confirmar o que o Laravel já conhece. Loop até normalizar com
+     * sucesso (`DomainNormalizer::normalize()`) - nunca grava um valor
+     * que o runtime usaria pra sempre a partir daí sem poder validar.
+     */
+    protected function askMainDomain(callable $t): string
+    {
+        $default = (string) (parse_url((string) config('app.url'), PHP_URL_HOST) ?? '');
+
+        while (true) {
+            $answer = $this->ask($t('ask_main_domain'), $default !== '' ? $default : null);
+            $normalized = DomainNormalizer::normalize($answer);
+
+            if ($normalized !== null) {
+                return $normalized;
+            }
+
+            $this->warn($t('invalid_domain'));
+        }
     }
 
     /**

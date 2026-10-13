@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.70.0] - 2026-10-13
+### Fixed
+- **Visitor origin tagging treated the own site's subdomains as external
+  referral traffic**: `detectFromReferer()` compared the `Referer` host
+  against only the *current* request's host, so a visit landing on one
+  subdomain with a `Referer` from a different subdomain of the same site
+  (e.g. `ed.eco.br` ↔ `vai.ed.eco.br` ↔ `app.ed.eco.br`) fell through to
+  `registrableDomain()`'s "last two labels" heuristic and got tagged as
+  an external source (`eco.br`) instead of being ignored as internal
+  navigation.
+### Added
+- **`monitor:install` asks for the site's main domain**, right before the
+  dashboard question (so it's collected regardless of whether the hosted
+  dashboard is used) — default is the host of `config('app.url')`,
+  normalized (scheme/`www.`/path/port stripped, lowercased) and
+  validated, re-asking on an invalid answer. Persisted as `main_domain`
+  in `storage/monitor/installation.json`, and reused as the `site_url`
+  sent to `registerinstallation` (one question instead of two). `monitor
+  :update` asks the same question, once, for any installation missing
+  the key (how existing installs migrate).
+- **"Own site" is now `main_domain` and any subdomain of it** (not just
+  the current request's exact host) — read once per request via
+  `config('monitor.main_domain')`, set in `MonitorServiceProvider::boot()`
+  the same way `monitor.local_token` already is. Installations without
+  the key (not yet migrated via `monitor:update`) fall back to the
+  current request's host and its subdomains — **never** the old "last
+  two labels" shortcut, which would have silently swallowed every
+  referer under the same composite suffix (`.com.br`, `.co.uk`, ...) on
+  a site using one of those TLDs.
+
 ## [0.69.0] - 2026-10-12
 ### Added
 - **`getMonitorQueue` accepts `date_from`/`date_to`/`tag` filters**:
