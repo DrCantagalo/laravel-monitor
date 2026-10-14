@@ -20,6 +20,7 @@ use Drcantagalo\LaravelMonitor\Support\ListingsCache;
 use Drcantagalo\LaravelMonitor\Support\MonitorCategories;
 use Drcantagalo\LaravelMonitor\Support\PathsAuditor;
 use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -1363,6 +1364,11 @@ class MonitorController extends Controller
         $tag = is_string($tag) && $tag !== '' ? mb_strtolower(trim($tag)) : null;
         $kind = $request->input('kind');
         $kind = in_array($kind, MonitorLabel::KINDS, true) ? $kind : null;
+        // laravel-monitor 350 (v0.71.0): default false preserva o
+        // comportamento de antes da 350 pra quem não manda o parâmetro —
+        // IPs sem nenhum Monitor atual (típico depois de um prune) somem
+        // da lista por padrão, ver buildVisitorsResult().
+        $includeWithoutMonitors = $request->boolean('include_without_monitors', false);
 
         if (! in_array($filter, self::VISITORS_FILTERS, true)) {
             return response()->json([
@@ -1372,12 +1378,12 @@ class MonitorController extends Controller
         }
 
         $cacheKey = $this->listingsCacheKey('visitors', [
-            $page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind,
+            $page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors,
         ]);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
-        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind) {
-            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind);
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors) {
+            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors);
         });
 
         return response()->json(['success' => true] + $result);
@@ -1405,8 +1411,27 @@ class MonitorController extends Controller
      * dedicada; `flagged` continua existindo pra quem quiser garimpar.
      * Desde a task 142: `filter=blocked` não parte mais de `IpStat`, ver
      * `buildBlockedVisitorsResult()`.
+     *
+     * laravel-monitor 350 (v0.71.0): `visits` (campo novo, vira a
+     * ordenação padrão) é DERIVADO dos Monitors ATUAIS daquele IP — soma
+     * do `visits_count` que `getIpMonitors`/`hydrateMonitorRows` já
+     * expõe por Monitor (`COUNT` de `monitor_visits`), agregada por
+     * `monitor_visit_ips.ip` via `visitsAggregateSubquery()`. Junta com
+     * `LEFT JOIN` (não `INNER`) pra não perder IPs com Monitor mas sem
+     * nenhuma visita de sessão ainda (`visits = 0`, ip presente).
+     * `monitor_ip_stats.visit_count` (o vitalício, nunca decrementado —
+     * ver README "Per-IP stats") sobrevive na resposta como
+     * `lifetime_visits`, e, deprecated, ainda como `visit_count` (pra não
+     * quebrar consumidores antes do bump do `home-page`/`ed.eco.br`).
+     * `include_without_monitors` (default `false`) decide se um IP sem
+     * NENHUM Monitor atual (ausente de `monitor_visit_ips` — típico
+     * depois de um `prune`/delete) aparece com `visits = 0` ou
+     * simplesmente some da lista; qualquer `ip` usado em
+     * `where`/`whereIn` daqui pra baixo precisa do prefixo
+     * `monitor_ip_stats.` por causa do join — `monitor_visits_agg`
+     * também tem uma coluna `ip`.
      */
-    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null): array
+    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null, bool $includeWithoutMonitors = false): array
     {
         if ($filter === 'blocked') {
             return $this->buildBlockedVisitorsResult($page, $perPage, $dateFrom, $dateTo, $tag, $kind);
@@ -1443,8 +1468,8 @@ class MonitorController extends Controller
             // whereNotIn($blockedIps): um IP já bloqueado já foi
             // confirmado como scraper, não deve reaparecer na fila de
             // "possível" (task 91).
-            'flagged' => $query->where('flagged', true)->whereNotIn('ip', $blockedIps),
-            'clean' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps),
+            'flagged' => $query->where('flagged', true)->whereNotIn('monitor_ip_stats.ip', $blockedIps),
+            'clean' => $query->where('flagged', false)->whereNotIn('monitor_ip_stats.ip', $blockedIps),
             // laravel-monitor 239 (v0.49.0) — sub-filtros de 'clean' pelo
             // kind derivado: 'bot'/'human' exigem que NENHUM Monitor do IP
             // tenha o kind oposto (um IP com Monitors divergentes é
@@ -1452,38 +1477,62 @@ class MonitorController extends Controller
             // derivedLabelsForIps()). `clean_ai_queue` removido na 258
             // (v0.53.0) — a fila da IA passou a ser por Monitor, ver
             // `getMonitorQueue`.
-            'clean_bots' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
-                ->whereIn('ip', $botIps->diff($humanIps)),
-            'clean_humans' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
-                ->whereIn('ip', $humanIps->diff($botIps)),
-            'clean_unclassified' => $query->where('flagged', false)->whereNotIn('ip', $blockedIps)
-                ->whereNotIn('ip', $botIps->merge($humanIps)->unique()),
+            'clean_bots' => $query->where('flagged', false)->whereNotIn('monitor_ip_stats.ip', $blockedIps)
+                ->whereIn('monitor_ip_stats.ip', $botIps->diff($humanIps)),
+            'clean_humans' => $query->where('flagged', false)->whereNotIn('monitor_ip_stats.ip', $blockedIps)
+                ->whereIn('monitor_ip_stats.ip', $humanIps->diff($botIps)),
+            'clean_unclassified' => $query->where('flagged', false)->whereNotIn('monitor_ip_stats.ip', $blockedIps)
+                ->whereNotIn('monitor_ip_stats.ip', $botIps->merge($humanIps)->unique()),
             default => null,
         };
 
         if ($kind !== null && ! in_array($filter, ['clean_bots', 'clean_humans'], true)) {
-            $query->whereIn('ip', $kind === 'bot' ? $botIps->diff($humanIps) : $humanIps->diff($botIps));
+            $query->whereIn('monitor_ip_stats.ip', $kind === 'bot' ? $botIps->diff($humanIps) : $humanIps->diff($botIps));
         }
 
         if ($tag !== null) {
-            $query->whereIn('ip', $this->ipsWithMonitorTag($tag));
+            $query->whereIn('monitor_ip_stats.ip', $this->ipsWithMonitorTag($tag));
+        }
+
+        $query->leftJoinSub(
+            $this->visitsAggregateSubquery(),
+            'monitor_visits_agg',
+            'monitor_visits_agg.ip', '=', 'monitor_ip_stats.ip'
+        );
+
+        if (! $includeWithoutMonitors) {
+            // só IPs com pelo menos um Monitor atual — sem isso, um
+            // prune/delete de Monitor nunca remove o IP desta lista, só
+            // zera o número exibido (caso original da 350: 148 IPs com
+            // stats, só 15 com algum Monitor depois do prune).
+            $query->whereNotNull('monitor_visits_agg.ip');
         }
 
         $paginator = $query
+            ->select([
+                'monitor_ip_stats.ip', 'monitor_ip_stats.visit_count', 'monitor_ip_stats.first_seen',
+                'monitor_ip_stats.last_seen', 'monitor_ip_stats.flagged', 'monitor_ip_stats.flagged_signals',
+            ])
+            ->selectRaw('COALESCE(monitor_visits_agg.visits, 0) as visits')
             // flagged=true primeiro (fila de revisão real), resto depois
-            // — dentro de cada grupo, desempata por visit_count desc,
-            // igual antes da task 80. CASE WHEN em vez de orderByRaw por
-            // coluna booleana: nem MySQL nem SQLite deixam ordenar direto
-            // por uma expressão booleana sem isso.
-            ->orderByRaw('CASE WHEN flagged = 1 THEN 0 ELSE 1 END')
-            ->orderByDesc('visit_count')
-            ->paginate($perPage, ['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'], 'page', $page);
+            // — dentro de cada grupo, desempata por `visits` (Monitors
+            // atuais) desc, não mais pelo vitalício. CASE WHEN em vez de
+            // orderByRaw por coluna booleana: nem MySQL nem SQLite deixam
+            // ordenar direto por uma expressão booleana sem isso.
+            ->orderByRaw('CASE WHEN monitor_ip_stats.flagged = 1 THEN 0 ELSE 1 END')
+            ->orderByDesc(DB::raw('COALESCE(monitor_visits_agg.visits, 0)'))
+            ->paginate($perPage, ['*'], 'page', $page);
 
         $labels = $this->derivedLabelsForIps(collect($paginator->items())->pluck('ip'));
 
-        $items = collect($paginator->items())->map(function (IpStat $stat) use ($blockedIps, $labels) {
+        $items = collect($paginator->items())->map(function ($stat) use ($blockedIps, $labels) {
             return [
                 'ip' => $stat->ip,
+                'visits' => (int) $stat->visits,
+                'lifetime_visits' => $stat->visit_count,
+                // Deprecated desde a 350 (v0.71.0) — manter até o bump do
+                // home-page/ed.eco.br, ver README "Paginated visitor/
+                // blocklist listing".
                 'visit_count' => $stat->visit_count,
                 'first_seen' => optional($stat->first_seen)->toIso8601String(),
                 'last_seen' => optional($stat->last_seen)->toIso8601String(),
@@ -1573,13 +1622,24 @@ class MonitorController extends Controller
             ? collect()
             : IpStat::whereIn('ip', $ips)->get(['ip', 'visit_count', 'first_seen', 'last_seen', 'flagged', 'flagged_signals'])->keyBy('ip');
 
+        // laravel-monitor 350 (v0.71.0): mesma soma derivada de
+        // buildVisitorsResult() (visits_count de getIpMonitors agregado
+        // por IP), só que resolvida por whereIn em vez de leftJoinSub —
+        // esta aba já pagina a partir de BlockedIp, não de IpStat, então
+        // não há query principal pra juntar; dataset da página é pequeno
+        // (perPage <= 100 ips), mesmo padrão de $ipStats acima.
+        $visits = $ips->isEmpty() ? collect() : $this->visitsAggregateSubquery()->whereIn('mvi.ip', $ips)->pluck('visits', 'ip');
+
         $labels = $this->derivedLabelsForIps($ips);
 
-        $items = collect($paginator->items())->map(function (BlockedIp $blocked) use ($ipStats, $labels) {
+        $items = collect($paginator->items())->map(function (BlockedIp $blocked) use ($ipStats, $visits, $labels) {
             $stat = $ipStats->get($blocked->ip);
 
             return [
                 'ip' => $blocked->ip,
+                'visits' => (int) ($visits->get($blocked->ip) ?? 0),
+                'lifetime_visits' => $stat?->visit_count,
+                // Deprecated desde a 350 (v0.71.0), ver buildVisitorsResult().
                 'visit_count' => $stat?->visit_count,
                 'first_seen' => optional($stat?->first_seen)->toIso8601String(),
                 'last_seen' => optional($stat?->last_seen)->toIso8601String(),
@@ -1603,6 +1663,37 @@ class MonitorController extends Controller
                 'last_page' => $paginator->lastPage(),
             ],
         ];
+    }
+
+    /**
+     * laravel-monitor 350 (v0.71.0): "visitas" por IP DERIVADAS dos
+     * Monitors ATUAIS vistos naquele IP — mesma contagem que
+     * `hydrateMonitorRows()` já expõe por Monitor (`visits_count`,
+     * `COUNT` de `monitor_visits`), só que somada por IP via
+     * `monitor_visit_ips`. `LEFT JOIN` (não `INNER`): um Monitor atual
+     * sem nenhuma linha em `monitor_visits` ainda (ex: só visto por
+     * `AnonymousVisitorTracker`, que nunca grava `monitor_visits` — ver
+     * `Support\VisitRecorder`) deve contar como `0`, não desaparecer da
+     * agregação. Resultado: uma linha por IP presente em
+     * `monitor_visit_ips` (nunca por IP ausente dela — quem chama decide
+     * o que fazer com um IP que não aparece aqui, ver
+     * `include_without_monitors` em `buildVisitorsResult()`).
+     *
+     * Índices já existentes cobrem o join sem migration nova:
+     * `monitor_visit_ips.ip` (indexada) e `.monitor_id` (parte da unique
+     * `[monitor_id, ip]`), `monitor_visits.monitor_id` (índice implícito
+     * da foreign key, mesmo que já sustenta o `groupBy('monitor_id')` de
+     * `hydrateMonitorRows()` sem índice dedicado).
+     *
+     * @return Builder
+     */
+    protected function visitsAggregateSubquery()
+    {
+        return DB::table('monitor_visit_ips as mvi')
+            ->leftJoin('monitor_visits as mv', 'mv.monitor_id', '=', 'mvi.monitor_id')
+            ->select('mvi.ip')
+            ->selectRaw('COUNT(mv.id) as visits')
+            ->groupBy('mvi.ip');
     }
 
     /**

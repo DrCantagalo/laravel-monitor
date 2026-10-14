@@ -4,8 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [0.70.0] - 2026-10-13
-### Fixed
+## [0.71.0] - 2026-10-14
+### Changed
+- **`getVisitorsByIp` lists visits derived from the IP's *current*
+  Monitors, not the lifetime `monitor_ip_stats.visit_count`**: after a
+  `monitor:prune`/`clearData` removes most Monitors of a heavily-crawled
+  IP, the old `visit_count` kept showing the full historical total (it's
+  never decremented by design — see below) even though drilling into
+  `getIpMonitors` for that IP only showed a handful of Monitors with a
+  couple of visits each. New field `visits` = the sum of the same
+  per-Monitor `visits_count` that `getIpMonitors`/`hydrateMonitorRows`
+  already expose (`COUNT` of `monitor_visits`), aggregated by IP via
+  `monitor_visit_ips` — it now drops together with a prune/delete,
+  matching the drill-down. It's also the new default sort key (replacing
+  `visit_count`) within each `flagged` group.
+- **`monitor_ip_stats.visit_count` survives in the response as
+  `lifetime_visits`** (clearer name for what it actually is — see "Per-IP
+  stats" in the README) and, **deprecated**, still as `visit_count` too,
+  so existing consumers don't break before they bump to this version.
+  **Never** affected by a prune/delete of any Monitor — it's the memory
+  `ScraperSignalDetector`'s `high_cumulative_visits` signal and the
+  block-escalation history read, and zeroing it on a cleanup would
+  "launder" a scraper's history.
+### Added
+- **`getVisitorsByIp` accepts `include_without_monitors`** (boolean,
+  default `false`): an IP with stats but no current Monitor (the common
+  post-prune case above) is excluded from the listing by default —
+  `visits`/pagination total only reflect IPs you can actually drill into.
+  Pass `true` to bring them back, with `visits: 0`.
 - **Visitor origin tagging treated the own site's subdomains as external
   referral traffic**: `detectFromReferer()` compared the `Referer` host
   against only the *current* request's host, so a visit landing on one

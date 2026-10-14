@@ -1860,15 +1860,17 @@ ephemeral read token from `issueReadToken`).
   (`BlockedIp::active()`: permanent, or temporary and not yet expired);
   unknown value returns `422`), `date_from`/`date_to` (optional, filters
   by the row's `last_seen` — "this IP was active in this window", same
-  approximation as `getPages`), and since `0.49.0` `tag`/`kind`
-  (optional, combinable with any `filter` above — e.g. `filter=blocked`
-  `kind=bot` lists blocked bots). Response: `{"success": true, "data":
-  [{"ip": "1.2.3.4", "visit_count": 12, "first_seen": "...",
-  "last_seen": "...", "flagged": false, "flagged_signals": null,
-  "blocked": false, "kind": null, "tags": [], "counts": {"human": 0,
-  "bot": 0, "unclassified": 1}}, ...], "meta": {"page", "per_page",
-  "total", "last_page"}}`. **Breaking in `0.53.0`**: `kind`/`tags` are now
-  **derived** on the fly from every `Monitor` ever seen at that IP
+  approximation as `getPages`), since `0.49.0` `tag`/`kind` (optional,
+  combinable with any `filter` above — e.g. `filter=blocked` `kind=bot`
+  lists blocked bots), and since `0.71.0` `include_without_monitors`
+  (boolean, default `false` — see below). Response: `{"success": true,
+  "data": [{"ip": "1.2.3.4", "visits": 3, "lifetime_visits": 186,
+  "visit_count": 186, "first_seen": "...", "last_seen": "...", "flagged":
+  false, "flagged_signals": null, "blocked": false, "kind": null, "tags":
+  [], "counts": {"human": 0, "bot": 0, "unclassified": 1}}, ...], "meta":
+  {"page", "per_page", "total", "last_page"}}`. **Breaking in `0.53.0`**:
+  `kind`/`tags` are now **derived** on the fly from every `Monitor` ever
+  seen at that IP
   (`kind` is `bot`/`human` only if ALL of them agree, `mixed` if they
   don't, `null` if none is classified; `tags` is their normalized union)
   instead of being read from a per-IP row — `note`/`source`/
@@ -1879,12 +1881,39 @@ ephemeral read token from `issueReadToken`).
   classification" above.
   - Regardless of which `filter` is requested, results are always
     ordered with `flagged = true` rows first (the "possible scraper"
-    work queue), falling back to the existing `visit_count desc`
-    ordering within each group. **Removed in `0.29.0`**: between `0.8.0`
-    and `0.28.x`, this also excluded/deprioritized IPs marked `safe` —
-    there is no `safe` status for IPs anymore (see "Per-IP stats"
-    above), so `filter=flagged` and the default ordering now depend only
-    on `flagged`.
+    work queue), falling back, since `0.71.0`, to `visits desc` (see
+    below — it used to be `visit_count desc`, before that field was
+    renamed/deprecated) within each group. **Removed in `0.29.0`**:
+    between `0.8.0` and `0.28.x`, this also excluded/deprioritized IPs
+    marked `safe` — there is no `safe` status for IPs anymore (see
+    "Per-IP stats" above), so `filter=flagged` and the default ordering
+    now depend only on `flagged`.
+  - **Since `0.71.0`**: `visit_count` (the lifetime counter straight from
+    `monitor_ip_stats`, see "Per-IP stats" above — it's **never**
+    decremented, including by a `prune`/`clearData`, see below) used to
+    be the only "visits" number shown, which made a heavily-crawled IP
+    look like it still had that many visits worth of Monitors long after
+    most of them had been pruned/deleted — drilling into `getIpMonitors`
+    for that same IP would show only a handful of Monitors with a couple
+    of visits each. Two fields now cover this:
+    - **`visits`**: the sum of the same per-Monitor `visits_count` that
+      `getIpMonitors`/`hydrateMonitorRows` already expose (`COUNT` of
+      `monitor_visits`, derived from the IP's **current** Monitors via
+      `monitor_visit_ips`) — drops together with a prune/delete, matches
+      the drill-down, and is the new default sort key (see above).
+    - **`lifetime_visits`**: the same old `monitor_ip_stats.visit_count`,
+      just under a name that says what it actually is. `visit_count`
+      itself stays in the response too, **deprecated**, with the exact
+      same value as `lifetime_visits` — so consumers written against
+      `0.70.x` and earlier don't break — and will be removed in a future
+      major version.
+    - **`include_without_monitors`** (boolean, default `false`): an IP
+      with a `monitor_ip_stats` row but **no current Monitor** (exactly
+      the post-prune case above) is excluded from this listing by
+      default — `visits` would always be `0` for it anyway, and there's
+      nothing to drill into via `getIpMonitors`. Pass `true` to bring
+      these back, with `visits: 0`. `meta.total`/pagination reflect
+      whichever set is in effect.
   - Since `0.12.0`: `filter=flagged` also excludes IPs already present in
     `monitor_blocked_ips` — an IP that's already been blocked has already
     been confirmed as a scraper, so it no longer needs to show up in the
@@ -1907,6 +1936,14 @@ ephemeral read token from `issueReadToken`).
     `blocked_until`, `strike_count`, `lifetime_offense_count`,
     `last_offense_at` and `source` (all from `monitor_blocked_ips`) — the
     existing fields keep their shape, nothing is removed.
+  - **Since `0.71.0`**: this row also gains `visits`/`lifetime_visits`,
+    same meaning and derivation as the default listing above (`visits`
+    from the IP's current Monitors, `0` if none; `lifetime_visits` from
+    `monitor_ip_stats.visit_count` when that row still exists, `null`
+    otherwise, same as `visit_count`). **`include_without_monitors`
+    doesn't apply to this filter**: a blocked IP always shows up here
+    regardless of whether it has a current Monitor — hiding it would
+    undo the whole point of the `0.33.0` fix above.
   - **Since `0.41.0`**: `filter=blocked` only lists **active** blocks
     (`BlockedIp::active()`) — a temporary block whose `blocked_until` has
     already expired no longer appears in this listing, same "blocked"
@@ -2526,6 +2563,22 @@ with two **optional** parameters:
   whenever the category filter isn't "all 5", even if `older_than_days`
   is also given. `monitor_access_logs` is **never** touched by any of
   this, same pre-existing rule as always (see "Access log" above).
+
+> **Note (since `0.71.0`)**: deleting `monitor_ip_stats` rows this way
+> (the "all 5 categories + `older_than_days`" branch above) is the only
+> thing that removes a `monitor_ip_stats.visit_count`
+> (`lifetime_visits`/`visit_count` in `getVisitorsByIp`, see above) —
+> it's a whole-row delete by `last_seen` age, an explicit, user-triggered
+> cleanup. **It is never reset/decremented as a side effect of deleting
+> or pruning `Monitor` rows** (the branches above that only delete
+> `monitors`/their cascaded children) — it's the memory
+> `ScraperSignalDetector`'s `high_cumulative_visits` signal and the
+> block-escalation history read (see "Per-IP stats" above), and silently
+> zeroing it whenever a Monitor is cleaned up would "launder" a
+> scraper's history. `getVisitorsByIp`'s `visits` field (the one that
+> *does* track current Monitors) is what drops when Monitors are
+> pruned/deleted — `lifetime_visits` only moves when the IP's own
+> `monitor_ip_stats` row is itself deleted or ages past a cutoff here.
 
 Response: `{"success": true, "monitors_deleted": 12, "ip_stats_deleted": 4,
 "visits_deleted": 3, "page_hits_deleted": 1}` — `ip_stats_deleted`/
