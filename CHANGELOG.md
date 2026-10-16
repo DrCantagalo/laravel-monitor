@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.71.1] - 2026-10-16
+### Fixed
+- **`monitor:install` não gravava `installation_hash`/`local_token` quando
+  `installation.json` já existia sem eles** (ex: site que rodou
+  `monitor:update` antes, que grava só `lang`/`main_domain`): o ramo que lê
+  o arquivo existente calculava os valores corretos em variáveis locais
+  (preservando hash/token já existentes via `??`), mas nunca escrevia esses
+  dois campos de volta no array salvo em disco. Na prática, o próximo
+  `monitor:install` gerava outro hash e registrava como instalação nova em
+  monitor.cantagalo.it. `installation_hash`/`local_token` agora são sempre
+  gravados no `$config` salvo, hash/token existentes continuam preservados
+  (nunca regenerados). `json_decode` de um `installation.json` inválido ou
+  vazio agora é tratado como array vazio (antes virava `null` e quebrava a
+  leitura das chaves).
+
 ## [0.71.0] - 2026-10-14
 ### Changed
 - **`getVisitorsByIp` lists visits derived from the IP's *current*

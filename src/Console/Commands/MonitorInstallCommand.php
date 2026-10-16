@@ -127,7 +127,7 @@ class MonitorInstallCommand extends Command
         $configFile = $storagePath.'/installation.json';
 
         if (File::exists($configFile)) {
-            $config = json_decode(File::get($configFile), true);
+            $config = json_decode(File::get($configFile), true) ?: [];
             $installationHash = $config['installation_hash'] ?? hash('sha256', config('app.key').Str::uuid());
             $localToken = $config['local_token'] ?? Str::random(64);
             $this->info($t('hash_found'));
@@ -135,12 +135,12 @@ class MonitorInstallCommand extends Command
             $installationHash = hash('sha256', config('app.key').Str::uuid());
             $localToken = Str::random(64);
 
-            $config = [
-                'installation_hash' => $installationHash,
-                'local_token' => $localToken,
-            ];
+            $config = [];
             $this->info($t('hash_created'));
         }
+
+        $config['installation_hash'] = $installationHash;
+        $config['local_token'] = $localToken;
 
         // lang: persistido pra monitor:update ler sem perguntar de novo a
         // cada execução (comando repetido, ao contrário deste, que roda
