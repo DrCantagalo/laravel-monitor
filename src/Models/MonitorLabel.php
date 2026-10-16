@@ -63,9 +63,24 @@ class MonitorLabel extends Model
     public const TAG_USER = 'user';
 
     /**
+     * laravel-monitor 369 (v0.72.0): sintaxe reservada do filtro `tag` de
+     * `getVisitorsByIp`/`getBlockedIps`/`getMonitorQueue` — `*` ("tem
+     * alguma tag custom") e `-` ("não tem nenhuma"), ver
+     * `parseTagFilter()`. Qualquer tag começando com `-` (ex: `-foo`, que
+     * no filtro significa "não tem a tag foo") também é reservada. Nenhum
+     * dos três pode ser salvo como tag de verdade — `normalizeTags()`
+     * descarta os três abaixo, então eles nunca entram em
+     * `MonitorLabel.tags`.
+     */
+    public const TAG_FILTER_ANY = '*';
+
+    public const TAG_FILTER_NONE = '-';
+
+    /**
      * trim + lowercase + dedupe (preservando a ordem de primeira
-     * aparição) + descarta vazias/longas demais + limita a quantidade.
-     * Usado tanto pela escrita direta quanto pelo merge de tags.
+     * aparição) + descarta vazias/longas demais/reservadas pro filtro de
+     * tag (`*`, `-`, qualquer `-foo`) + limita a quantidade. Usado tanto
+     * pela escrita direta quanto pelo merge de tags.
      *
      * @param  array<int, mixed>  $tags
      * @return array<int, string>
@@ -85,12 +100,74 @@ class MonitorLabel extends Model
                 continue;
             }
 
+            if ($tag === self::TAG_FILTER_ANY || str_starts_with($tag, self::TAG_FILTER_NONE)) {
+                continue;
+            }
+
             if (! in_array($tag, $normalized, true)) {
                 $normalized[] = $tag;
             }
         }
 
         return array_slice($normalized, 0, self::MAX_TAGS);
+    }
+
+    /**
+     * Parseia o valor do parâmetro `tag` dos endpoints de listagem
+     * (`getVisitorsByIp`/`getBlockedIps`/`getMonitorQueue`) — não confundir
+     * com uma tag de verdade salva em `MonitorLabel.tags` (ver
+     * `normalizeTags()`, que rejeita estes três valores como tag). Espera
+     * `$value` já trim/lowercase (ver os callers em `MonitorController`).
+     *
+     * laravel-monitor 369 (v0.72.0): `*` = tem pelo menos uma tag CUSTOM
+     * (qualquer tag exceto a reservada `TAG_USER`); `-` = não tem nenhuma;
+     * `-foo` = não tem a tag `foo` (vale também `-user`); qualquer outro
+     * valor = tag exata, igual sempre foi (incluindo `user`).
+     *
+     * @return array{mode: 'exact'|'any'|'none'|'exclude', value: ?string}
+     */
+    public static function parseTagFilter(string $value): array
+    {
+        if ($value === self::TAG_FILTER_ANY) {
+            return ['mode' => 'any', 'value' => null];
+        }
+
+        if ($value === self::TAG_FILTER_NONE) {
+            return ['mode' => 'none', 'value' => null];
+        }
+
+        if (str_starts_with($value, self::TAG_FILTER_NONE)) {
+            return ['mode' => 'exclude', 'value' => mb_substr($value, 1)];
+        }
+
+        return ['mode' => 'exact', 'value' => $value];
+    }
+
+    /**
+     * Restringe $query (Eloquent ou Query Builder, tanto faz — ambos
+     * expõem a mesma API `whereJsonLength`/`orWhere`/`whereJsonDoesntContain`)
+     * a linhas cujo `$column` (um array JSON de tags, ex: `monitor_labels.
+     * tags`) tem pelo menos uma tag CUSTOM — qualquer tag exceto a
+     * reservada `TAG_USER`. Bloco de montagem do filtro `tag=*`/`tag=-`
+     * (laravel-monitor 369/v0.72.0).
+     *
+     * `tags` nunca tem `user` mais de uma vez (`normalizeTags()` já
+     * dedupe), então: tamanho > 1 já garante sozinho que existe tag custom
+     * (só uma das posições pode ser `user`); com tamanho == 1, só é custom
+     * se essa única tag não for `user`. Evita montar isso com
+     * `JSON_LENGTH`/`JSON_CONTAINS` crus (funções só do MySQL, quebrariam
+     * os testes em SQLite) — os métodos do query builder do Laravel
+     * traduzem pra gramática certa em cada driver.
+     */
+    public static function constrainToCustomTagExists($query, string $column)
+    {
+        return $query->where(function ($q) use ($column) {
+            $q->whereJsonLength($column, '>', 1)
+                ->orWhere(function ($q2) use ($column) {
+                    $q2->whereJsonLength($column, '=', 1)
+                        ->whereJsonDoesntContain($column, self::TAG_USER);
+                });
+        });
     }
 
     /**

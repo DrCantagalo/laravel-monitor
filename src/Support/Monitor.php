@@ -247,7 +247,11 @@ class Monitor
                 continue;
             }
 
-            if (in_array($value, [MonitorLabel::TAG_USER], true)) {
+            if (
+                $value === MonitorLabel::TAG_USER
+                || $value === MonitorLabel::TAG_FILTER_ANY
+                || str_starts_with($value, MonitorLabel::TAG_FILTER_NONE)
+            ) {
                 Log::warning('[laravel-monitor] Monitor::addTag(s) descartou a tag reservada.', ['tag' => $tag]);
 
                 continue;

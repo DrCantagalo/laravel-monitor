@@ -1420,6 +1420,14 @@ carries `user` has seen a logged-in visitor; `tag=user` on
 "Paginated visitor/blocklist listing" below) — no special-casing needed,
 it's the same generic tag filter every other tag already uses.
 
+**Reserved tag-filter syntax (since `0.72.0`)**: `*`, `-`, and any tag
+starting with `-` (e.g. `-foo`) can never be saved as a real tag —
+`MonitorLabel::normalizeTags()` drops them silently (same as any other
+invalid tag), `setMonitorTags` rejects them with a dedicated `422`. They
+only mean something as the *value* of the `tag` filter param on
+`getVisitorsByIp`/`getMonitorQueue` — see "Paginated visitor/blocklist
+listing" and "`getMonitorQueue`" below for what they do there.
+
 **Never touched by `pruneData`, the automatic prune (`DataPruner`), or
 `clearData`** *directly* — but since `0.53.0` a label lives on the
 `Monitor` row itself (`cascadeOnDelete`), so it **is** deleted the moment
@@ -1445,7 +1453,8 @@ makes on purpose (see the intro above).
 - **`setMonitorTags`** (since `0.53.0`): `monitor_id` (same validation as
   `setMonitorKind`), `tag` (single string, normalized; `422` if empty
   after normalization, `422` if it's the reserved `user` tag — see
-  above), `op` (`add` default | `remove`). Always `source=manual`
+  above — or `*`/`-`/any `-foo`, reserved for the `tag` filter syntax,
+  since `0.72.0`), `op` (`add` default | `remove`). Always `source=manual`
   semantics don't apply here — tags have no `source` tracking at all (see
   the `source` field note above). Response: `{"success": true,
   "monitor_id": 10, "tag": "amazon", "op": "add"}`.
@@ -1468,7 +1477,9 @@ makes on purpose (see the intro above).
   `0.69.0`: `date_from`/`date_to` (optional, filter by the Monitor's own
   `created_at`, same convention as `getVisitorsByIp`) and `tag` (optional,
   filters by `monitor_labels.tags`, same lowercase/trim normalization as
-  `getVisitorsByIp`'s `tag` param) — all combinable with any `group` and
+  `getVisitorsByIp`'s `tag` param, including the `*`/`-`/`-foo` special
+  values since `0.72.0` — here they apply straight to the Monitor's own
+  tags, not aggregated by IP) — all combinable with any `group` and
   with each other, and part of the cache key below.
   - `new`/`unclassified`: Monitors with no `kind` at all (no
     `monitor_labels` row, or one with `kind` null), split only by age:
@@ -1863,7 +1874,12 @@ ephemeral read token from `issueReadToken`).
   approximation as `getPages`), since `0.49.0` `tag`/`kind` (optional,
   combinable with any `filter` above — e.g. `filter=blocked` `kind=bot`
   lists blocked bots), and since `0.71.0` `include_without_monitors`
-  (boolean, default `false` — see below). Response: `{"success": true,
+  (boolean, default `false` — see below). **Since `0.72.0`**, `tag`
+  accepts three special values besides an exact tag name: `*` (the IP has
+  at least one Monitor with some **custom** tag — any tag except the
+  reserved `user`), `-` (none of the IP's Monitors has one) and `-foo`
+  (none of the IP's Monitors has the tag `foo` — works for `user` too,
+  e.g. `tag=-user` lists IPs with no authenticated Monitor). Response: `{"success": true,
   "data": [{"ip": "1.2.3.4", "visits": 3, "lifetime_visits": 186,
   "visit_count": 186, "first_seen": "...", "last_seen": "...", "flagged":
   false, "flagged_signals": null, "blocked": false, "kind": null, "tags":

@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.72.0] - 2026-10-16
+### Added
+- **`tag` filter syntax**: `getVisitorsByIp` (any `filter`, including
+  `filter=blocked`) and `getMonitorQueue` now accept, besides an exact tag
+  name (unchanged), `*` ("has at least one **custom** tag" — any tag
+  except the reserved `user`), `-` ("has none") and `-foo` ("does not
+  have the tag `foo`" — works for `user` too, e.g. `-user`). On
+  `getVisitorsByIp` these apply to the IP's Monitors as a whole (same
+  "any of its Monitors" rule tags already followed); on `getMonitorQueue`
+  they apply directly to the Monitor's own tags. See `MonitorLabel::
+  parseTagFilter()`/`constrainToCustomTagExists()` and the README
+  "IP classification"/"Paginated visitor/blocklist listing" sections.
+### Changed
+- **Reserved tag-filter syntax can no longer be saved as a real tag**:
+  `*`, `-`, and any tag starting with `-` (e.g. `-foo`) are now rejected
+  by `MonitorLabel::normalizeTags()` — and therefore by `Monitor::addTag()`/
+  `addTags()`/`addTagForUser()` (silently dropped with a log warning,
+  same as any other invalid tag) and by `setMonitorTags` (`422` with a
+  dedicated message, same pattern as the reserved `user` tag). If any
+  existing `monitor_labels.tags` row already contains one of these values
+  (unlikely — no normal write path has ever produced them), it is left
+  untouched in the database but stops being filterable/editable through
+  the tag filter or `setMonitorTags`.
+
 ## [0.71.1] - 2026-10-16
 ### Fixed
 - **`monitor:install` não gravava `installation_hash`/`local_token` quando

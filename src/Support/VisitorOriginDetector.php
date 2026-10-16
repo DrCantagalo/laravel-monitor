@@ -166,7 +166,11 @@ class VisitorOriginDetector
             return null;
         }
 
-        if (in_array($value, [MonitorLabel::TAG_USER], true)) {
+        if (
+            $value === MonitorLabel::TAG_USER
+            || $value === MonitorLabel::TAG_FILTER_ANY
+            || str_starts_with($value, MonitorLabel::TAG_FILTER_NONE)
+        ) {
             return null;
         }
 

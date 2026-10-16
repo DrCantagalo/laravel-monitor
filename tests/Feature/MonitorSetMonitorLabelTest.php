@@ -92,6 +92,37 @@ class MonitorSetMonitorLabelTest extends TestCase
         $response->assertStatus(422);
     }
 
+    /**
+     * laravel-monitor 369 (v0.72.0): `*`, `-` e qualquer `-foo` são
+     * sintaxe reservada do filtro `tag` de getVisitorsByIp/getBlockedIps/
+     * getMonitorQueue (ver MonitorLabel::parseTagFilter()) — nunca podem
+     * se tornar uma tag de verdade, em add ou remove.
+     */
+    protected function assertRejectsReservedTagFilterSyntax(string $reserved): void
+    {
+        $monitor = Monitor::create(['data' => []]);
+
+        $response = $this->callHandler(['action' => 'setMonitorTags', 'monitor_id' => $monitor->id, 'tag' => $reserved, 'op' => 'add']);
+
+        $response->assertStatus(422);
+        $this->assertNull(MonitorLabel::where('monitor_id', $monitor->id)->first());
+    }
+
+    public function test_rejects_the_any_tag_filter_syntax_as_a_real_tag(): void
+    {
+        $this->assertRejectsReservedTagFilterSyntax('*');
+    }
+
+    public function test_rejects_the_none_tag_filter_syntax_as_a_real_tag(): void
+    {
+        $this->assertRejectsReservedTagFilterSyntax('-');
+    }
+
+    public function test_rejects_the_exclude_tag_filter_syntax_as_a_real_tag(): void
+    {
+        $this->assertRejectsReservedTagFilterSyntax('-foo');
+    }
+
     public function test_sets_kind_on_a_monitor(): void
     {
         $monitor = Monitor::create(['data' => []]);

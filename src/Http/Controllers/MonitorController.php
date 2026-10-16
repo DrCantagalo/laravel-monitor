@@ -1491,7 +1491,7 @@ class MonitorController extends Controller
         }
 
         if ($tag !== null) {
-            $query->whereIn('monitor_ip_stats.ip', $this->ipsWithMonitorTag($tag));
+            $this->applyIpTagFilter($query, 'monitor_ip_stats.ip', $tag);
         }
 
         $query->leftJoinSub(
@@ -1609,7 +1609,7 @@ class MonitorController extends Controller
         }
 
         if ($tag !== null) {
-            $query->whereIn('ip', $this->ipsWithMonitorTag($tag));
+            $this->applyIpTagFilter($query, 'ip', $tag);
         }
 
         $paginator = $query
@@ -1732,6 +1732,64 @@ class MonitorController extends Controller
             ->whereJsonContains('ml.tags', $tag)
             ->distinct()
             ->pluck('mvi.ip');
+    }
+
+    /**
+     * IPs que têm pelo menos um Monitor com alguma tag CUSTOM (qualquer
+     * tag exceto a reservada `MonitorLabel::TAG_USER`) — bloco de
+     * montagem do filtro `tag=*` (laravel-monitor 369/v0.72.0), mesmo
+     * espírito de `ipsWithMonitorTag()` acima mas pra "tem alguma", não
+     * "tem uma específica".
+     *
+     * @return Collection<int, string>
+     */
+    protected function ipsWithAnyCustomMonitorTag()
+    {
+        return MonitorLabel::constrainToCustomTagExists(
+            DB::table('monitor_visit_ips as mvi')
+                ->join('monitor_labels as ml', 'ml.monitor_id', '=', 'mvi.monitor_id'),
+            'ml.tags'
+        )->distinct()->pluck('mvi.ip');
+    }
+
+    /**
+     * Aplica o filtro `tag` (já parseado por `MonitorLabel::parseTagFilter()`)
+     * numa query agregada por IP (`buildVisitorsResult`/
+     * `buildBlockedVisitorsResult`) — `$ipColumn` é a coluna de IP dessa
+     * query (`monitor_ip_stats.ip` ou `ip`, conforme o caller).
+     * laravel-monitor 369 (v0.72.0): `-`/`-foo` precisam de `whereNotIn`
+     * em vez do `whereIn` de sempre, por isso centralizado aqui em vez de
+     * repetir o `match()` nos dois callers.
+     */
+    protected function applyIpTagFilter($query, string $ipColumn, string $tag): void
+    {
+        $filter = MonitorLabel::parseTagFilter($tag);
+
+        match ($filter['mode']) {
+            'any' => $query->whereIn($ipColumn, $this->ipsWithAnyCustomMonitorTag()),
+            'none' => $query->whereNotIn($ipColumn, $this->ipsWithAnyCustomMonitorTag()),
+            'exclude' => $query->whereNotIn($ipColumn, $this->ipsWithMonitorTag($filter['value'])),
+            default => $query->whereIn($ipColumn, $this->ipsWithMonitorTag($filter['value'])),
+        };
+    }
+
+    /**
+     * Mesma ideia de `applyIpTagFilter()`, pra query de Monitor (não
+     * agregada por IP) — `buildMonitorQueueResult()`. Aqui o filtro vale
+     * direto sobre o `label` do próprio Monitor: `whereHas`/
+     * `whereDoesntHave` em vez de `whereIn`/`whereNotIn` numa lista de
+     * IPs, mas a mesma lógica de modos (laravel-monitor 369/v0.72.0).
+     */
+    protected function applyMonitorTagFilter($query, string $tag): void
+    {
+        $filter = MonitorLabel::parseTagFilter($tag);
+
+        match ($filter['mode']) {
+            'any' => $query->whereHas('label', fn ($q) => MonitorLabel::constrainToCustomTagExists($q, 'tags')),
+            'none' => $query->whereDoesntHave('label', fn ($q) => MonitorLabel::constrainToCustomTagExists($q, 'tags')),
+            'exclude' => $query->whereDoesntHave('label', fn ($q) => $q->whereJsonContains('tags', $filter['value'])),
+            default => $query->whereHas('label', fn ($q) => $q->whereJsonContains('tags', $filter['value'])),
+        };
     }
 
     /**
@@ -3091,8 +3149,26 @@ class MonitorController extends Controller
 
         $monitorId = (int) $monitorId;
         $rawTag = $request->input('tag');
-        $tag = is_string($rawTag) ? MonitorLabel::normalizeTags([$rawTag]) : [];
+        $trimmedTag = is_string($rawTag) ? mb_strtolower(trim($rawTag)) : null;
         $op = $request->input('op', 'add') === 'remove' ? 'remove' : 'add';
+
+        // laravel-monitor 369 (v0.72.0): `*`, `-` e qualquer `-foo` são
+        // sintaxe reservada do filtro `tag` de getVisitorsByIp/
+        // getBlockedIps/getMonitorQueue (ver MonitorLabel::parseTagFilter())
+        // — nunca tags de verdade. normalizeTags() já as filtraria (caindo
+        // no "No valid tag provided" genérico abaixo), mas checar aqui
+        // primeiro dá a mesma mensagem clara e específica da tag `user`.
+        if ($trimmedTag !== null && (
+            $trimmedTag === MonitorLabel::TAG_FILTER_ANY
+            || str_starts_with($trimmedTag, MonitorLabel::TAG_FILTER_NONE)
+        )) {
+            return response()->json([
+                'success' => false,
+                'message' => 'tag "'.$trimmedTag.'" is reserved for the tag filter syntax ("*", "-", "-foo") and cannot be added or removed manually',
+            ], 422);
+        }
+
+        $tag = is_string($rawTag) ? MonitorLabel::normalizeTags([$rawTag]) : [];
 
         if (empty($tag)) {
             return response()->json([
@@ -3315,7 +3391,7 @@ class MonitorController extends Controller
         }
 
         if ($tag !== null) {
-            $query->whereHas('label', fn ($q) => $q->whereJsonContains('tags', $tag));
+            $this->applyMonitorTagFilter($query, $tag);
         }
 
         switch ($group) {
