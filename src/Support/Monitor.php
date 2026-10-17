@@ -4,7 +4,9 @@ namespace Drcantagalo\LaravelMonitor\Support;
 
 use Drcantagalo\LaravelMonitor\Models\Monitor as MonitorModel;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 class Monitor
@@ -318,5 +320,111 @@ class Monitor
         session(['remember_me' => $token]);
 
         return true;
+    }
+
+    /**
+     * laravel-monitor 377: marca o Monitor da SESSÃO ATUAL como humano,
+     * depois que o HOST APP já validou alguma prova fora do escopo deste
+     * pacote (Turnstile, checkbox "não sou um robô", teste de scroll,
+     * etc.) — produzir essa prova é responsabilidade exclusiva do
+     * chamador; este método só GRAVA o resultado em `monitor_labels`,
+     * nunca verifica nada por conta própria.
+     *
+     * ATENÇÃO — ver README "IP classification"/seção deste método pro
+     * aviso completo: NUNCA exponha uma rota/endpoint que chame este
+     * método direto a partir do navegador sem validar a prova no servidor
+     * primeiro. Sem essa validação server-side, qualquer visitante
+     * (inclusive um bot de verdade) poderia se autodeclarar humano com uma
+     * chamada HTTP crua — este pacote deliberadamente não oferece essa
+     * rota; a chamada precisa vir de dentro do controller/action do
+     * próprio host app, DEPOIS de confirmar a prova.
+     *
+     * Grava `kind=human`, `classified_at=now()` e `source='verified'`
+     * (sem `$method`) ou `'verified-{method}'` (`$method` normalizado via
+     * `Str::slug()` - minúsculo, restrito a `[a-z0-9-]` - e truncado a 15
+     * caracteres; se nada sobrar da normalização, cai no `'verified'`
+     * plano, mesmo tratamento de "nada sobrou" que `sanitizeCustomTags()`
+     * já dá a uma tag inválida).
+     *
+     * Precedência de `source` (`MonitorLabel::isProtectedSource()`, a
+     * MESMA checagem que protege `MonitorController::setMonitorKind`
+     * contra `source=ai`): `manual` > `auth` > `verified-*` > `ai`. Sobre
+     * um label já `manual`/`auth`/qualquer `verified*`, esta chamada é um
+     * NO-OP silencioso - não lança, não muda `kind`/`source` e,
+     * CRUCIALMENTE, não toca `classified_at`: `classified_at` sempre fica
+     * na data da PRIMEIRA prova aceita; uma segunda chamada com `$method`
+     * diferente não "atualiza" nada, a primeira prova sempre vence. Sobre
+     * `source=ai` (seja `kind=human` ou `kind=bot`) ou sem label nenhum
+     * ainda, aplica normal.
+     *
+     * Um label existente só com `tags`/`note` (`kind=null`, ex: criado
+     * antes por `addTag()`) NÃO conta como classificado, mesmo que a
+     * coluna `source` já tenha o default `manual` do próprio banco (ver
+     * `MonitorLabel::isProtectedSource()`) - por isso a checagem abaixo
+     * exige `kind !== null` antes de olhar `source`, igual
+     * `SessionVisitorTracker::maybeAutoHumanClassify()` já faz; esse caso
+     * aplica normal, como "sem label nenhum ainda".
+     *
+     * `human_guest`/`human_user` continuam 100% derivados de
+     * `data.user_id` (tag reservada `user`, ver "Authenticated user
+     * tagging") - este método nunca toca `tags`, só `kind`/`source`/
+     * `classified_at`.
+     *
+     * Mesmo contrato de `tag()`/`recognize()`: requer `session('monitor_id')`
+     * já existir (não enfileira nada parecido com `PendingCustomTags` -
+     * diferente de `addTag()`/`addTags()`, que podem rodar antes do
+     * Monitor da request existir); sem sessão de monitor ativa ou sem o
+     * Monitor correspondente, retorna `false` sem lançar.
+     */
+    public function markAsHuman(?string $method = null): bool
+    {
+        $monitorId = session('monitor_id');
+
+        if (! $monitorId) {
+            return false;
+        }
+
+        if (! MonitorModel::whereKey($monitorId)->exists()) {
+            return false;
+        }
+
+        $source = $this->verifiedSource($method);
+
+        return DB::transaction(function () use ($monitorId, $source) {
+            $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first();
+
+            if ($label && $label->kind !== null && MonitorLabel::isProtectedSource($label->source)) {
+                return false;
+            }
+
+            $label ??= new MonitorLabel(['monitor_id' => $monitorId]);
+            $label->kind = 'human';
+            $label->source = $source;
+            $label->classified_at = now();
+            $label->save();
+
+            return true;
+        });
+    }
+
+    /**
+     * Normaliza `$method` pro valor de `source` gravado por `markAsHuman()`
+     * - `null` vira `'verified'` puro; qualquer string passa por
+     * `Str::slug()` (minúsculo, `[a-z0-9-]`) e é truncada a 15 caracteres
+     * ANTES de receber o prefixo `verified-` (o limite é sobre o método
+     * em si, não sobre a string final com prefixo). Se a normalização não
+     * sobrar nada (ex: `$method` só com caracteres descartados pelo
+     * slug), cai no `'verified'` plano em vez de produzir um
+     * `'verified-'` com sufixo vazio.
+     */
+    protected function verifiedSource(?string $method): string
+    {
+        if ($method === null) {
+            return 'verified';
+        }
+
+        $normalized = mb_substr(Str::slug($method), 0, 15);
+
+        return $normalized === '' ? 'verified' : 'verified-'.$normalized;
     }
 }

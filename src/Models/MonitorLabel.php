@@ -77,6 +77,46 @@ class MonitorLabel extends Model
     public const TAG_FILTER_NONE = '-';
 
     /**
+     * laravel-monitor 377: checa se `$source` (coluna `monitor_labels.
+     * source`) pertence a uma das categorias "protegidas" contra uma
+     * escrita `source=ai` subsequente — `manual` (`setMonitorKind` sem
+     * `source=ai`), `auth` (`SessionVisitorTracker::
+     * maybeAutoHumanClassify()`, auto-classificação no login) ou qualquer
+     * `verified*` (`Support\Monitor::markAsHuman()`, prefixo porque o
+     * sufixo carrega o método de verificação, ex: `verified-turnstile`).
+     * `str_starts_with()` de propósito (NUNCA `===`) pra cobrir qualquer
+     * sufixo de `verified-{method}`, não só o `verified` plano.
+     *
+     * MESMA checagem usada tanto por `MonitorController::setMonitorKind`
+     * (guarda contra `source=ai` sobrescrever) quanto por
+     * `Support\Monitor::markAsHuman()` (guarda "silent no-op" sobre
+     * `manual`/`auth`/`verified*` — ver docblock lá pra regra completa de
+     * precedência `manual > auth > verified-* > ai`). Extraída pra cá (em
+     * vez de duplicada nos dois call sites) depois que a 303/v0.62.0
+     * deixou o guard do controller checando só `=== 'manual'` — o que
+     * deixava `source=ai` sobrescrever silenciosamente um `kind` gravado
+     * por `auth` (ou, depois da 377, por `verified*`), ao contrário do que
+     * o README sempre documentou ("a source=ai write never overwrites a
+     * kind already set by ANY other source").
+     *
+     * IMPORTANTE: só tem sentido olhar `source` quando o label já tem
+     * `kind` definido — uma linha só com `tags`/`note` (`kind=null`, ex:
+     * criada por `addTag()`) ainda tem `source=manual` por DEFAULT DO
+     * BANCO (migration `2026_09_30_000000_move_ip_labels_to_monitor_labels_
+     * table`, coluna nunca ficou sem default), mas isso não representa
+     * nenhuma classificação manual de verdade. Os dois call sites checam
+     * `kind !== null` ANTES de chamar este método — este método em si não
+     * repete essa checagem (não tem acesso ao `kind` aqui, só ao valor de
+     * `source` já extraído pelo caller).
+     */
+    public static function isProtectedSource(?string $source): bool
+    {
+        return $source === 'manual'
+            || $source === 'auth'
+            || str_starts_with((string) $source, 'verified');
+    }
+
+    /**
      * trim + lowercase + dedupe (preservando a ordem de primeira
      * aparição) + descarta vazias/longas demais/reservadas pro filtro de
      * tag (`*`, `-`, qualquer `-foo`) + limita a quantidade. Usado tanto

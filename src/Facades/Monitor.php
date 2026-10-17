@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static bool addTag(string $tag)
  * @method static bool addTags(array $tags)
  * @method static int addTagForUser(mixed $user, string|array $tags)
+ * @method static bool markAsHuman(?string $method = null)
  *
  * @see \Drcantagalo\LaravelMonitor\Support\Monitor
  */

@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.73.0] - 2026-10-17
+### Added
+- **`Monitor::markAsHuman(?string $method = null): bool`**: lets the host
+  app mark the **current visitor's** `Monitor` as human server-side,
+  right after the host app itself verified some proof (Turnstile,
+  reCAPTCHA, an "I'm not a robot" checkbox, a scroll test, etc. —
+  producing that proof is entirely the host app's own responsibility,
+  out of scope for this package). Writes `kind=human`, `classified_at=
+  now()` and `source='verified'` (no `$method`) or
+  `source='verified-{method}'` (`$method` normalized via `Str::slug()`,
+  lowercased, truncated to 15 characters). No new route/endpoint is
+  added — this is a facade method only. See README "Marking a visitor as
+  human" for the full usage example and a security warning: **never**
+  expose an endpoint that calls this directly from the browser without
+  verifying the proof server-side first.
+### Changed
+- **Classification source precedence is now `manual` > `auth` >
+  `verified-*` > `ai`**: `markAsHuman()` is a silent no-op (not even
+  `classified_at` changes) over a Monitor already classified with a
+  protected source (`manual`, `auth`, or any existing `verified*`); it
+  applies normally over `source=ai` (human or bot) or no classification
+  at all. New `MonitorLabel::isProtectedSource()` centralizes this check.
+### Fixed
+- **`setMonitorKind`'s `source=ai` guard only checked `source === 'manual'`**,
+  so a `kind` already set by `source=auth` (auto-classification on login,
+  since `0.59.0`) could be silently overwritten by a later `source=ai`
+  write — contradicting what the README always documented ("a source=ai
+  write never overwrites a kind already set by ANY other source"). The
+  guard now uses `MonitorLabel::isProtectedSource()` (`manual`, `auth`,
+  or any `verified*`, via `str_starts_with()`) instead of a strict
+  equality check against `manual` alone.
+
 ## [0.72.0] - 2026-10-16
 ### Added
 - **`tag` filter syntax**: `getVisitorsByIp` (any `filter`, including

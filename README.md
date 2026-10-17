@@ -1396,15 +1396,20 @@ calling `setMonitorKind`/`setMonitorTags` per `monitor_id` instead.
 - **`source`**: `manual` (default), `ai` (written by the AI triage flow;
   since `0.61.0` the AI flow has no bulk-by-IP write path either, so it
   must also classify one `Monitor` at a time — the `ai` value is still
-  accepted on `setMonitorKind`), or `auth` (since `0.59.0`, written
+  accepted on `setMonitorKind`), `auth` (since `0.59.0`, written
   automatically the first time a Monitor authenticates — see
-  "Authenticated user tagging" above). Refers to **`kind`** specifically,
-  not to tags/note.
+  "Authenticated user tagging" above), or `verified`/`verified-{method}`
+  (since `0.73.0`, written by `Monitor::markAsHuman()` — see "Marking a
+  visitor as human" below). Refers to **`kind`** specifically, not to
+  tags/note.
   **Guaranteed by the package itself, not just the consumer**: a
-  `source=ai`/`source=auth` write never overwrites a `kind` already set
-  by ANY other source on that same `Monitor` (`maybeAutoHumanClassify()`
-  only ever fills in a Monitor with no `kind` yet). A manual write always
-  wins and always records `source=manual`.
+  `source=ai` write never overwrites a `kind` already set by ANY
+  *protected* source on that same `Monitor` — `manual`, `auth`, or any
+  `verified*` (`MonitorLabel::isProtectedSource()`, checked by both
+  `setMonitorKind` and `markAsHuman()`; `maybeAutoHumanClassify()`
+  separately only ever fills in a Monitor with no `kind` yet, regardless
+  of source). A manual write (`setMonitorKind` without `source=ai`)
+  always wins and always records `source=manual`.
 - **`classified_at`**: when `kind` was last (re)written for that
   `Monitor`. Not touched by tag-only writes.
 
@@ -1444,9 +1449,11 @@ makes on purpose (see the intro above).
   any other value falls back to `manual`). This is the Monitor detail
   view's classification control, and since `0.61.0` the only way to write
   `kind` at all. A `source=ai` write is silently ignored (not applied) if
-  the Monitor already has a `kind` set with `source=manual` — a
-  `source=manual` write always applies, regardless of the Monitor's
-  current `source`. Response: `{"success": true, "monitor_id": 10,
+  the Monitor already has a `kind` set with a *protected* `source`
+  (`manual`, `auth`, or any `verified*` — see the `source` field note
+  above and "Marking a visitor as human" below) — a `source=manual` write
+  always applies, regardless of the Monitor's current `source`. Response:
+  `{"success": true, "monitor_id": 10,
   "kind": "bot", "applied": true}` — `applied: false` when the write was
   ignored by that protection (`kind` in the response is then the
   Monitor's unchanged current value, not the one submitted).
@@ -1771,6 +1778,78 @@ two.
 - No built-in timestamp/event log: reconstruct *when* a conversion
   happened from the Monitor's own visits, or from the host app's own data
   (e.g. the purchase row) — deliberately out of scope here.
+
+## Marking a visitor as human (`Monitor::markAsHuman`, since `0.73.0`)
+
+Lets the host app tell the package "this visitor just proved they're
+human" — server-side, right after the host app itself verified some proof
+(a Turnstile/reCAPTCHA challenge, the classic "I'm not a robot" checkbox, a
+scroll/interaction test, whatever the site already uses). **Producing that
+proof is entirely the host app's own responsibility — this package has no
+opinion on it and does not verify anything itself.** `markAsHuman()` only
+*records* the outcome in `monitor_labels` for the **current visitor's**
+`Monitor` (same `session('monitor_id')` precondition as `tag()`/
+`recognize()` above — call it from a normal request, not a queued job).
+
+> **Security warning — read before wiring this up.** Never expose a route
+> or endpoint that calls `Monitor::markAsHuman()` directly, callable from
+> the browser, without first verifying the proof **server-side**. If you
+> do, any visitor — including a real bot — can call that endpoint directly
+> and mark itself human with a single raw HTTP request, defeating the
+> whole point of this method. Always validate the proof (e.g. call out to
+> Turnstile's/reCAPTCHA's own verify endpoint, or run your own check) in
+> your controller/action *first*, and only call `markAsHuman()` after that
+> check passes. This package deliberately does **not** ship a public route
+> for this — there is no `/monitor/...` endpoint a client script can hit
+> directly; the call has to live inside your own server-side code.
+
+```php
+use Drcantagalo\LaravelMonitor\Facades\Monitor;
+
+// Inside your own controller, AFTER verifying the Turnstile/reCAPTCHA
+// token server-side (e.g. with a successful response from the provider's
+// own verify endpoint) — never before.
+if ($turnstileVerifiedServerSide) {
+    Monitor::markAsHuman('turnstile');
+}
+```
+
+- **`Monitor::markAsHuman(?string $method = null): bool`**. Writes
+  `kind=human`, `classified_at=now()` and `source='verified'` (no
+  `$method`) or `source='verified-{method}'` (`$method` normalized with
+  `Str::slug()` — lowercased, restricted to `[a-z0-9-]` — and truncated to
+  15 characters, e.g. `markAsHuman('Cloudflare Turnstile')` records
+  `source=verified-cloudflare-turn`). Returns whether the write actually
+  applied, same `bool` pattern as `tag()`/`recognize()`/`addTag()` above.
+- **Precedence — `manual` > `auth` > `verified-*` > `ai`**
+  (`MonitorLabel::isProtectedSource()`, the same check that protects
+  `setMonitorKind` against `source=ai`, see "IP classification" above):
+  - If the Monitor's current `kind` was set with a *protected* source
+    (`manual`, `auth`, or any existing `verified*`) this call is a
+    **silent no-op** — it does not throw, does not change `kind`/
+    `source`, and, crucially, does **not** touch `classified_at` either:
+    `classified_at` always stays at the time of the *first* accepted
+    proof. Calling `markAsHuman()` again later with a *different*
+    `$method` does not "update" anything — the first call's method and
+    date always win.
+  - If the current `kind` was set with `source=ai` (whether `human` or
+    `bot`), or the Monitor has no classification at all yet, the call
+    **applies** normally.
+  - A `monitor_labels` row that only has `tags`/`note` and no `kind` yet
+    (e.g. created earlier by `addTag()`) is treated the same as "no
+    classification yet" — it is **not** protected, even though the
+    `source` column already carries the database's own `manual` default
+    for an unrelated reason (that default is about the column, not about
+    an actual manual classification — see `MonitorLabel::
+    isProtectedSource()`'s docblock).
+- **Never required to run before `recognize()`/`tag()`**, but it does
+  require `session('monitor_id')` to already exist — unlike `addTag()`/
+  `addTags()`, a call before the current visitor's `Monitor` exists is
+  **not** queued as pending; it simply returns `false`.
+- **Doesn't touch `human_guest`/`human_user`**: those stay 100% derived
+  from `data.user_id` (the reserved `user` tag — see "Authenticated user
+  tagging" above), exactly as before. `markAsHuman()` never writes tags,
+  only `kind`/`source`/`classified_at`.
 
 ## Paginated page listing (`getPages`)
 

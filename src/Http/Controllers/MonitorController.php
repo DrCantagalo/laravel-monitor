@@ -3064,6 +3064,20 @@ class MonitorController extends Controller
      * `kind` manual) - `TriageMonitorIpsJob` do consumidor usa isso pra
      * decidir se aplica as tags da IA também (mesma lógica que usava
      * `applied`/`ignored` de `setIpKind`).
+     *
+     * laravel-monitor 377: a proteção contra `source=ai` passou a cobrir
+     * também `source=auth` (`SessionVisitorTracker::
+     * maybeAutoHumanClassify()`) e qualquer `source=verified*`
+     * (`Support\Monitor::markAsHuman()`) - antes só `=== 'manual'` era
+     * checado aqui, então um `kind=human,source=auth`/`verified*` já
+     * gravado podia ser silenciosamente sobrescrito por uma escrita
+     * `source=ai` seguinte, ao contrário do que o README sempre descreveu
+     * ("a source=ai write never overwrites a kind already set by ANY
+     * other source") - gap real, corrigido nesta task junto com a nova
+     * action do facade. Checagem centralizada em
+     * `MonitorLabel::isProtectedSource()` (`str_starts_with()`, nunca
+     * `===`, pra cobrir qualquer sufixo de `verified-{method}`) - mesma
+     * função usada por `Support\Monitor::markAsHuman()`.
      */
     protected function setMonitorKind(Request $request)
     {
@@ -3091,7 +3105,7 @@ class MonitorController extends Controller
         $applied = DB::transaction(function () use ($monitorId, $kind, $source) {
             $label = MonitorLabel::where('monitor_id', $monitorId)->lockForUpdate()->first();
 
-            if ($source === 'ai' && $label && $label->kind !== null && $label->source === 'manual') {
+            if ($source === 'ai' && $label && $label->kind !== null && MonitorLabel::isProtectedSource($label->source)) {
                 return false;
             }
 
