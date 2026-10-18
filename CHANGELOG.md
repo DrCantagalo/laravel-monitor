@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.73.1] - 2026-10-18
+### Fixed
+- **`date_to` without a time component excluded the entire last day of
+  the range in `getVisitorsByIp` (`last_seen`), `filter=blocked`
+  (`last_offense_at`), and `getMonitorQueue` (`created_at`)**: when the
+  dashboard's `<input type="date">` sends `date_to=YYYY-MM-DD`, MySQL
+  reads the bare date as `00:00:00` when compared against a DATETIME
+  column, so a "today to today" filter returned nothing in those three
+  listings (`getPages`, which compares against a DATE column, was
+  unaffected). Added `MonitorController::normalizeDateTimeBoundary()`: a
+  `date_to`/`date_from` value with no explicit time (no `:`) is now
+  normalized to the end/start of that day (`Carbon::endOfDay()`/
+  `startOfDay()`, no timezone conversion — same app clock the affected
+  columns are written in) before the comparison; a value with an
+  explicit time is left untouched.
+
 ## [0.73.0] - 2026-10-17
 ### Added
 - **`Monitor::markAsHuman(?string $method = null): bool`**: lets the host

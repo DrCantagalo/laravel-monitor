@@ -1037,6 +1037,41 @@ class MonitorController extends Controller
     }
 
     /**
+     * Normaliza um limite de `date_from`/`date_to` que venha só com data
+     * (sem hora, ex: "2026-10-18" do `<input type="date">` do
+     * dashboard) pro limite do dia correspondente, antes de comparar
+     * contra uma coluna DATETIME (`last_seen`, `last_offense_at`,
+     * `created_at`) — laravel-monitor 383: sem isso, o MySQL lê a string
+     * sem hora como `00:00:00`, e `date_to=$dateTo` exclui o dia inteiro
+     * (um intervalo "hoje a hoje" não devolve nada). `date_from` vai pro
+     * início do dia (meia-noite — já era o valor original, normalizado
+     * aqui só pra ficar simétrico); `date_to` vai pro fim do dia
+     * (`endOfDay()`, ou seja `23:59:59.999999`). Sem conversão de
+     * timezone: mesmo relógio do app em que essas colunas são gravadas
+     * (`now()`, sem UTC no meio do caminho — ver docblock de
+     * `timelineWindow()`).
+     *
+     * Valor com hora explícita (contém `:`) passa direto, sem mudança —
+     * mesmo contrato de sempre desses parâmetros. Entrada que o Carbon
+     * não consegue parsear também volta sem mudança (deixa o banco
+     * reclamar/não casar nada, mesmo padrão de `toDateOnly()`).
+     */
+    private function normalizeDateTimeBoundary(?string $raw, bool $endOfDay): ?string
+    {
+        if ($raw === null || $raw === '' || str_contains($raw, ':')) {
+            return $raw;
+        }
+
+        try {
+            $date = Carbon::parse($raw);
+        } catch (\Throwable $e) {
+            return $raw;
+        }
+
+        return $endOfDay ? $date->endOfDay()->toDateTimeString() : $date->startOfDay()->toDateTimeString();
+    }
+
+    /**
      * laravel-monitor 286: data (`YYYY-MM-DD`) em que a migration
      * `2026_10_04_000001_redesign_monitor_page_hits_with_day` rodou
      * nesta instalação, gravada em `monitor_settings` por ela mesma —
@@ -1440,11 +1475,11 @@ class MonitorController extends Controller
         $query = IpStat::query();
 
         if ($dateFrom) {
-            $query->where('last_seen', '>=', $dateFrom);
+            $query->where('last_seen', '>=', $this->normalizeDateTimeBoundary($dateFrom, false));
         }
 
         if ($dateTo) {
-            $query->where('last_seen', '<=', $dateTo);
+            $query->where('last_seen', '<=', $this->normalizeDateTimeBoundary($dateTo, true));
         }
 
         // Task 149: só bloqueio vigente (`BlockedIp::active()`, mesmo
@@ -1590,11 +1625,11 @@ class MonitorController extends Controller
         $query = BlockedIp::active();
 
         if ($dateFrom) {
-            $query->where('last_offense_at', '>=', $dateFrom);
+            $query->where('last_offense_at', '>=', $this->normalizeDateTimeBoundary($dateFrom, false));
         }
 
         if ($dateTo) {
-            $query->where('last_offense_at', '<=', $dateTo);
+            $query->where('last_offense_at', '<=', $this->normalizeDateTimeBoundary($dateTo, true));
         }
 
         // laravel-monitor 239 (v0.49.0): kind/tag combináveis com esta aba
@@ -3397,11 +3432,11 @@ class MonitorController extends Controller
         $query = Monitor::query();
 
         if ($dateFrom) {
-            $query->where('created_at', '>=', $dateFrom);
+            $query->where('created_at', '>=', $this->normalizeDateTimeBoundary($dateFrom, false));
         }
 
         if ($dateTo) {
-            $query->where('created_at', '<=', $dateTo);
+            $query->where('created_at', '<=', $this->normalizeDateTimeBoundary($dateTo, true));
         }
 
         if ($tag !== null) {
