@@ -47,13 +47,18 @@ class IpStat extends Model
      * `flagged_signals` e o cast de `$flagged` pra int abaixo.
      */
     /**
-     * Visitas acumuladas desse IP até agora (antes da request atual),
-     * `0` se o IP ainda não tem linha. Leitura indexada por `ip`
-     * (coluna `unique()`, mesma chave de conflito do upsert acima) - usada
-     * pelos trackers pra alimentar `ScraperSignalDetector::detect()` com
-     * o volume histórico antes de decidir os sinais da request atual
-     * (laravel-monitor 143), sem precisar que `recordVisit()` devolva
-     * nada (upsert() do query builder não retorna a linha afetada).
+     * Visitas acumuladas desse IP até agora (vitalício, nunca
+     * decrementado por design - ver README "Per-IP stats"), `0` se o IP
+     * ainda não tem linha. Leitura indexada por `ip` (coluna `unique()`,
+     * mesma chave de conflito do upsert acima), sem precisar que
+     * `recordVisit()` devolva nada (upsert() do query builder não
+     * retorna a linha afetada).
+     *
+     * Removido em laravel-monitor 399: até então também alimentava
+     * `ScraperSignalDetector::detect()` com o volume histórico antes de
+     * decidir os sinais da request atual (sinal `high_cumulative_visits`,
+     * laravel-monitor 143) - os trackers não chamam mais este método por
+     * esse motivo.
      */
     public static function visitCount(string $ip): int
     {

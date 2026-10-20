@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.74.0] - 2026-10-20
+### Removed
+- **Breaking: `high_cumulative_visits` scraper signal removed**
+  (`ScraperSignalDetector::detect`), along with its config key
+  `scraper_cumulative_visits_threshold` (default `5000`). It was added
+  (task 143) to catch a "patient" scraper that spreads a high volume
+  over a long time without ever bursting, but it is now actively
+  harmful: a legitimate per-token/per-IP integration can accumulate
+  thousands of calls just as easily as a scraper, and IP-volume alone
+  can no longer tell the two apart. The other three signals
+  (`high_frequency`, `empty_user_agent`/`known_bot_user_agent`,
+  `missing_browser_headers`) are unaffected. The config key is also
+  removed from `MonitorController::CONFIG_WHITELIST` (`getConfig`
+  action). `monitor:update` already ignores/reports any key present in
+  a published `config/monitor.php` that the current template no longer
+  has (`removed_keys` in its summary) — a stale install with
+  `scraper_cumulative_visits_threshold` still in its file keeps working
+  without any error, the command simply stops caring about that key.
+### Changed
+- **`AnonymousVisitorTracker`/`SessionVisitorTracker` no longer read
+  `IpStat::visitCount()` before every tracked request** — that extra
+  query only ever fed the now-removed signal.
+
 ## [0.73.1] - 2026-10-18
 ### Fixed
 - **`date_to` without a time component excluded the entire last day of

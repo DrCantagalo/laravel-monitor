@@ -312,8 +312,7 @@ class SessionVisitorTracker
                     }
                 }
 
-                $visitCount = IpStat::visitCount($ip) + 1;
-                $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent, $visitCount);
+                $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
                 $isScraper = $this->scraperSignalDetector->isScraper($signals);
                 $data['flags'] = $data['flags'] ?? [];
                 $data['flags']['scraper'] = $isScraper;
@@ -345,8 +344,7 @@ class SessionVisitorTracker
         }
 
         $rememberToken = Str::random(40);
-        $visitCount = IpStat::visitCount($ip) + 1;
-        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent, $visitCount);
+        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);

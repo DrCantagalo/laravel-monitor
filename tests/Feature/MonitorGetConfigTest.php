@@ -31,7 +31,7 @@ class MonitorGetConfigTest extends TestCase
         'visits_retention_days', 'access_log_retention_days', 'data_prune_interval_hours',
         'data_prune_max_rows_per_run', 'blocked_ips_cleanup_interval_hours',
         'scraper_frequency_window_seconds', 'scraper_frequency_threshold', 'scraper_signal_threshold',
-        'scraper_cumulative_visits_threshold', 'scraper_known_bot_user_agents',
+        'scraper_known_bot_user_agents',
         'auto_block_signal_threshold', 'auto_block_strike_decay_cooldown_days',
         'auto_block_permanent_after_lifetime_offenses',
         'ai_triage_min_age_hours',

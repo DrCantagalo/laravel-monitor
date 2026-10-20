@@ -2422,7 +2422,6 @@ class MonitorController extends Controller
         'scraper_frequency_window_seconds' => null,
         'scraper_frequency_threshold' => null,
         'scraper_signal_threshold' => null,
-        'scraper_cumulative_visits_threshold' => null,
         // Mascarada: só a contagem (ver maskConfigValue()), nunca a lista.
         'scraper_known_bot_user_agents' => null,
 

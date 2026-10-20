@@ -1268,14 +1268,14 @@ Signals checked by `ScraperSignalDetector::detect`:
   `Accept-Language`, `Accept-Encoding` are absent — real browsers always
   send all three, most scripted HTTP clients don't set any of them by
   default.
-- **`high_cumulative_visits`**: the IP's total visit count (`monitor_ip_stats.visit_count`,
-  including the current request) reaches
-  `config('monitor.scraper_cumulative_visits_threshold')` (default
-  `5000`). Independent of and complementary to `high_frequency` above —
-  that one catches a burst in a short window, this one catches a
-  "patient" scraper that spreads a high volume over a long time and never
-  bursts (e.g. one request per minute for weeks), which never trips
-  `high_frequency` no matter how long it keeps going.
+
+> **Removed in `0.74.0`**: `high_cumulative_visits` (IP's total visit
+> count, `monitor_ip_stats.visit_count`, reaching
+> `config('monitor.scraper_cumulative_visits_threshold')`, default
+> `5000`) was dropped — it false-positived on legitimate high-volume
+> traffic (e.g. a per-token/per-IP integration that legitimately
+> accumulates thousands of calls) with no reliable way to tell that apart
+> from a "patient" scraper by IP volume alone.
 
 Every signal that fires is appended to `data.flags.scraper_signals`
 (array of strings, e.g. `["empty_user_agent", "missing_browser_headers"]`)
@@ -2284,8 +2284,7 @@ here if deliberately added to this list in a package release):
   `blocked_ips_cleanup_interval_hours`.
 - Scraper detection: `scraper_frequency_window_seconds`,
   `scraper_frequency_threshold`, `scraper_signal_threshold`,
-  `scraper_cumulative_visits_threshold`, `scraper_known_bot_user_agents`
-  (masked — see below).
+  `scraper_known_bot_user_agents` (masked — see below).
 - Auto-block: `auto_block_signal_threshold`,
   `auto_block_strike_decay_cooldown_days`,
   `auto_block_permanent_after_lifetime_offenses`.
@@ -2666,11 +2665,10 @@ with two **optional** parameters:
 > it's a whole-row delete by `last_seen` age, an explicit, user-triggered
 > cleanup. **It is never reset/decremented as a side effect of deleting
 > or pruning `Monitor` rows** (the branches above that only delete
-> `monitors`/their cascaded children) — it's the memory
-> `ScraperSignalDetector`'s `high_cumulative_visits` signal and the
-> block-escalation history read (see "Per-IP stats" above), and silently
-> zeroing it whenever a Monitor is cleaned up would "launder" a
-> scraper's history. `getVisitorsByIp`'s `visits` field (the one that
+> `monitors`/their cascaded children) — it's the IP's block-escalation
+> history read (see "Per-IP stats" above), and silently zeroing it
+> whenever a Monitor is cleaned up would "launder" a scraper's history.
+> `getVisitorsByIp`'s `visits` field (the one that
 > *does* track current Monitors) is what drops when Monitors are
 > pruned/deleted — `lifetime_visits` only moves when the IP's own
 > `monitor_ip_stats` row is itself deleted or ages past a cutoff here.
