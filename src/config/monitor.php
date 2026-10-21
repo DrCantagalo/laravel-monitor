@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.74.0',
+    'version' => '0.75.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -60,6 +60,16 @@ return [
     // `updated_at` (última atividade), sem crescer — protege contra uma
     // sessão que gera requests sem parar (polling, bot com cookie).
     'visit_max_paths' => 200,
+
+    // laravel-monitor 400: boundary de "visita" pro tracking do grupo
+    // `api` (`MonitorApiMethod`) — stateless (sem sessão), então "visita"
+    // não é mais "uma sessão PHP" (ver `track_visits` acima), e sim "uma
+    // sequência de chamadas do MESMO token/IP sem um gap maior que este
+    // valor, em minutos". Zerado/sem chamada nova por mais que isso abre
+    // uma visita nova em `monitor_visits` pro mesmo Monitor (token ou IP),
+    // em vez de continuar anexando paths na última. Ver
+    // `Support\ApiVisitRecorder` e README "API route tracking".
+    'api_visit_gap_minutes' => 30,
 
     // Retenção, em dias, de `monitor_visits` (por `updated_at`, última
     // atividade da visita) — aplicada por `DataPruner` em `monitor:prune`/

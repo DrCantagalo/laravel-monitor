@@ -94,10 +94,30 @@ class AnonymousVisitorTracker
      * Rastreia o visitante sem sessão (API / bots / scrapers): detecta
      * sinais de scraper e cria/atualiza o registro Monitor associado ao
      * IP.
+     *
+     * `$extraSignals` (laravel-monitor 400, default `[]`, totalmente
+     * compatível com os call sites de antes): sinais que o CHAMADOR já
+     * sabe que se aplicam, mas que `ScraperSignalDetector::detect()` não
+     * tem como enxergar sozinho (ex: `MonitorApiMethod` passando
+     * `SIGNAL_INVALID_API_TOKEN` quando a request carregava um Bearer
+     * token que o Sanctum rejeitou) — mesclados aos sinais detectados
+     * ANTES de `isScraper()`/`IpStat::recordVisit()`/`maybeAutoBlock()`,
+     * então contam pro threshold normalmente, sem precisar duplicar
+     * nenhuma dessas chamadas no caller.
+     *
+     * Retorna o `Monitor` (criado ou reencontrado) — laravel-monitor 400:
+     * `MonitorApiMethod` precisa do id pra decidir o boundary de "visita"
+     * (`Support\ApiVisitRecorder`), que esta classe não faz por conta
+     * própria (nunca fez — "visita" sempre foi conceito do tracker COM
+     * sessão). Mudança de assinatura (`void` -> `Monitor`) segura: o único
+     * outro call site (`MonitorMethod`) já descartava o retorno.
      */
-    public function track(Request $request, string $path, ?string $userAgent, string $ip, bool $notFound = false): void
+    public function track(Request $request, string $path, ?string $userAgent, string $ip, bool $notFound = false, array $extraSignals = []): Monitor
     {
-        $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
+        $signals = array_values(array_unique([
+            ...$this->scraperSignalDetector->detect($request, $ip, $userAgent),
+            ...$extraSignals,
+        ]));
         $isScraper = $this->scraperSignalDetector->isScraper($signals);
         IpStat::recordVisit($ip, $isScraper, $signals);
         $this->maybeAutoBlock($ip, $signals);
@@ -129,7 +149,7 @@ class AnonymousVisitorTracker
             // SessionVisitorTracker — `updated_at` é a última atividade.
             $user->touch();
 
-            return;
+            return $user;
         }
 
         $data = [
@@ -145,5 +165,7 @@ class AnonymousVisitorTracker
         $this->applyPendingCustomTags($user->id);
         $user->recordHit($path, $notFound);
         $user->recordIp($ip);
+
+        return $user;
     }
 }

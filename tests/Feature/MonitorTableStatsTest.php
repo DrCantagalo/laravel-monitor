@@ -51,16 +51,18 @@ class MonitorTableStatsTest extends TestCase
         // abaixo pra um cenário com uma linha pré-existente).
         $this->assertSame(1, $rows['monitor_access_logs']['rows']);
 
-        // Todas as 10 tabelas do pacote presentes (nenhuma
+        // Todas as 11 tabelas do pacote presentes (nenhuma
         // monitor_blocked_paths/monitor_path_reviews — fundidas em
         // monitor_paths). monitor_access_logs desde a laravel-monitor 257
         // (v0.52.0) — só entra aqui pra transparência de volume, nunca em
         // clearData/pruneData (ver MonitorAccessLogTest). monitor_labels
         // (renomeada de monitor_ip_labels) desde a 258 (v0.53.0).
+        // monitor_api_block_events desde a 400 (v0.75.0).
         $this->assertEqualsCanonicalizing([
             'monitors', 'monitor_visits', 'monitor_visit_ips', 'monitor_page_hits',
             'monitor_ip_stats', 'monitor_blocked_ips', 'monitor_paths',
             'monitor_block_results', 'monitor_labels', 'monitor_access_logs',
+            'monitor_api_block_events',
         ], $rows->keys()->all());
 
         // 2 monitors + 1 monitor_labels + 1 monitor_access_logs (a
@@ -118,7 +120,7 @@ class MonitorTableStatsTest extends TestCase
 
         $tables = collect($response->json('data'))->pluck('table')->all();
         $this->assertNotContains('monitor_labels', $tables);
-        $this->assertCount(9, $tables);
+        $this->assertCount(10, $tables);
     }
 
     public function test_a_missing_monitor_access_logs_table_is_skipped_gracefully(): void
@@ -131,7 +133,7 @@ class MonitorTableStatsTest extends TestCase
 
         $tables = collect($response->json('data'))->pluck('table')->all();
         $this->assertNotContains('monitor_access_logs', $tables);
-        $this->assertCount(9, $tables);
+        $this->assertCount(10, $tables);
     }
 
     public function test_result_is_cached_and_a_direct_db_write_is_not_reflected_until_invalidated(): void

@@ -16,7 +16,7 @@ class Monitor extends Model
         'data' => AsArrayObject::class,
     ];
 
-    protected $fillable = ['data', 'id_token'];
+    protected $fillable = ['data', 'id_token', 'token_id'];
 
     /**
      * `monitor_page_hits` (uma linha por path por Monitor **por dia**,

@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.75.0] - 2026-10-21
+### Added
+- **`api` route-group tracking (`MonitorApiMethod`)**: the package now
+  self-registers a second middleware onto Laravel's `api` middleware group
+  (`appendMiddlewareToGroup`, same mechanism `MonitorMethod` already uses
+  for `web`) — requests in a consumer app's API routes (e.g.
+  Sanctum-authenticated routes) were previously invisible to the package
+  entirely. A valid Sanctum personal access token groups the request into
+  one `Monitor` **per token** (`personal_access_tokens.id`, never per
+  user), with `data.user_id` set to the token's owner; no token (or an
+  invalid one) falls back to the existing IP-based grouping
+  (`AnonymousVisitorTracker`). A token-grouped `Monitor` is created already
+  classified `kind=bot,source=auth` (protected against a later
+  `source=ai` overwrite) with tags `user`+`api`, and never becomes
+  `human`. New config key `api_visit_gap_minutes` (default `30`): since
+  this group has no session to anchor a "visit" to, a new row in
+  `monitor_visits` opens when there has been no call from the same
+  token/IP for longer than this many minutes; a call inside the window
+  appends to the latest visit instead. Block enforcement (IP/path) runs
+  the same way it does for `web`, but the blocked response is always a
+  JSON `403`/`404`, never the HTML page `web` uses. A blocked IP that
+  still carries a valid token additionally records an event in the new
+  `monitor_api_block_events` table (ip, token id/name, user id) —
+  queryable via the new `getApiBlockEvents` action (same auth as
+  `getBlockResults`). An invalid token is tracked by IP and now counts as
+  a scraper signal (`ScraperSignalDetector::SIGNAL_INVALID_API_TOKEN`).
+  `laravel/sanctum` is an **optional** dependency (`require-dev` only) —
+  absent, the whole feature degrades to plain IP tracking with no error.
+  See README "API route tracking"/"Sanctum (optional)".
+- **`getUserMonitors`/`getIpMonitors`/`getMonitorQueue` expose
+  `is_api_monitor`/`api_token_name`** per row, so the dashboard can tell a
+  token-grouped `Monitor` apart from a human/anonymous one.
+### Changed
+- **`AnonymousVisitorTracker::track()` now returns the resolved/created
+  `Monitor`** (was `void`) and accepts an optional `array $extraSignals =
+  []`, merged into the detected scraper signals before
+  `isScraper()`/`IpStat::recordVisit()`/`maybeAutoBlock()` run — used by
+  `MonitorApiMethod` to add `SIGNAL_INVALID_API_TOKEN` without duplicating
+  any of those calls. Both changes are backward compatible: the only
+  existing caller (`MonitorMethod`) already discarded the return value and
+  never passed a 4th argument.
+- **Extracted `MonitorMethod`'s inbound block-enforcement (`isIgnoredIp`/
+  `isBlocked`/`isPathBlocked`/`recordBlockedAttempt`) into a new trait,
+  `Http\Middleware\Concerns\BlocksInboundRequests`**, shared with
+  `MonitorApiMethod` — purely a refactor, no behavior change for `web`.
+
 ## [0.74.0] - 2026-10-20
 ### Removed
 - **Breaking: `high_cumulative_visits` scraper signal removed**

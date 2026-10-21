@@ -10,6 +10,7 @@ use Drcantagalo\LaravelMonitor\Console\Commands\MonitorInstallCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorPruneCommand;
 use Drcantagalo\LaravelMonitor\Console\Commands\MonitorUpdateCommand;
 use Drcantagalo\LaravelMonitor\Http\Middleware\AvoidMonitor;
+use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorApiMethod;
 use Drcantagalo\LaravelMonitor\Http\Middleware\MonitorMethod;
 use Drcantagalo\LaravelMonitor\Support\Monitor;
 use Drcantagalo\LaravelMonitor\Support\PendingCustomTags;
@@ -57,6 +58,20 @@ class MonitorServiceProvider extends ServiceProvider
         // persistia entre requests (bug: cada request criava um Monitor
         // novo em vez de reaproveitar o da sessao).
         $kernel->appendMiddlewareToGroup('web', MonitorMethod::class);
+
+        // laravel-monitor 400: mesma ideia, mas pro grupo `api` — antes
+        // desta task, uma request do grupo `api` (ex: rotas
+        // Sanctum-autenticadas de um app consumidor) era completamente
+        // invisível ao pacote (sem tracking, sem enforcement de bloqueio
+        // por IP). `MonitorApiMethod` não depende de `StartSession`
+        // (stateless por natureza — ver docblock da classe), então não
+        // precisa da mesma garantia de "nascer DENTRO de outro middleware"
+        // que motivou o `appendMiddlewareToGroup` de `web` acima; o append
+        // aqui é só pra rodar depois de qualquer middleware do próprio
+        // Sanctum que o app hospedeiro já tenha no grupo `api`
+        // (`EnsureFrontendRequestsAreStateful`, normalmente prependido por
+        // `SanctumServiceProvider`), nunca antes.
+        $kernel->appendMiddlewareToGroup('api', MonitorApiMethod::class);
 
         // Alias `avoid-monitor` (laravel-monitor 151) - exclusão permanente
         // de tracking por rota/grupo, ex: `Route::middleware('avoid-monitor')

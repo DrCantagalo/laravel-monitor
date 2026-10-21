@@ -8,6 +8,17 @@ use Illuminate\Support\Facades\Cache;
 class ScraperSignalDetector
 {
     /**
+     * laravel-monitor 400: sinal manual (não detectado por `detect()` em
+     * si, que não sabe nada sobre tokens) — adicionado pelo chamador
+     * (`MonitorApiMethod`) ao array de sinais de uma request do grupo
+     * `api` que carregava um Bearer token que o Sanctum não reconheceu
+     * (inválido/expirado/revogado). Mesmo tratamento de qualquer outro
+     * sinal a partir daqui (conta pra `isScraper()`/`auto_block_signal_threshold`,
+     * entra em `data.flags.scraper_signals`).
+     */
+    public const SIGNAL_INVALID_API_TOKEN = 'invalid_api_token';
+
+    /**
      * Heurística de detecção de scraper/bot, compartilhada entre
      * `AnonymousVisitorTracker` (requests sem sessão) e
      * `SessionVisitorTracker` (requests com sessão). Combina sinais já

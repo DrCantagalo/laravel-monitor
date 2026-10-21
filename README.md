@@ -16,6 +16,15 @@ checks down with it: `isBlocked()`/`isPathBlocked()` fall back to
 querying the database directly instead of assuming a request is not
 blocked — see "Fail-safe against cache store outages" below.
 
+### Sanctum (optional, since `0.75.0`)
+
+[`laravel/sanctum`](https://laravel.com/docs/sanctum) is an **optional**
+dependency, used only by the `api` route-group tracking described in
+"API route tracking" below. If it is not installed, that feature simply
+degrades to IP-based tracking for every request — no error, no exception,
+nothing to configure. Install it (`composer require laravel/sanctum`) to
+get per-token grouping instead.
+
 ## Updating
 
 First-time setup is `composer require drcantagalo/laravel-monitor` followed
@@ -2979,6 +2988,66 @@ Config (all in `config/monitor.php`; `monitor:update` adds missing keys):
 `Monitor::skipTracking()` is unchanged. A concurrent pair of requests from
 the same session can, rarely, drop one step of a journey (the visit row is
 read-modify-written); hit counts are unaffected (atomic).
+
+## API route tracking (`MonitorApiMethod`, since `0.75.0`)
+
+Until `0.75.0`, requests in Laravel's `api` route-group middleware — e.g.
+a consumer app's [Sanctum](https://laravel.com/docs/sanctum)-authenticated
+API routes — were completely invisible to this package: no tracking, no
+IP/path block enforcement. The package now self-registers a second
+middleware, `MonitorApiMethod`, onto the `api` group (`appendMiddlewareToGroup`,
+same mechanism `MonitorMethod` already uses for `web`) — nothing to wire up
+in your own `bootstrap/app.php`/Kernel.
+
+**Grouping**: a request carrying a valid Sanctum personal access token is
+grouped into **one `Monitor` per token** (`personal_access_tokens.id`), not
+per user — two tokens of the same user (e.g. a mobile app and a server
+integration) are two separate `Monitor` rows, each with `data.user_id` set
+to the token's owner. A request with no token (or an invalid one) falls
+back to the same IP-based grouping the `web` group's anonymous tracker
+already uses (`AnonymousVisitorTracker`). The token is resolved directly via
+`PersonalAccessToken::findToken()` — it does **not** depend on the matched
+route declaring `auth:sanctum`, so an API route that only *optionally*
+accepts a token is still grouped correctly when one is present.
+
+**Classification**: a token-grouped `Monitor` is created already classified
+— `kind = 'bot'`, `source = 'auth'` (protected against a later `source=ai`
+overwrite, same rule as any other protected source — see "IP
+classification" below), tags `user` + `api`. It never becomes `human`, and
+shows up in the "clean bots" queue (`getMonitorQueue(group=clean_bots)`)
+like any other bot.
+
+**Visits**: since this group is stateless (no session to track "which visit
+is still open"), the visit boundary is time-based instead: a new row in
+`monitor_visits` starts when there has been no call from the same
+token/IP for more than `config('monitor.api_visit_gap_minutes')` minutes
+(default `30`); a call inside that window appends to the latest visit of
+that same `Monitor` instead (same `visit_max_paths` cap as the `web`
+group). Both are recorded the same way `VisitRecorder` already does for
+session-based visits.
+
+**IP blocking still applies even with a valid token**: if the request's IP
+is on the blocklist, the response is a clear JSON `403`
+(`{"success": false, "message": "Blocked"}`) — **never** the HTML block
+page the `web` group's middleware produces. When this happens *and* the
+request carried a valid token, an event ("request bloqueada com token
+válido") is additionally recorded in `monitor_api_block_events` (ip, token
+id/name, user id) — queryable via the new `getApiBlockEvents` action
+(same read-token auth as `getBlockResults`), for a future dashboard to
+surface "someone with valid credentials is calling from a blocked IP".
+
+**An invalid token** (present but rejected by `PersonalAccessToken::findToken()`,
+including an expired one) is tracked by IP and counts as a new scraper
+signal (`ScraperSignalDetector::SIGNAL_INVALID_API_TOKEN`) — a request with
+no `Authorization` header at all never gets this signal, only one that
+actively presented a bad token.
+
+**`getUserMonitors`/`getIpMonitors`/`getMonitorQueue`** now also expose, per
+row: `is_api_monitor` (bool) and `api_token_name` (the Sanctum token's
+`name`, or `null` for a non-API `Monitor` or an orphaned `token_id`).
+
+`laravel/sanctum` itself is an **optional** dependency — see "Sanctum
+(optional)" above.
 
 ## Advanced usage
 

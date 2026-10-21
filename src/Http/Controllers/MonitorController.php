@@ -8,6 +8,7 @@ use Drcantagalo\LaravelMonitor\Models\BlockResult;
 use Drcantagalo\LaravelMonitor\Models\IpStat;
 use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorAccessLog;
+use Drcantagalo\LaravelMonitor\Models\MonitorApiBlockEvent;
 use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
@@ -33,6 +34,7 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Laravel\Sanctum\PersonalAccessToken;
 
 class MonitorController extends Controller
 {
@@ -49,6 +51,8 @@ class MonitorController extends Controller
         'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
         'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
         'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline', 'getPageTimeline',
+        // laravel-monitor 400:
+        'getApiBlockEvents',
     ];
 
     /**
@@ -133,7 +137,7 @@ class MonitorController extends Controller
             'getData', 'getPages', 'getVisitorsByIp', 'getVisitorPaths', 'getBlockedIps', 'getBlockedPaths',
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
             'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
-            'getPageTimeline',
+            'getPageTimeline', 'getApiBlockEvents',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -194,6 +198,9 @@ class MonitorController extends Controller
 
             case 'getBlockResults':
                 return $this->getBlockResults($request);
+
+            case 'getApiBlockEvents':
+                return $this->getApiBlockEvents($request);
 
             case 'getIpMonitors':
                 return $this->getIpMonitors($request);
@@ -841,6 +848,58 @@ class MonitorController extends Controller
                 ];
             } catch (QueryException $e) {
                 Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada ao listar getBlockResults. Erro original: '.$e->getMessage());
+
+                return [
+                    'data' => [],
+                    'meta' => ['page' => $page, 'per_page' => $perPage, 'total' => 0, 'last_page' => 1],
+                ];
+            }
+        });
+
+        return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * laravel-monitor 400, item 5: listagem paginada de
+     * `monitor_api_block_events` — "request bloqueada com token válido"
+     * (`MonitorApiMethod::recordValidTokenBlockEvent()`, a única origem
+     * destas linhas). Mesma auth de leitura de `getBlockResults`
+     * (`local_token` permanente ou o token efêmero de `issueReadToken`) e
+     * o mesmo esquema de cache curto/fixo (`block_results_cache_ttl_seconds`
+     * — mutação por request bloqueada com token válido, não por ação de
+     * admin, mesmo raciocínio de `getBlockResults`/`blockedAttemptsTotal()`).
+     * Fail-open: tabela ainda não migrada devolve página vazia.
+     *
+     * task home-page 401 (fora do escopo desta): vai construir a UI do
+     * dashboard em cima disto — aqui só garantimos que o dado existe e é
+     * consultável no mesmo padrão de endpoint que o resto do pacote já
+     * usa.
+     */
+    protected function getApiBlockEvents(Request $request)
+    {
+        $page = max(1, (int) $request->input('page', 1));
+        $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
+
+        $cacheKey = 'monitor:api-block-events:list:'.md5(json_encode([$page, $perPage]));
+        $ttl = now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45));
+
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
+            try {
+                $paginator = MonitorApiBlockEvent::query()
+                    ->orderByDesc('id')
+                    ->paginate($perPage, ['id', 'ip', 'token_id', 'token_name', 'user_id', 'message', 'created_at'], 'page', $page);
+
+                return [
+                    'data' => $paginator->items(),
+                    'meta' => [
+                        'page' => $paginator->currentPage(),
+                        'per_page' => $paginator->perPage(),
+                        'total' => $paginator->total(),
+                        'last_page' => $paginator->lastPage(),
+                    ],
+                ];
+            } catch (QueryException $e) {
+                Log::warning('[laravel-monitor] tabela monitor_api_block_events não encontrada ao listar getApiBlockEvents. Erro original: '.$e->getMessage());
 
                 return [
                     'data' => [],
@@ -2033,7 +2092,7 @@ class MonitorController extends Controller
             ->whereIn('id', $monitorIds)
             ->orderByDesc('updated_at')
             ->orderByDesc('id')
-            ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
+            ->paginate($perPage, ['id', 'data', 'token_id', 'created_at', 'updated_at'], 'page', $page);
 
         return [
             'data' => $this->hydrateMonitorRows($paginator->items()),
@@ -2098,11 +2157,28 @@ class MonitorController extends Controller
         $userIds = array_map(fn (Monitor $monitor) => $monitor->data['user_id'] ?? null, $monitors);
         $contacts = $this->resolveUserContacts($userIds);
 
-        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts, $labels, $contacts) {
+        // laravel-monitor 400, item 8: nome do token Sanctum de cada
+        // Monitor do grupo `api` (`token_id` preenchido) — uma query só
+        // pro lote inteiro (nunca uma por linha), e só quando
+        // `laravel/sanctum` está instalado (dependência opcional: sem ela
+        // não existe `personal_access_tokens` pra consultar, e todo
+        // `token_id` aqui já seria `null` de qualquer forma, já que
+        // `MonitorApiMethod` nunca grava um sem o pacote presente).
+        $tokenNamesById = $this->resolveApiTokenNames($monitors);
+
+        return array_map(function (Monitor $monitor) use ($ipsByMonitor, $visitsCounts, $labels, $contacts, $tokenNamesById) {
             $row = $monitor->toArray();
             $row['data'] = DataSanitizer::sanitize((array) ($row['data'] ?? []));
             $row['ips'] = $ipsByMonitor[$monitor->id] ?? [];
             $row['visits_count'] = $visitsCounts[$monitor->id] ?? 0;
+
+            // laravel-monitor 400, item 8: flag + nome do token pro
+            // dashboard distinguir um Monitor de API (token Sanctum) de um
+            // Monitor humano/anônimo comum.
+            $row['is_api_monitor'] = $monitor->token_id !== null;
+            $row['api_token_name'] = $monitor->token_id !== null
+                ? ($tokenNamesById[$monitor->token_id] ?? null)
+                : null;
 
             // laravel-monitor 258 (v0.53.0): kind/tags/note/source/
             // classified_at agora vêm do PRÓPRIO Monitor (monitor_labels),
@@ -2123,6 +2199,39 @@ class MonitorController extends Controller
 
             return $row;
         }, $monitors);
+    }
+
+    /**
+     * laravel-monitor 400: `personal_access_tokens.name` de cada
+     * `token_id` presente no lote — `laravel/sanctum` é dependência
+     * OPCIONAL do pacote (ver README "Sanctum (optional)"), então esta
+     * query só roda quando a classe existe; sem ela, devolve `[]` (todo
+     * `is_api_monitor`/`api_token_name` do lote já seria `false`/`null`
+     * de qualquer forma, já que nenhum Monitor teria `token_id` sem
+     * `MonitorApiMethod` ter conseguido resolver um token Sanctum em
+     * primeiro lugar).
+     *
+     * @param  array<int, Monitor>  $monitors
+     * @return array<int, string>
+     */
+    protected function resolveApiTokenNames(array $monitors): array
+    {
+        if (! class_exists(PersonalAccessToken::class)) {
+            return [];
+        }
+
+        $tokenIds = array_values(array_filter(array_unique(
+            array_map(fn (Monitor $monitor) => $monitor->token_id, $monitors)
+        )));
+
+        if (empty($tokenIds)) {
+            return [];
+        }
+
+        return PersonalAccessToken::query()
+            ->whereIn('id', $tokenIds)
+            ->pluck('name', 'id')
+            ->all();
     }
 
     /**
@@ -2179,7 +2288,7 @@ class MonitorController extends Controller
         $paginator = Monitor::forUserId($userId)
             ->orderByDesc('updated_at')
             ->orderByDesc('id')
-            ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
+            ->paginate($perPage, ['id', 'data', 'token_id', 'created_at', 'updated_at'], 'page', $page);
 
         return [
             'data' => $this->hydrateMonitorRows($paginator->items()),
@@ -2307,6 +2416,8 @@ class MonitorController extends Controller
         // `access_log_retention_days`) ou `monitor:access-log --purge` —
         // ver README "Access log".
         'monitor_access_logs',
+        // laravel-monitor 400.
+        'monitor_api_block_events',
     ];
 
     /**
@@ -3479,7 +3590,7 @@ class MonitorController extends Controller
         $paginator = $query
             ->orderByDesc('updated_at')
             ->orderByDesc('id')
-            ->paginate($perPage, ['id', 'data', 'created_at', 'updated_at'], 'page', $page);
+            ->paginate($perPage, ['id', 'data', 'token_id', 'created_at', 'updated_at'], 'page', $page);
 
         $rows = $this->hydrateMonitorRows($paginator->items());
 

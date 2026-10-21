@@ -3,22 +3,23 @@
 namespace Drcantagalo\LaravelMonitor\Http\Middleware;
 
 use Closure;
-use Drcantagalo\LaravelMonitor\Models\BlockedIp;
-use Drcantagalo\LaravelMonitor\Models\MonitorPath;
+use Drcantagalo\LaravelMonitor\Http\Middleware\Concerns\BlocksInboundRequests;
 use Drcantagalo\LaravelMonitor\Support\AnonymousVisitorTracker;
-use Drcantagalo\LaravelMonitor\Support\ScraperBlocker;
 use Drcantagalo\LaravelMonitor\Support\SessionVisitorTracker;
 use Exception;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\Response;
 
 class MonitorMethod
 {
+    // laravel-monitor 400: checagem de ignored-IPs + enforcement de
+    // IP/path bloqueado ("na ida") agora vive em `BlocksInboundRequests`,
+    // compartilhada com `MonitorApiMethod` (grupo `api`) — ver docblock do
+    // trait pro raciocínio completo de por que isso saiu daqui.
+    use BlocksInboundRequests;
+
     public function __construct(
         protected SessionVisitorTracker $sessionTracker,
         protected AnonymousVisitorTracker $anonymousTracker,
@@ -94,11 +95,7 @@ class MonitorMethod
                 // falha ao registrar (banco fora, tabela ausente) não pode
                 // impedir o abort() abaixo nem virar 500 — mesmo fail-open
                 // do resto do método.
-                try {
-                    (new ScraperBlocker)->registerOffense($ip, 'scraper-path');
-                } catch (\Throwable $e) {
-                    Log::warning('[laravel-monitor] falha ao registrar ofensa automática de honeypot — Erro original: '.$e->getMessage());
-                }
+                $this->registerHoneypotOffense($ip);
             }
 
             $this->recordBlockedAttempt($ip);
@@ -139,140 +136,8 @@ class MonitorMethod
         return $response;
     }
 
-    /**
-     * `monitor.ignore_ips`: IPs exatos ou faixas CIDR (IPv4/IPv6, via
-     * `IpUtils::checkIp`). Só uma comparação em memória — não consulta banco
-     * nem cache, então custa praticamente nada por request.
-     */
-    protected function isIgnoredIp(?string $ip): bool
-    {
-        if ($ip === null || $ip === '') {
-            return false;
-        }
-
-        $ignored = array_values(array_filter(array_map(
-            fn ($entry) => trim((string) $entry),
-            (array) config('monitor.ignore_ips', [])
-        )));
-
-        return $ignored !== [] && IpUtils::checkIp($ip, $ignored);
-    }
-
-    /**
-     * Confere se o path (sem host) foi flagado como scrapper (via
-     * flagScraperPath), cacheado como `isBlocked()` acima.
-     *
-     * `strtolower()` antes de comparar: `monitor_paths.path` é sempre
-     * gravado em minúsculo (`MonitorController::normalizePathInput()`),
-     * mas o path de uma request ao vivo mantém a caixa exata que o
-     * visitante mandou. Sem normalizar aqui, esta query dependeria da
-     * collation do banco pra casar (MySQL é case-insensitive por padrão,
-     * SQLite/Postgres não são) - explícito em vez de implícito, e a chave
-     * de cache também fica normalizada, senão "File.php" e "file.php"
-     * geram entradas de cache separadas pro mesmo bloqueio.
-     */
-    protected function isPathBlocked(string $path): bool
-    {
-        $path = strtolower($path);
-        $query = fn () => MonitorPath::where('path', $path)->where('status', 'trap')->exists();
-
-        try {
-            return Cache::remember(
-                "monitor:blocked-path:{$path}",
-                (int) config('monitor.blocked_ip_cache_ttl', 60),
-                $query
-            );
-        } catch (QueryException $e) {
-            // Tabela ainda não migrada: deixa subir pro catch(QueryException)
-            // de handle(), que já trata esse caso assumindo `false`.
-            throw $e;
-        } catch (\Throwable $e) {
-            // Cache store fora do ar (Redis/Memcached indisponível, etc):
-            // NÃO assume `false` aqui — deixaria passar um path que devia
-            // continuar bloqueado bem na janela de instabilidade. Em vez
-            // disso, consulta o banco direto, sem cache, só logando o aviso.
-            Log::warning('[laravel-monitor] cache store indisponível ao checar bloqueio de path — consultando banco diretamente. Erro original: '.$e->getMessage());
-
-            return $query();
-        }
-    }
-
-    /**
-     * Confere se o IP está na blocklist (`monitor_blocked_ips`), cacheado
-     * por `monitor.blocked_ip_cache_ttl` segundos pra evitar uma query por
-     * request. Cache é invalidado em `updateBlockedIps` ao adicionar um
-     * IP novo.
-     *
-     * `blocked_until` null = permanente (bloqueio manual, ou automático já
-     * escalado a permanente — ver `ScraperBlocker::registerOffense`);
-     * um `blocked_until` no passado não conta mais como bloqueado (mesmo
-     * predicado de `BlockedIp::scopeActive()`, task 147 — reusado daqui em
-     * vez de duplicado, pra nunca divergir do que `DataPruner` considera
-     * "bloqueado agora"). Como o TTL do cache acima já é curto por padrão
-     * (60s), a expiração natural do cache garante que um bloqueio expirado
-     * some da aplicação nesse intervalo, sem precisar de nenhum job/cron
-     * dedicado.
-     */
-    protected function isBlocked(string $ip): bool
-    {
-        $query = fn () => BlockedIp::where('ip', $ip)->active()->exists();
-
-        try {
-            return Cache::remember(
-                "monitor:blocked-ip:{$ip}",
-                (int) config('monitor.blocked_ip_cache_ttl', 60),
-                $query
-            );
-        } catch (QueryException $e) {
-            // Tabela ainda não migrada: deixa subir pro catch(QueryException)
-            // de handle(), que já trata esse caso assumindo `false`.
-            throw $e;
-        } catch (\Throwable $e) {
-            // Cache store fora do ar (Redis/Memcached indisponível, etc):
-            // NÃO assume `false` aqui — deixaria passar um IP que devia
-            // continuar bloqueado bem na janela de instabilidade. Em vez
-            // disso, consulta o banco direto, sem cache, só logando o aviso.
-            Log::warning('[laravel-monitor] cache store indisponível ao checar bloqueio de IP — consultando banco diretamente. Erro original: '.$e->getMessage());
-
-            return $query();
-        }
-    }
-
-    /**
-     * Incrementa o contador de tentativas bloqueadas desse IP em
-     * `monitor_block_results` (task 83) — chamado logo antes do
-     * `abort()` acima, cobrindo os dois motivos de bloqueio de uma vez
-     * só: `$blocked` já é o OR de `isBlocked()`/`isPathBlocked()`, então
-     * não importa qual dos dois disparou — o IP da request atual é quem
-     * toma o abort (403 se já bloqueado, 404 se é o primeiro hit num path
-     * honeypot — task 148) e é quem conta aqui, inclusive um IP nunca
-     * antes visto batendo num path já flagado como honeypot (nunca esteve
-     * em `monitor_blocked_ips` por si só). O status HTTP da resposta não
-     * afeta essa contagem — ela soma qualquer tentativa bloqueada,
-     * independente do código retornado.
-     *
-     * Upsert atômico via query builder (uma query, sem race entre um
-     * SELECT+UPDATE/INSERT concorrentes do mesmo IP martelando o mesmo
-     * endpoint bloqueado) — `upsert()` gera o SQL correto pro driver ativo
-     * (`ON DUPLICATE KEY UPDATE` no MySQL, `ON CONFLICT` no SQLite/Postgres),
-     * mesmo motivo de escolha já documentado pros outros upserts do
-     * pacote (`IpStat::recordVisit`).
-     *
-     * Fail-open: se `monitor_block_results` ainda não existir (migration
-     * não rodou), essa query não pode derrubar o bloqueio em si —
-     * `abort()` roda de qualquer jeito, fora deste método, mesmo se o
-     * catch abaixo disparar.
-     */
-    protected function recordBlockedAttempt(string $ip): void
-    {
-        try {
-            DB::table('monitor_block_results')->upsert(
-                ['ip' => $ip, 'counter' => 1, 'last_attempt_at' => now()],
-                ['ip'],
-                ['counter' => DB::raw('counter + 1'), 'last_attempt_at' => now()]
-            );
-        } catch (QueryException $e) {
-            Log::warning('[laravel-monitor] tabela monitor_block_results não encontrada — rode `php artisan migrate` ou `php artisan monitor:install`. Erro original: '.$e->getMessage());
-        }
-    }
+    // laravel-monitor 400: isIgnoredIp()/isPathBlocked()/isBlocked()/
+    // recordBlockedAttempt()/registerHoneypotOffense() agora vivem em
+    // `Concerns\BlocksInboundRequests` (importado acima) — ver o docblock
+    // do trait pro raciocínio completo.
 }
