@@ -2728,6 +2728,41 @@ deleted, without deleting anything. Same response shape as `clearData`
 summary ("this will delete N monitors, M IP stats, ...") before the user
 commits to the actual `clearData` call.
 
+## Clearing the dashboard's listing caches (`clearCache`, since `0.76.0`)
+
+`POST /monitor/handler` with `action=clearCache` — same auth as
+`updateBlockedIps`/`clearData` (permanent `local_token` only, **not**
+accepted with the ephemeral read token from `issueReadToken`). No
+cooldown/throttle: only a caller that already holds `local_token` can
+reach this at all, so an explicit decision was made not to add one on top.
+
+Bumps every cache the dashboard's listing/aggregate endpoints use, so the
+very next read recomputes instead of serving something stale:
+
+- The versioned caches `getPages`/`getVisitorsByIp`/`getBlockedIps`/
+  `getBlockedPaths`/`getUserMonitors`/`getIpMonitors`/`getMonitorQueue`/
+  `getMonitorQueueCounts`/`getTableStats`/`getConfig` already use
+  (`monitor:pages:version`/`monitor:listings:version` — the same counters
+  any write action, like `updateBlockedIps` or `setMonitorKind`, already
+  bumps on its own).
+- `getBlockResults`/`getApiBlockEvents`'s own cache, which lives **outside**
+  that versioned scheme (short, fixed TTL — `block_results_cache_ttl_seconds`
+  — because it mutates on every blocked request, not on an admin action; see
+  "Blocked-attempt counter" below). Its cache key includes a hash of
+  `page`/`per_page`, so there is no fixed key to `Cache::forget()` directly
+  — it gets the same version-counter treatment instead
+  (`Support\BlockResultsListCache`).
+- The fixed-key "data totals" caches (`data_totals_cache_ttl_seconds`) —
+  `visitors_total`/`monitors_by_kind`/`unique_ips_total` from `getData`, plus
+  `blocked_attempts_total` (same TTL family as `getBlockResults` above, but a
+  predictable key) — forgotten directly, no version needed.
+
+**Deliberately leaves alone**: the middleware's own IP/path block caches
+(`monitor:blocked-ip:*`/`monitor:blocked-path:*`) and the ephemeral
+read-token cache (`monitor:read-token:*`) — clearing the first would
+briefly un-block an actively-blocked IP until the next request re-primes
+the cache, and the second has nothing to do with dashboard listings.
+
 ### Deprecated: `pruneData`
 
 `pruneData` still works, mapped internally to `clearData` with the

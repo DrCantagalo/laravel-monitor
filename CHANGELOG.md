@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.76.0] - 2026-10-21
+### Added
+- **New handler action `clearCache`** (`local_token` only, same auth as
+  `updateBlockedIps`/`clearData`, no cooldown/throttle): bumps every cache
+  the dashboard's listings/aggregates use — the existing versioned scheme
+  (`monitor:pages:version`/`monitor:listings:version`, via
+  `ListingsCache`/`invalidatePagesCache()`), a brand new version counter
+  for `getBlockResults`/`getApiBlockEvents`'s own cache
+  (`Support\BlockResultsListCache` — that one lives outside the versioned
+  scheme on purpose, see its docblock, and its key includes a
+  page/per_page hash so it can't be `Cache::forget()`'d directly), and the
+  fixed-key "data totals" caches (`visitors_total`/`monitors_by_kind`/
+  `unique_ips_total`/`blocked_attempts_total`). Deliberately leaves the
+  middleware's own IP/path block caches and the read-token cache alone —
+  see README "Clearing the dashboard's listing caches".
+### Fixed
+- **`Monitor::markAsHuman()` and `Monitor::addTag()`/`addTags()`/
+  `addTagForUser()` never invalidated the dashboard's listings cache**
+  after changing a Monitor's `kind`/tags — found while auditing every
+  code path that writes `kind`/tags for this same task.
+  `MonitorController::setMonitorKind()`/`setMonitorTags()` already did
+  this correctly; these three (all outside the controller) did not, so a
+  Monitor marked human via `markAsHuman()`, or freshly tagged via
+  `addTag()`/`addTags()`/`addTagForUser()`, could keep showing up with
+  its old classification/tags in `getVisitorsByIp`/`getMonitorQueue`/etc
+  for up to `listings_cache_ttl_minutes` afterwards. Both now call
+  `ListingsCache::invalidate()` on an actual change (never on a silent
+  no-op, e.g. `markAsHuman()` over an already-protected `source`).
+
 ## [0.75.0] - 2026-10-21
 ### Added
 - **`api` route-group tracking (`MonitorApiMethod`)**: the package now

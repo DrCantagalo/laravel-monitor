@@ -282,7 +282,21 @@ class Monitor
      */
     protected function applyCustomTags(int $monitorId, array $tags): bool
     {
-        return MonitorLabel::mergeCustomTags($monitorId, $tags);
+        $applied = MonitorLabel::mergeCustomTags($monitorId, $tags);
+
+        // laravel-monitor 402: mesmo gap de `markAsHuman()` acima (ver
+        // comentário lá) — `addTag()`/`addTags()`/`addTagForUser()` são
+        // chamadas explícitas do host app (nunca automáticas por
+        // request, ao contrário de `maybeTagOrigin()`/`syncUserTag()`
+        // internos dos trackers, que SIM rodam a cada visitante novo e
+        // de propósito NÃO invalidam isto — bumpar a versão a cada
+        // visitante novo destruiria o cache de listagens pra todo
+        // mundo), então o custo de invalidar aqui é desprezível.
+        if ($applied) {
+            ListingsCache::invalidate();
+        }
+
+        return $applied;
     }
 
     /**
@@ -402,6 +416,18 @@ class Monitor
             $label->source = $source;
             $label->classified_at = now();
             $label->save();
+
+            // laravel-monitor 402: faltava aqui — `setMonitorKind`/
+            // `setMonitorTags` (MonitorController) já invalidam
+            // `ListingsCache` nas suas escritas de kind/tags, mas
+            // `markAsHuman()` (escrita interna, fora do controller — ver
+            // docblock da classe) nunca chamava isso, então o dashboard
+            // podia continuar mostrando um Monitor recém-verificado como
+            // humano em `unclassified`/`flagged` por até
+            // `listings_cache_ttl_minutes` depois da chamada. Achado e
+            // corrigido durante a auditoria da task home-page 402 (ver
+            // CHANGELOG).
+            ListingsCache::invalidate();
 
             return true;
         });

@@ -13,6 +13,7 @@ use Drcantagalo\LaravelMonitor\Models\MonitorLabel;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Models\MonitorVisit;
 use Drcantagalo\LaravelMonitor\Support\AccessLogger;
+use Drcantagalo\LaravelMonitor\Support\BlockResultsListCache;
 use Drcantagalo\LaravelMonitor\Support\DashboardAccess;
 use Drcantagalo\LaravelMonitor\Support\DataPruner;
 use Drcantagalo\LaravelMonitor\Support\DataSanitizer;
@@ -240,6 +241,9 @@ class MonitorController extends Controller
 
             case 'clearData':
                 return $this->clearData($request);
+
+            case 'clearCache':
+                return $this->clearCache($request);
 
             case 'previewClearData':
                 return $this->previewClearData($request);
@@ -828,7 +832,13 @@ class MonitorController extends Controller
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
 
-        $cacheKey = 'monitor:block-results:list:'.md5(json_encode([$page, $perPage]));
+        // laravel-monitor 402: chave agora versionada (`BlockResultsListCache`)
+        // em vez de fixa — só pro novo handler `clearCache` poder invalidar
+        // isto sem precisar prever/escanear cada combinação de
+        // page/per_page já cacheada. O TTL continua o mesmo curto/fixo de
+        // sempre (mutação a cada request bloqueada, não por ação de
+        // admin) — ver docblock de `BlockResultsListCache`.
+        $cacheKey = BlockResultsListCache::key('block-results', [$page, $perPage]);
         $ttl = now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45));
 
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
@@ -880,7 +890,9 @@ class MonitorController extends Controller
         $page = max(1, (int) $request->input('page', 1));
         $perPage = max(1, min(100, (int) $request->input('per_page', 20)));
 
-        $cacheKey = 'monitor:api-block-events:list:'.md5(json_encode([$page, $perPage]));
+        // laravel-monitor 402: versionado via `BlockResultsListCache` (mesmo
+        // contador de `getBlockResults`) — ver docblock da classe.
+        $cacheKey = BlockResultsListCache::key('api-block-events', [$page, $perPage]);
         $ttl = now()->addSeconds((int) config('monitor.block_results_cache_ttl_seconds', 45));
 
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
@@ -3931,6 +3943,57 @@ class MonitorController extends Controller
     protected function invalidateListingsCache(): void
     {
         ListingsCache::invalidate();
+    }
+
+    /**
+     * laravel-monitor 402: limpa TODOS os caches de listagem do dashboard
+     * sob demanda (botão explícito, nunca automático) — pensada pro caso
+     * em que o consumidor sabe que algo mudou por fora do fluxo normal do
+     * pacote (ex: um script fazendo UPDATE direto no banco) e não quer
+     * esperar o TTL/a próxima escrita natural invalidar por conta própria.
+     *
+     * Mesma auth dos outros handlers de escrita (`local_token` permanente
+     * — NÃO entra em `$isValidReadToken` nem em `ACCESS_LOGGED_ACTIONS` no
+     * dispatcher, igual `updateBlockedIps`/`clearData`). Sem cooldown/
+     * throttle de propósito — decisão explícita do dono (só quem já tem
+     * `local_token`/role admin/webmaster pode chamar isto, mesma auth de
+     * sempre).
+     *
+     * Três frentes, cada uma documentada no próprio helper que ela chama:
+     * 1. `invalidatePagesCache()`/`invalidateListingsCache()` — esquema
+     *    versionado de sempre (`monitor:pages:version`/
+     *    `monitor:listings:version`), mesmos contadores que qualquer ação
+     *    de escrita normal já incrementa.
+     * 2. `BlockResultsListCache::invalidate()` — a ÚNICA outra chave com
+     *    componente de hash/variável que esta task encontrou fora do
+     *    esquema versionado (`getBlockResults`/`getApiBlockEvents`) — ver
+     *    docblock da classe pro raciocínio completo.
+     * 3. As chaves FIXAS/previsíveis de "data totals"
+     *    (`data_totals_cache_ttl_seconds`) e o total agregado de
+     *    block-results (`block_results_cache_ttl_seconds`, mas sem hash —
+     *    `blockedAttemptsTotal()`) — `Cache::forget()` direto, sem
+     *    precisar de versão nenhuma (a chave já é previsível).
+     *
+     * Deliberadamente NÃO toca `monitor:blocked-ip:*`/`monitor:blocked-path:*`
+     * (cache de enforcement do middleware, invalidado só pelas próprias
+     * ações de bloqueio/desbloqueio — limpar isto aqui desbloquearia
+     * brevemente um IP ativamente bloqueado) nem o cache do read-token
+     * (`monitor:read-token:*`, TTL próprio, sem ação de limpeza manual) —
+     * os dois ficam fora de propósito, efeitos colaterais indesejados que
+     * não têm nada a ver com "cache de listagem do dashboard".
+     */
+    protected function clearCache(Request $request)
+    {
+        $this->invalidatePagesCache();
+        $this->invalidateListingsCache();
+        BlockResultsListCache::invalidate();
+
+        Cache::forget('monitor:data:visits-total');
+        Cache::forget('monitor:data:monitors-by-kind');
+        Cache::forget('monitor:data:unique-ips-total');
+        Cache::forget('monitor:block-results:total');
+
+        return response()->json(['success' => true]);
     }
 
     /**
