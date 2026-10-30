@@ -168,6 +168,11 @@ class SessionVisitorTrackerAutoHumanTest extends TestCase
     {
         Auth::shouldReceive('check')->andReturn(true);
         Auth::shouldReceive('id')->andReturn($userId);
+        // laravel-monitor 435: SessionVisitorTracker::applyAuthenticatedUserFields()
+        // chama Auth::user() no mesmo gate de track_authenticated_user - sem
+        // mockar aqui, o Mockery da facade rejeitaria a chamada não esperada.
+        // null é suficiente: este teste não cobre nome/e-mail.
+        Auth::shouldReceive('user')->andReturn(null);
 
         $request = Request::create('/some-page', 'GET');
         $response = new Response;
@@ -197,6 +202,7 @@ class SessionVisitorTrackerAutoHumanTest extends TestCase
 
         Auth::shouldReceive('check')->andReturn(true);
         Auth::shouldReceive('id')->andReturn(7);
+        Auth::shouldReceive('user')->andReturn(null);
 
         $request = Request::create('/some-page', 'GET');
         app(SessionVisitorTracker::class)->track($request, new Response, '/some-page', 'test-agent', '203.0.113.9');
@@ -218,6 +224,7 @@ class SessionVisitorTrackerAutoHumanTest extends TestCase
         // da primeira visita autenticada.
         Auth::shouldReceive('check')->andReturn(true);
         Auth::shouldReceive('id')->andReturn(42);
+        Auth::shouldReceive('user')->andReturn(null);
         $request = Request::create('/other-page', 'GET');
         app(SessionVisitorTracker::class)->track($request, new Response, '/other-page', 'test-agent', '203.0.113.9');
 

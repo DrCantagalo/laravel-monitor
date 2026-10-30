@@ -375,6 +375,38 @@ their row with that").
   `Drcantagalo\LaravelMonitor\Support\Monitor::PROTECTED_DATA_KEYS` — a
   call to `Monitor::tag()` (see "Arbitrary visitor data" above) can never
   overwrite it, so it can't be spoofed onto a row by mistake.
+- **Copying name/e-mail from the authenticated user (since `0.77.0`)**:
+  besides `user_id`, the package also copies configured attributes from
+  `Auth::user()` straight onto `data`, on every authenticated request
+  tracked by `SessionVisitorTracker` — not only the guest → authenticated
+  transition. This exists because the only other way a Monitor row gets a
+  name is the host app calling `Monitor::tag()` on a `Login` event, which
+  never fires for a remember-me/already-live-session request — those rows
+  used to stay nameless forever in the dashboard's Users tab.
+  - **Config**: `track_authenticated_user_fields`, a map of `data` key =>
+    attribute on the authenticated user model. Default:
+    ```php
+    'track_authenticated_user_fields' => [
+        'name' => 'name',
+        'email' => 'email',
+    ],
+    ```
+    Set it to `[]` to turn this specific copy off while keeping `user_id`
+    tracking (gated separately by `track_authenticated_user` above, which
+    turns off both). A configured attribute that doesn't exist (or is
+    `null`) on the authenticated user is silently skipped — never written
+    as `null`, never overwrites a value already recorded, and never
+    throws (even if the host app has
+    `Model::preventAccessingMissingAttributes()` enabled).
+  - **No extra query**: reuses the same `Auth::user()` the request already
+    resolved for `Auth::check()`/`Auth::id()` — nothing new is queried.
+  - **Writes only when the value actually changed** (comparing against
+    what's already in `data`), on the same `save()`/`touch()` the request
+    was already going to do — so this never adds a write that wouldn't
+    have happened anyway.
+  - `Monitor::tag()` explicit calls from the host app are unaffected and
+    still take precedence (they run on a different request/event and
+    simply overwrite whatever is in `data` at that time, same as always).
 - **Auto-human tagging (since `0.59.0`)**: the first time `user_id` is
   recorded for a Monitor (the guest → authenticated transition — not on
   every subsequent authenticated request, see below), the package also

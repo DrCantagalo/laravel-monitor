@@ -345,6 +345,8 @@ class VisitorOriginTaggingTest extends TestCase
     {
         Auth::shouldReceive('check')->andReturn(true);
         Auth::shouldReceive('id')->andReturn(42);
+        // laravel-monitor 435: ver nota equivalente em SessionVisitorTrackerAutoHumanTest.
+        Auth::shouldReceive('user')->andReturn(null);
 
         $request = Request::create('/landing', 'GET', ['utm_source' => 'linkedin']);
         app(SessionVisitorTracker::class)->track($request, new Response, '/landing', 'test-agent', '203.0.113.9');

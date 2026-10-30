@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.76.0',
+    'version' => '0.77.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -33,6 +33,21 @@ return [
     // privacidade, podem desligar com false. Ver README, seção
     // "Authenticated user tagging".
     'track_authenticated_user' => true,
+
+    // laravel-monitor 435: copia estes atributos do model autenticado
+    // (Auth::user()) pra `data` sempre que `track_authenticated_user`
+    // acima estiver ligado e Auth::check() for true — chave em `data` =>
+    // atributo do model. Resolve a aba Users do dashboard ficar sem nome
+    // quando o host app nunca chama `Monitor::tag()` no evento `Login`
+    // (ou quando o login é por remember-me/sessão já viva, que nunca
+    // dispara esse evento). `[]` desliga a cópia (mas não `user_id`, que
+    // continua sendo gravado pelo gate acima). Atributo ausente/null no
+    // model autenticado é só ignorado, nunca grava null nem lança
+    // exceção. Ver README "Authenticated user tagging".
+    'track_authenticated_user_fields' => [
+        'name' => 'name',
+        'email' => 'email',
+    ],
 
     // IPs (ou faixas CIDR, IPv4/IPv6) que o monitor IGNORA por completo:
     // requests deles passam direto pelo middleware — não criam Monitor,

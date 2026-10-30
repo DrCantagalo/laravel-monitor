@@ -163,6 +163,71 @@ class SessionVisitorTracker
     }
 
     /**
+     * laravel-monitor 435: copia nome/e-mail (ou qualquer atributo
+     * configurado) do usuário autenticado pra `data`, pra aba Users do
+     * dashboard mostrar nome mesmo quando o host app nunca chama
+     * `Monitor::tag()` (login por remember-me/sessão já viva nunca passa
+     * pelo evento `Login` do host, que é o único jeito de `tag()`
+     * funcionar hoje — ver README "Authenticated user tagging").
+     *
+     * Chamado nos dois call sites de `track()` que já setam
+     * `data['user_id']` (gate `track_authenticated_user && Auth::check()`
+     * idêntico) — roda em TODA request autenticada, não só na transição
+     * guest->autenticado (diferente de `maybeAutoHumanClassify()`),
+     * porque o requisito é também corrigir quem já está autenticado
+     * sem nome gravado (sessão viva) e refletir mudança de nome/e-mail
+     * mais tarde. Mesmo assim fica barato: sem query extra (`Auth::user()`
+     * reaproveita o usuário já resolvido pela request, mesmo objeto por
+     * trás de `Auth::check()`/`Auth::id()` chamados ao lado), e só grava
+     * em `data` (mesmo `save()`/`touch()` que a request já ia fazer) quando
+     * o valor realmente mudou.
+     *
+     * `track_authenticated_user_fields` (config, default
+     * `['name' => 'name', 'email' => 'email']`) mapeia chave em `data` =>
+     * atributo do model autenticado. `[]` desliga a cópia (mas não afeta
+     * `user_id`, que continua sendo gravado pelo gate de fora). Atributo
+     * ausente/null no model é só ignorado (nunca grava null, nunca
+     * sobrescreve um valor já bom com null); qualquer exceção ao acessar o
+     * atributo (ex: `Model::preventAccessingMissingAttributes()` ligado no
+     * host) também é ignorada em silêncio - nunca quebra o tracking.
+     *
+     * Recebe `$data` por referência porque um dos dois call sites ainda é
+     * um array puro nesse ponto (Monitor novo, antes do `Monitor::create()`
+     * fazer o cast pra `AsArrayObject`) - passar por valor perderia a
+     * escrita nesse caso.
+     */
+    protected function applyAuthenticatedUserFields(&$data): void
+    {
+        $fields = config('monitor.track_authenticated_user_fields', ['name' => 'name', 'email' => 'email']);
+
+        if (empty($fields)) {
+            return;
+        }
+
+        $authUser = Auth::user();
+
+        if (! $authUser) {
+            return;
+        }
+
+        foreach ($fields as $dataKey => $attribute) {
+            try {
+                $value = $authUser->{$attribute} ?? null;
+            } catch (\Throwable) {
+                continue;
+            }
+
+            if ($value === null) {
+                continue;
+            }
+
+            if (($data[$dataKey] ?? null) !== $value) {
+                $data[$dataKey] = $value;
+            }
+        }
+    }
+
+    /**
      * laravel-monitor 319: grava a tag de origem (`VisitorOriginDetector`)
      * no Monitor RECÉM-CRIADO — único call site, no ramo de criação de
      * `track()` abaixo, nunca em visita subsequente do mesmo Monitor
@@ -310,6 +375,8 @@ class SessionVisitorTracker
                     if ($newlyAuthenticated) {
                         $this->maybeAutoHumanClassify($user->id);
                     }
+
+                    $this->applyAuthenticatedUserFields($data);
                 }
 
                 $signals = $this->scraperSignalDetector->detect($request, $ip, $userAgent);
@@ -361,6 +428,7 @@ class SessionVisitorTracker
 
         if (config('monitor.track_authenticated_user', true) && Auth::check()) {
             $data['user_id'] = Auth::id();
+            $this->applyAuthenticatedUserFields($data);
         }
 
         $user = Monitor::create(['data' => $data, 'id_token' => $rememberToken]);

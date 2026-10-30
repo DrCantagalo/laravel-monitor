@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.77.0] - 2026-10-30
+### Added
+- **`SessionVisitorTracker` now copies name/e-mail (configurable via the
+  new `track_authenticated_user_fields`, default
+  `['name' => 'name', 'email' => 'email']`) from `Auth::user()` straight
+  onto `data`**, on every authenticated request — not only the guest →
+  authenticated transition. Bug: the dashboard's Users tab stopped
+  showing names because the only existing path for name/e-mail
+  (`Monitor::tag()`, called by the host app on a `Login` event) never
+  fires for a remember-me/already-live-session request, and no host app
+  other than cantagalo.it/amb ever had that listener to begin with. No
+  extra query (reuses the already-resolved `Auth::user()`); writes only
+  when a field actually changed; a configured attribute missing/`null`
+  on the authenticated user is skipped, never written as `null` and
+  never throws (safe even with
+  `Model::preventAccessingMissingAttributes()`); `[]` turns the copy off
+  without affecting `user_id` tracking. `tag()` and
+  `PROTECTED_DATA_KEYS` are untouched. See README "Authenticated user
+  tagging".
+
 ## [0.76.0] - 2026-10-21
 ### Added
 - **New handler action `clearCache`** (`local_token` only, same auth as
