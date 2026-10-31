@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.77.1] - 2026-10-31
+### Fixed
+- **`monitor:export-denylist --format=apache` no longer claims Apache
+  re-reads the file without a reload.** Apache only reads `Include`d
+  files on start/reload; the command output and README now tell you to
+  run `apachectl configtest && systemctl reload httpd` after exporting.
+- **`denylist_export_interval_hours` accepts fractions.** It was cast to
+  `(int)`, so `0.5` became `0` and `1.5` became `1` silently; the
+  threshold is now computed in minutes (`round(hours * 60)`). Whole-hour
+  values behave exactly as before.
+
 ## [0.77.0] - 2026-10-30
 ### Added
 - **`SessionVisitorTracker` now copies name/e-mail (configurable via the

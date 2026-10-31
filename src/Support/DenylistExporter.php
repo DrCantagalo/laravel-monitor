@@ -36,7 +36,10 @@ class DenylistExporter
      */
     public static function build(string $format): string
     {
-        $exportThreshold = now()->addHours((int) config('monitor.denylist_export_interval_hours', 24));
+        // Em minutos pra aceitar frações de hora (0.5 = 30 min) — o cast
+        // (int) antigo zerava qualquer valor < 1 em silêncio.
+        $intervalMinutes = (int) round((float) config('monitor.denylist_export_interval_hours', 24) * 60);
+        $exportThreshold = now()->addMinutes($intervalMinutes);
 
         $ips = BlockedIp::where(
             fn ($q) => $q->whereNull('blocked_until')->orWhere('blocked_until', '>=', $exportThreshold)

@@ -1171,8 +1171,9 @@ php artisan monitor:export-denylist --format=nginx
   `storage_path('app/monitor/denylist.conf')`), directory created
   automatically if it doesn't exist yet.
 - **Apache** format: one `Require not ip x.x.x.x` per line — meant to be
-  `Include`d from the vhost config. Apache re-reads included files
-  automatically, no reload needed.
+  `Include`d from the vhost config. Apache only reads included files on
+  start/reload — run `apachectl configtest && systemctl reload httpd`
+  (or `apache2`) after each export, from your own cron/deploy hook.
 - **Nginx** format: one `deny x.x.x.x;` per line. Nginx does **not** pick
   up config changes on its own — you (or your own cron/deploy hook) need
   to run `nginx -s reload` after the file changes. The package
@@ -1214,7 +1215,9 @@ scheduled export would never get its `Require not ip`/`deny` line removed
 in time, leaving the web server blocking an IP the application has already
 released. Set this to match the actual frequency of whatever cron you
 configure to run `monitor:export-denylist`/`exportDenylist` (e.g. `24` for
-the daily example above). Permanent blocks (`blocked_until = null`) are
+the daily example above). Fractions are accepted (`0.5` for a cron
+every 30 minutes; before `0.77.1` they were truncated to whole hours, so
+anything below `1` silently became `0`). Permanent blocks (`blocked_until = null`) are
 always included, no matter this setting.
 
 ## Auditing reviewed paths (`monitor:audit-paths`)

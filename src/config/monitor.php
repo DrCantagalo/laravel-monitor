@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.77.0',
+    'version' => '0.77.1',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -229,7 +229,8 @@ return [
     // rodar monitor:export-denylist/exportDenylist. DenylistExporter usa
     // esse valor pra excluir do arquivo gerado qualquer bloqueio
     // temporário que vá expirar antes do próximo export — ajuste pra
-    // bater com a frequência real do seu cron, ver README.
+    // bater com a frequência real do seu cron, ver README. Aceita
+    // frações (0.5 = cron a cada 30 min).
     'denylist_export_interval_hours' => 24,
 
     // TTL (minutos) do cache da action getPages (resultado já agregado e

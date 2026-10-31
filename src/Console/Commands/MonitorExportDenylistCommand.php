@@ -26,7 +26,7 @@ class MonitorExportDenylistCommand extends Command
         $this->info("Denylist exported to {$path} ({$format} format).");
 
         if ($format === 'apache') {
-            $this->line('Include this file in your vhost config — Apache re-reads it automatically, no reload needed.');
+            $this->line('Include this file in your vhost config, then run "apachectl configtest && systemctl reload httpd" (or apache2) for it to take effect — Apache only reads included files on start/reload.');
         } else {
             $this->line('Run "nginx -s reload" (or your usual reload mechanism) for this file to take effect — Nginx does not pick up config changes on its own.');
         }
