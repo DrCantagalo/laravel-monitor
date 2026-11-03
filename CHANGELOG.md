@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.77.2] - 2026-11-03
+### Fixed
+- **`monitor:update` no longer leaves a double blank line when appending
+  new keys.** The published `config/monitor.php` already ends with a
+  blank line before `];`, and the appended block added another, so Pint
+  (`no_extra_blank_lines`) failed in host apps after every update that
+  added a key.
+
 ## [0.77.1] - 2026-10-31
 ### Fixed
 - **`monitor:export-denylist --format=apache` no longer claims Apache

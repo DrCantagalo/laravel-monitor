@@ -129,4 +129,19 @@ class MonitorUpdateCommandTest extends TestCase
         // responsabilidade deste comando apagar chaves — decisão manual).
         $this->assertArrayHasKey('scraper_cumulative_visits_threshold', $published);
     }
+
+    public function test_appending_new_keys_does_not_leave_a_double_blank_line(): void
+    {
+        $this->writeInstallationJsonWithMainDomain();
+
+        // Layout real dos arquivos publicados: linha em branco antes do `];`.
+        File::put(config_path('monitor.php'), "<?php\n\nreturn [\n\n    'version' => '0.73.0',\n\n    'track_visits' => true,\n\n];\n");
+
+        $this->assertSame(0, Artisan::call('monitor:update'));
+
+        $result = File::get(config_path('monitor.php'));
+
+        $this->assertStringNotContainsString("\n\n\n", $result);
+        $this->assertStringEndsWith("\n\n];\n", $result);
+    }
 }

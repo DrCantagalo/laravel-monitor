@@ -256,7 +256,11 @@ class MonitorUpdateCommand extends Command
             return $source;
         }
 
-        return preg_replace('/\n\];\s*\z/', "\n\n".$insertion."\n\n];\n", $source);
+        // `\s*` antes do `];` absorve a linha em branco que o arquivo
+        // publicado normalmente já tem ali — sem isso ela somava com o
+        // "\n\n" abaixo e deixava 2 linhas em branco (pint
+        // `no_extra_blank_lines` falhando nos apps após cada update).
+        return preg_replace('/\s*\n\];\s*\z/', "\n\n".$insertion."\n\n];\n", $source);
     }
 
     protected function updateVersion(string $source, ?string $newVersion): string
