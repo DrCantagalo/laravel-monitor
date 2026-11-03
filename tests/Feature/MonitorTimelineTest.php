@@ -155,6 +155,20 @@ class MonitorTimelineTest extends TestCase
         $this->assertSame(2, $response->json('series.monitors_new.human.6'), 'human legado deveria ser guest + user');
     }
 
+    public function test_monitors_new_counts_a_bot_that_belongs_to_a_user_as_human_user(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));
+
+        $this->monitorAt('2026-10-02 08:00:00', 'bot');
+        $this->monitorAt('2026-10-02 09:00:00', 'bot', userId: 42);
+
+        $response = $this->callHandler(['action' => 'getTimeline', 'days' => 7]);
+
+        $response->assertOk();
+        $this->assertSame(1, $response->json('series.monitors_new.bot.6'));
+        $this->assertSame(1, $response->json('series.monitors_new.human_user.6'));
+    }
+
     public function test_monitors_new_classifies_unclassified_monitor_seen_in_a_flagged_ip_as_flagged(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 10, 2, 12, 0, 0, 'UTC'));

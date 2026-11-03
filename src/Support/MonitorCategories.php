@@ -71,12 +71,22 @@ class MonitorCategories
      */
     public static function categoryForMonitor(?string $kind, bool $hasUserId, bool $isFlagged): string
     {
+        // "user" vence "bot": Monitor com dono (`data.user_id`, sempre em
+        // sincronia com a tag reservada `user`) conta como `human_user`
+        // mesmo com kind=bot — caso típico: cliente de API Sanctum
+        // (`ApiTokenVisitorTracker`, kind=bot/source=auth). Assim limpar
+        // a categoria `bot` nunca apaga usuário, e o gráfico o mostra
+        // como usuário.
+        if ($hasUserId && ($kind === 'bot' || $kind === 'human')) {
+            return 'human_user';
+        }
+
         if ($kind === 'bot') {
             return 'bot';
         }
 
         if ($kind === 'human') {
-            return $hasUserId ? 'human_user' : 'human_guest';
+            return 'human_guest';
         }
 
         return $isFlagged ? 'flagged' : 'unclassified';
@@ -236,8 +246,8 @@ class MonitorCategories
         $noKind = self::noKindSql($kindSql);
 
         return match ($category) {
-            'bot' => "{$kindSql} = 'bot'",
-            'human_user' => "{$kindSql} = 'human' AND ".self::hasUserIdSql($idColumn, $userIds),
+            'bot' => "{$kindSql} = 'bot' AND ".self::noUserIdSql($idColumn, $userIds),
+            'human_user' => "{$kindSql} IN ('human', 'bot') AND ".self::hasUserIdSql($idColumn, $userIds),
             'human_guest' => "{$kindSql} = 'human' AND ".self::noUserIdSql($idColumn, $userIds),
             'flagged' => "{$noKind} AND ".self::isFlaggedSql($idColumn, $flaggedIds),
             'unclassified' => "{$noKind} AND ".self::notFlaggedSql($idColumn, $flaggedIds),

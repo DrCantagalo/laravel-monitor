@@ -109,6 +109,22 @@ class MonitorGetDataTest extends TestCase
         $this->assertSame(2, $byKind['human']);
     }
 
+    public function test_monitors_by_kind_counts_a_bot_that_belongs_to_a_user_as_human_user(): void
+    {
+        $bot = $this->monitorAgedHours(1);
+        MonitorLabel::create(['monitor_id' => $bot->id, 'kind' => 'bot']);
+
+        $apiUser = Monitor::create(['data' => ['user_id' => 99]]);
+        $apiUser->forceFill(['created_at' => now()->subHour()])->save();
+        MonitorLabel::create(['monitor_id' => $apiUser->id, 'kind' => 'bot']);
+
+        $byKind = $this->callHandler(['action' => 'getData'])->json('monitors_by_kind');
+
+        $this->assertSame(1, $byKind['bot']);
+        $this->assertSame(1, $byKind['human_user']);
+        $this->assertSame(0, $byKind['human_guest']);
+    }
+
     public function test_monitors_by_kind_flagged_excludes_from_new_and_unclassified(): void
     {
         config(['monitor.ai_triage_min_age_hours' => 24]);

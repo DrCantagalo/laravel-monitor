@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.78.0] - 2026-11-03
+### Changed
+- **"user" wins over "bot" in the Monitor categories.** A `kind=bot`
+  Monitor with `data.user_id` (reserved `user` tag — e.g. a Sanctum API
+  client tracked by `MonitorApiMethod`) is now `human_user` instead of
+  `bot` in `getData.monitors_by_kind`, `getTimeline` series and
+  `clearData`/`previewClearData`/`monitor:prune --category`. Clearing the
+  `bot` category no longer deletes users' API monitors; they're deleted
+  only with `human_user`. The Monitor's `kind` itself is unchanged.
+
 ## [0.77.2] - 2026-11-03
 ### Fixed
 - **`monitor:update` no longer leaves a double blank line when appending

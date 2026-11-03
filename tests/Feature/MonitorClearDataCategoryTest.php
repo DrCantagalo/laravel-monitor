@@ -100,6 +100,36 @@ class MonitorClearDataCategoryTest extends TestCase
         $this->assertNotNull(Monitor::find($human->id));
     }
 
+    /**
+     * "user" vence "bot": Monitor kind=bot com dono (cliente de API
+     * Sanctum, tag `user`) é `human_user` — limpar `bot` não o apaga.
+     */
+    public function test_categories_bot_never_deletes_a_bot_that_belongs_to_a_user(): void
+    {
+        $bot = $this->monitor('bot');
+        $apiUser = $this->monitor('bot', userId: 42);
+
+        $response = $this->callHandler(['action' => 'clearData', 'categories' => ['bot']]);
+
+        $response->assertOk();
+        $response->assertJsonPath('monitors_deleted', 1);
+        $this->assertNull(Monitor::find($bot->id));
+        $this->assertNotNull(Monitor::find($apiUser->id));
+    }
+
+    public function test_categories_human_user_also_deletes_a_bot_that_belongs_to_a_user(): void
+    {
+        $bot = $this->monitor('bot');
+        $apiUser = $this->monitor('bot', userId: 42);
+
+        $response = $this->callHandler(['action' => 'clearData', 'categories' => ['human_user']]);
+
+        $response->assertOk();
+        $response->assertJsonPath('monitors_deleted', 1);
+        $this->assertNull(Monitor::find($apiUser->id));
+        $this->assertNotNull(Monitor::find($bot->id));
+    }
+
     public function test_categories_human_user_deletes_only_authenticated_humans(): void
     {
         $guest = $this->monitor('human');

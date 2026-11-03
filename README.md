@@ -184,8 +184,13 @@ loading a full `Monitor` row into PHP:
     **excluded** from the sum that must equal `visitors_total` (it's
     redundant with the two granular keys, summing it too would double-count
     every human Monitor).
-  - `bot`: Monitors with `kind=bot` (any `source` — manual, AI, or the
-    `auth` source doesn't apply here, only humans get auto-tagged).
+    Since `0.78.0`, a `kind=bot` Monitor that has `data.user_id` (the
+    reserved `user` tag — typically a Sanctum API client, see API
+    tracking) also counts as `human_user`: **"user" wins over "bot"**,
+    here, in `getTimeline` and in `clearData`/`monitor:prune
+    --category`, so clearing `bot` never deletes a user's API monitor.
+  - `bot`: Monitors with `kind=bot` and **no** `data.user_id` (any
+    `source`).
   - `flagged` (new in `0.59.0`): Monitors with **no** `kind` that were
     seen at a flagged or currently-blocked IP — same exclusion criteria
     `getMonitorQueueCounts` already used internally. A Monitor's own

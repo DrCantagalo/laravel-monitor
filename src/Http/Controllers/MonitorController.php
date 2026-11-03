@@ -696,13 +696,14 @@ class MonitorController extends Controller
         $noKind = MonitorCategories::noKindSql($kindSql);
         $notFlagged = MonitorCategories::notFlaggedSql('m.id', $flaggedIds);
         $isFlagged = MonitorCategories::isFlaggedSql('m.id', $flaggedIds);
-        $hasUserId = MonitorCategories::hasUserIdSql('m.id', $userIds);
-        $noUserId = MonitorCategories::noUserIdSql('m.id', $userIds);
+        $humanUser = MonitorCategories::sqlPredicateForCategory('human_user', $kindSql, 'm.id', $flaggedIds, $userIds);
+        $humanGuest = MonitorCategories::sqlPredicateForCategory('human_guest', $kindSql, 'm.id', $flaggedIds, $userIds);
+        $bot = MonitorCategories::sqlPredicateForCategory('bot', $kindSql, 'm.id', $flaggedIds, $userIds);
 
         $row = $query->selectRaw(
-            "SUM(CASE WHEN {$kindSql} = 'human' AND {$hasUserId} THEN 1 ELSE 0 END) AS human_user_total, "
-            ."SUM(CASE WHEN {$kindSql} = 'human' AND {$noUserId} THEN 1 ELSE 0 END) AS human_guest_total, "
-            ."SUM(CASE WHEN {$kindSql} = 'bot' THEN 1 ELSE 0 END) AS bot_total, "
+            "SUM(CASE WHEN {$humanUser} THEN 1 ELSE 0 END) AS human_user_total, "
+            ."SUM(CASE WHEN {$humanGuest} THEN 1 ELSE 0 END) AS human_guest_total, "
+            ."SUM(CASE WHEN {$bot} THEN 1 ELSE 0 END) AS bot_total, "
             ."SUM(CASE WHEN {$noKind} AND {$isFlagged} THEN 1 ELSE 0 END) AS flagged_total, "
             ."SUM(CASE WHEN {$noKind} AND {$notFlagged} AND m.created_at > ? THEN 1 ELSE 0 END) AS new_total, "
             ."SUM(CASE WHEN {$noKind} AND {$notFlagged} AND (m.created_at <= ? OR m.created_at IS NULL) THEN 1 ELSE 0 END) AS unclassified_total",
