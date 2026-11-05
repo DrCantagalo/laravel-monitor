@@ -2007,7 +2007,14 @@ ephemeral read token from `issueReadToken`).
   at least one Monitor with some **custom** tag — any tag except the
   reserved `user`), `-` (none of the IP's Monitors has one) and `-foo`
   (none of the IP's Monitors has the tag `foo` — works for `user` too,
-  e.g. `tag=-user` lists IPs with no authenticated Monitor). Response: `{"success": true,
+  e.g. `tag=-user` lists IPs with no authenticated Monitor). **Since
+  `0.79.0`**: `sort`/`order` (optional — `sort` only accepts `last_seen`
+  today, `order` is `asc` or `desc`, default `desc`). When `sort` is
+  omitted or not one of the recognized values, ordering is byte-for-byte
+  the pre-`0.79.0` default described below — `sort=last_seen` replaces it
+  entirely, ties broken by `id` desc/asc (matching `order`). Not honored
+  when `filter=blocked` (that listing keeps its own `last_offense_at desc`
+  order, from `monitor_blocked_ips` — see `getBlockedIps` below). Response: `{"success": true,
   "data": [{"ip": "1.2.3.4", "visits": 3, "lifetime_visits": 186,
   "visit_count": 186, "first_seen": "...", "last_seen": "...", "flagged":
   false, "flagged_signals": null, "blocked": false, "kind": null, "tags":
@@ -2203,7 +2210,15 @@ ephemeral read token from `issueReadToken`).
   of `monitor_blocked_ips` (`{"ip", "source", "created_at"}`) /
   `monitor_paths` rows with `status: 'trap'` (`{"path", "created_at"}`,
   same shape as before `0.20.0`) — no `filter` param, just
-  `page`/`per_page`. Ordered newest-first.
+  `page`/`per_page`. Ordered newest-first, with `id desc` as a tie-break
+  (**`0.79.0`**: a batch write — e.g. `flagScraperPaths` flagging dozens
+  of paths in one call — lands many rows in the same `created_at` second;
+  without a deterministic tie-break, OFFSET-based pagination over those
+  rows could repeat or skip some between pages depending on the engine's
+  arbitrary tie order. A consumer walking every page to rebuild "the full
+  current set" — e.g. home-page's trap-path sync across sites — could
+  then never see the complete set and keep re-applying rows it already
+  had. See CHANGELOG `[0.79.0]`).
 
 Unlike `getPages` (which has to aggregate a JSON blob per `Monitor`
 row in PHP), these three query normalized tables directly, so
@@ -2251,6 +2266,17 @@ token from `issueReadToken`). Response:
   equally cheap/portable equivalent across drivers and the package
   doesn't promise this figure outside MySQL. `total.size_bytes` is
   likewise `null` unless every table's own `size_bytes` was resolved.
+  **Since `0.79.0`**, this query runs with `SET SESSION
+  information_schema_stats_expiry = 0` on MySQL: by default (`86400`
+  seconds on MySQL 8) `information_schema.tables` serves a cached
+  `DATA_LENGTH`/`INDEX_LENGTH`, so `size_bytes` could keep showing a
+  value from up to 24h ago even right after a real `clearData`/prune —
+  this forces the connection to always read the engine's current
+  statistics instead. This does **not** mean the number necessarily
+  shrinks right after a delete: InnoDB marks the deleted rows' pages as
+  free for reuse but doesn't shrink the table file on its own — only
+  `OPTIMIZE TABLE` (a full table rebuild) actually reclaims disk space,
+  see `clearData`'s `optimize_tables` parameter below.
 - A table this package knows about but that hasn't migrated yet in the
   consuming app (e.g. right after upgrading, before `php artisan
   migrate`) is **skipped**, not an error — `Schema::hasTable()` gates
@@ -2683,6 +2709,20 @@ with two **optional** parameters:
   not flagged, regardless of how recently it was created) — a deliberate
   product decision, not an oversight: age only matters for `new` in that
   one aggregate, never for deciding what a cleanup should delete.
+- `optimize_tables` (boolean, default `false`, **since `0.79.0`**). `DELETE`
+  on InnoDB never shrinks the table file — it only marks the deleted
+  rows' pages as free for future inserts to reuse — so `getTableStats`'s
+  `size_bytes` can keep showing roughly the same figure right after a
+  real cleanup even once the stale-cache issue above is fixed. Passing
+  `true` runs `OPTIMIZE TABLE` (MySQL/MariaDB only, silently ignored on
+  every other driver) right after the delete, but **only** on the tables
+  that actually lost at least one row in this call (`monitors`,
+  `monitor_ip_stats`, `monitor_visits`, `monitor_page_hits` — mapped from
+  the response fields below) — never on an unaffected table, and never
+  unless this flag is explicitly `true`. `OPTIMIZE TABLE` rebuilds the
+  whole table and can briefly lock it, so leave this `false` for routine/
+  scheduled cleanups on a large installation; only turn it on for a
+  one-off "I actually want the disk space back now" call.
 
 **What actually gets deleted**, given the two parameters above:
 

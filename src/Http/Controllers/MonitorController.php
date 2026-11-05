@@ -1450,6 +1450,15 @@ class MonitorController extends Controller
     ];
 
     /**
+     * Enum de valores aceitos pelo parâmetro `sort` de getVisitorsByIp
+     * (laravel-monitor 448, origem: home-page 444 — ordenar visitantes
+     * por última visita). `null` (nenhum valor reconhecido, inclusive
+     * ausente) mantém a ordenação default de sempre (flagged primeiro,
+     * desempatado por `visits`), ver `buildVisitorsResult()`.
+     */
+    protected const VISITORS_SORTS = ['last_seen'];
+
+    /**
      * Lista paginada/filtrável de visitantes por IP, a partir de
      * `monitor_ip_stats` (mantida via `IpStat::recordVisit` a cada
      * request) — não escaneia `Monitor.data.ips` cru.
@@ -1476,6 +1485,13 @@ class MonitorController extends Controller
         // IPs sem nenhum Monitor atual (típico depois de um prune) somem
         // da lista por padrão, ver buildVisitorsResult().
         $includeWithoutMonitors = $request->boolean('include_without_monitors', false);
+        // laravel-monitor 448: sem `sort` (ou valor não reconhecido),
+        // `$sort` fica null e buildVisitorsResult() usa a ordenação
+        // default de sempre — comportamento de quem não manda o
+        // parâmetro é IDÊNTICO a antes desta task.
+        $sort = $request->input('sort');
+        $sort = in_array($sort, self::VISITORS_SORTS, true) ? $sort : null;
+        $order = (string) $request->input('order', 'desc') === 'asc' ? 'asc' : 'desc';
 
         if (! in_array($filter, self::VISITORS_FILTERS, true)) {
             return response()->json([
@@ -1485,12 +1501,12 @@ class MonitorController extends Controller
         }
 
         $cacheKey = $this->listingsCacheKey('visitors', [
-            $page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors,
+            $page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors, $sort, $order,
         ]);
         $ttl = now()->addMinutes((int) config('monitor.listings_cache_ttl_minutes', 5));
 
-        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors) {
-            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors);
+        $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors, $sort, $order) {
+            return $this->buildVisitorsResult($page, $perPage, $filter, $dateFrom, $dateTo, $tag, $kind, $includeWithoutMonitors, $sort, $order);
         });
 
         return response()->json(['success' => true] + $result);
@@ -1538,7 +1554,7 @@ class MonitorController extends Controller
      * `monitor_ip_stats.` por causa do join — `monitor_visits_agg`
      * também tem uma coluna `ip`.
      */
-    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null, bool $includeWithoutMonitors = false): array
+    protected function buildVisitorsResult(int $page, int $perPage, string $filter, ?string $dateFrom, ?string $dateTo, ?string $tag = null, ?string $kind = null, bool $includeWithoutMonitors = false, ?string $sort = null, string $order = 'desc'): array
     {
         if ($filter === 'blocked') {
             return $this->buildBlockedVisitorsResult($page, $perPage, $dateFrom, $dateTo, $tag, $kind);
@@ -1615,20 +1631,33 @@ class MonitorController extends Controller
             $query->whereNotNull('monitor_visits_agg.ip');
         }
 
-        $paginator = $query
+        $query
             ->select([
                 'monitor_ip_stats.ip', 'monitor_ip_stats.visit_count', 'monitor_ip_stats.first_seen',
                 'monitor_ip_stats.last_seen', 'monitor_ip_stats.flagged', 'monitor_ip_stats.flagged_signals',
             ])
-            ->selectRaw('COALESCE(monitor_visits_agg.visits, 0) as visits')
+            ->selectRaw('COALESCE(monitor_visits_agg.visits, 0) as visits');
+
+        if ($sort === 'last_seen') {
+            // laravel-monitor 448 (origem: home-page 444): ordenação
+            // explícita por última visita substitui inteiramente a ordem
+            // default (flagged primeiro/visits desc) quando pedida —
+            // `monitor_ip_stats.id` como desempate (mesmo motivo da 447:
+            // `last_seen` pode empatar em linhas atualizadas no mesmo
+            // segundo).
+            $query->orderBy('monitor_ip_stats.last_seen', $order)
+                ->orderBy('monitor_ip_stats.id', $order);
+        } else {
             // flagged=true primeiro (fila de revisão real), resto depois
             // — dentro de cada grupo, desempata por `visits` (Monitors
             // atuais) desc, não mais pelo vitalício. CASE WHEN em vez de
             // orderByRaw por coluna booleana: nem MySQL nem SQLite deixam
             // ordenar direto por uma expressão booleana sem isso.
-            ->orderByRaw('CASE WHEN monitor_ip_stats.flagged = 1 THEN 0 ELSE 1 END')
-            ->orderByDesc(DB::raw('COALESCE(monitor_visits_agg.visits, 0)'))
-            ->paginate($perPage, ['*'], 'page', $page);
+            $query->orderByRaw('CASE WHEN monitor_ip_stats.flagged = 1 THEN 0 ELSE 1 END')
+                ->orderByDesc(DB::raw('COALESCE(monitor_visits_agg.visits, 0)'));
+        }
+
+        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
 
         $labels = $this->derivedLabelsForIps(collect($paginator->items())->pluck('ip'));
 
@@ -2476,6 +2505,22 @@ class MonitorController extends Controller
         $connection = DB::connection();
         $driver = $connection->getDriverName();
         $database = $connection->getDatabaseName();
+
+        // laravel-monitor 445: `information_schema.tables` em cada
+        // conexão MySQL mantém DATA_LENGTH/INDEX_LENGTH num cache próprio
+        // (`information_schema_stats_expiry`, default 86400s no MySQL 8)
+        // — sem isto, o tamanho exibido aqui continua refletindo o estado
+        // de ATÉ 24h atrás mesmo depois de um `clearData`/prune de
+        // verdade ter apagado linhas. `SET SESSION ... = 0` força esta
+        // conexão a sempre buscar as estatísticas atuais do storage
+        // engine. Isto NÃO faz o InnoDB devolver espaço em disco ao SO
+        // (`DELETE` nunca faz isso, só `OPTIMIZE TABLE` reconstrói o
+        // arquivo) — só garante que o número mostrado é o estado real
+        // alocado agora, não um valor cacheado de ontem. `OPTIMIZE TABLE`
+        // de verdade é opt-in por request, ver `clearData`/`optimizeTables()`.
+        if ($driver === 'mysql') {
+            DB::statement('SET SESSION information_schema_stats_expiry = 0');
+        }
 
         $tables = [];
         $totalRows = 0;
@@ -3678,6 +3723,13 @@ class MonitorController extends Controller
      * Listagem paginada de `monitor_blocked_ips` (sem filtro além de
      * paginação — dataset pequeno, mas pagina em SQL real já que não há
      * blob JSON pra agregar aqui, ao contrário de getPages/getVisitorsByIp).
+     *
+     * `orderByDesc('id')` como desempate (laravel-monitor 447): várias
+     * linhas inseridas em lote caem no mesmo segundo de `created_at`, e
+     * `orderByDesc('created_at')` sozinho não garante ordem estável entre
+     * chamadas com esse empate — paginação por OFFSET pode então repetir
+     * ou pular linhas entre páginas sucessivas. `id` é monotônico e único,
+     * mesmo padrão já usado nas listagens vizinhas deste arquivo.
      */
     protected function getBlockedIps(Request $request)
     {
@@ -3690,6 +3742,7 @@ class MonitorController extends Controller
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
             $paginator = BlockedIp::query()
                 ->orderByDesc('created_at')
+                ->orderByDesc('id')
                 ->paginate($perPage, ['ip', 'source', 'created_at'], 'page', $page);
 
             return [
@@ -3710,6 +3763,17 @@ class MonitorController extends Controller
      * Listagem paginada dos paths com `status = 'trap'` em `monitor_paths`
      * — mesmo padrão de getBlockedIps, mesmo response shape de antes da
      * fusão em `monitor_paths` (`{"path", "created_at"}`).
+     *
+     * `orderByDesc('id')` como desempate (laravel-monitor 447, mesmo
+     * motivo de getBlockedIps acima): `flagScraperPaths` grava um lote
+     * inteiro de paths de uma vez, deixando muitas linhas com o mesmo
+     * segundo em `created_at` — sem desempate, a ordem dessas linhas
+     * variava entre chamadas e a paginação por OFFSET (usada pelo
+     * consumidor pra reconstruir o set completo de paths já trap, ex.
+     * home-page `ApplyTrapPathsJob`) repetia/perdia linhas entre páginas a
+     * ponto de nunca coincidir com o set esperado — bug de produção
+     * reportado como "Sync trap paths reaplica tudo a cada execução"
+     * (home-page 443).
      */
     protected function getBlockedPaths(Request $request)
     {
@@ -3722,6 +3786,7 @@ class MonitorController extends Controller
         $result = Cache::remember($cacheKey, $ttl, function () use ($page, $perPage) {
             $paginator = MonitorPath::where('status', 'trap')
                 ->orderByDesc('created_at')
+                ->orderByDesc('id')
                 ->paginate($perPage, ['path', 'created_at'], 'page', $page);
 
             return [
@@ -4091,6 +4156,17 @@ class MonitorController extends Controller
 
         $result = DataPruner::pruneByCategory($olderThanDays, $categories);
 
+        // laravel-monitor 445: `OPTIMIZE TABLE` É o jeito real de recuperar
+        // espaço em disco depois de um DELETE no InnoDB (que só marca
+        // páginas como livres pra REUSO futuro, nunca encolhe o arquivo
+        // sozinho) — mas reconstrói a tabela inteira e pode travá-la por um
+        // tempo em tabelas grandes. Por isso nunca roda sozinho: só quando
+        // o caller passa `optimize_tables=true` explicitamente, e só nas
+        // tabelas que de fato perderam linhas nesta chamada.
+        if ($request->boolean('optimize_tables') && DB::connection()->getDriverName() === 'mysql') {
+            $this->optimizeTablesAffectedBy($result);
+        }
+
         return response()->json([
             'success' => true,
             'monitors_deleted' => $result['monitors_deleted'],
@@ -4098,6 +4174,30 @@ class MonitorController extends Controller
             'visits_deleted' => $result['visits_deleted'],
             'page_hits_deleted' => $result['page_hits_deleted'],
         ]);
+    }
+
+    /**
+     * laravel-monitor 445: mapeia as chaves `*_deleted` de `pruneByCategory()`
+     * pra tabela física correspondente e roda `OPTIMIZE TABLE` só nas que
+     * tiveram pelo menos 1 linha apagada nesta chamada — nunca em tabelas
+     * não afetadas, mesmo que grandes/lentas de otimizar.
+     *
+     * @param  array{monitors_deleted:int, ip_stats_deleted:int, visits_deleted:int, page_hits_deleted:int}  $result
+     */
+    protected function optimizeTablesAffectedBy(array $result): void
+    {
+        $tablesByKey = [
+            'monitors_deleted' => 'monitors',
+            'ip_stats_deleted' => 'monitor_ip_stats',
+            'visits_deleted' => 'monitor_visits',
+            'page_hits_deleted' => 'monitor_page_hits',
+        ];
+
+        foreach ($tablesByKey as $key => $table) {
+            if (($result[$key] ?? 0) > 0 && Schema::hasTable($table)) {
+                DB::statement('OPTIMIZE TABLE `'.$table.'`');
+            }
+        }
     }
 
     /**

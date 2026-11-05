@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.79.0] - 2026-11-05
+### Fixed
+- **`getBlockedPaths`/`getBlockedIps`: stable pagination.** Both ordered
+  only by `created_at`. A batch write (e.g. `flagScraperPaths` flagging
+  dozens of paths in one call) lands many rows in the same `created_at`
+  second; without a deterministic tie-break, OFFSET-based pagination over
+  those rows could repeat or skip some between pages. A consumer walking
+  every page to rebuild "the full current set" (e.g. home-page's
+  cross-site trap-path sync) could then never see the complete set and
+  keep re-applying rows it already had — reported as "Sync trap paths
+  reapplies everything on every run" (`applied` count equal to the total
+  every time, `skipped=0`). Now `orderByDesc('id')` as a tie-break, same
+  pattern already used by the other listings in this file.
+- **`getTableStats`: `size_bytes` could show a stale value for up to
+  24h after a real `clearData`/prune.** `information_schema.tables`
+  caches `DATA_LENGTH`/`INDEX_LENGTH` per
+  `information_schema_stats_expiry` (MySQL 8 default `86400`s).
+  `getTableStats` now runs with `SET SESSION
+  information_schema_stats_expiry = 0` on MySQL, always reading current
+  statistics. This does not by itself shrink a table on disk — InnoDB
+  marks deleted rows' pages free for reuse but never shrinks the file on
+  a plain `DELETE` — see the new `optimize_tables` option below.
+
+### Added
+- **`getVisitorsByIp`: `sort`/`order` parameters.** Previously always
+  ordered `flagged` first, then `visits` desc, with no way to ask for
+  anything else. `sort=last_seen` (only accepted value today) +
+  `order=asc`/`desc` (default `desc`) now replaces that ordering
+  entirely when passed; omitting `sort` (or passing an unrecognized
+  value) keeps the exact pre-`0.79.0` default. Not honored when
+  `filter=blocked` (see README). Requested by a consumer wanting to sort
+  its Visitors tab by last visit.
+- **`clearData`: `optimize_tables` (boolean, default `false`).** Runs
+  `OPTIMIZE TABLE` (MySQL/MariaDB only) right after the delete, but only
+  on tables that actually lost at least one row in that call — never
+  automatic, since `OPTIMIZE TABLE` rebuilds the whole table and can
+  briefly lock it on a large installation. For callers that want the
+  disk space back for real, not just an accurate `size_bytes` reading.
+
 ## [0.78.0] - 2026-11-03
 ### Changed
 - **"user" wins over "bot" in the Monitor categories.** A `kind=bot`
