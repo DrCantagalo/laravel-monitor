@@ -613,17 +613,18 @@ application's backend — only a short-lived, read-only token does.
   `getVisitorPaths`, `getBlockedIps`, `getBlockedPaths`, `getUsers`,
   `getUserMonitors`, `getBlockResults`, `getIpMonitors`, `getMonitorVisits`,
   `getIpTags`, `getTableStats`, `getAccessLog`, `getMonitorQueue`,
-  `getMonitorQueueCounts`, `getConfig`, `getTimeline`
+  `getMonitorQueueCounts`, `getConfig`, `getTimeline`, `getAllTrapPaths`
   — `getIpMonitors`/`getMonitorVisits` since `0.46.0`, `getUserMonitors`
   since `0.48.0`, `getIpTags` since `0.49.0`, `getTableStats` since
   `0.50.0`, `getAccessLog` since `0.51.0`, `getMonitorQueue`/
   `getMonitorQueueCounts` since `0.53.0`, `getConfig` since `0.54.0`,
-  `getTimeline` since `0.58.0`)**.
+  `getTimeline` since `0.58.0`, `getAllTrapPaths` since `0.80.0`)**.
   `clearData`, `previewClearData` (since `0.63.0` — read-only, but kept
   on the same `local_token`-only footing as `clearData`/`pruneData`
   rather than the ephemeral-read-token list, since it's part of the same
   admin cleanup flow), `pruneData`,
-  `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `unflagPath`,
+  `updateBlockedIps`, `unblockIp`, `flagScraperPath`, `flagScraperPaths`,
+  `addTrapPaths` (since `0.80.0`), `unflagPath`,
   `updateRules`, and `issueReadToken` itself always require the
   permanent `local_token` — a read token cannot mint another token or
   do anything beyond reading.
@@ -771,6 +772,44 @@ only ever came from `getPages`.
     large batch (e.g. `TriageMonitorPathsJob`) made the fixed per-call
     cost of the old scan land on every triage run. Same `resolveScraperPathTargets()`
     helper as the singular version, called once for the whole batch.
+
+- **`addTrapPaths`** (same auth as `flagScraperPath`, since `0.80.0`):
+  add-only batch write for a diff-based sync between sites —
+  `POST /monitor/handler?action=addTrapPaths` with `{"paths":
+  ["wp-admin/install.php", ".env", ...]}`. Unlike `flagScraperPaths`,
+  which `updateOrCreate`s every path (overwriting an existing `safe`
+  status), this action never overwrites anything: it exists for a
+  consumer that already computed a *global* set of known-trap paths
+  across several sites (see `getAllTrapPaths` below) and wants to apply
+  only the ones a given site doesn't have yet, without re-deciding
+  `safe`/`clean` for paths that site already reviewed or already serves
+  for real. For each path, in this order:
+  1. already `status: 'trap'` → counted under `already_trap` (no-op,
+     idempotent).
+  2. already `status: 'safe'` → counted under `skipped_safe` — **never**
+     overwritten (the opposite of `flagScraperPaths`).
+  3. the site has at least one recorded hit (`monitor_page_hits`) for
+     that exact path with no `404` ever (same `clean` criterion as
+     `getPages`'s `clean` filter, checked only for the paths in this
+     request, never a full table scan) → counted under `skipped_clean` —
+     the site serves this path for real, flagging it would block a live
+     page. A path with no recorded hit at all doesn't match this case
+     (no evidence either way) and falls through to 4.
+  4. everything else → inserted as a new `status: 'trap'` row, listed in
+     `applied`.
+  Same path normalization as `flagScraperPaths`, same cache invalidation
+  (`monitor:blocked-path:{path}` per applied path, plus the
+  `getPages`/listings cache version bump) — but **does not** run the
+  live-route guard or block any IP: the paths here already went through
+  that filtering upstream (the global set this exists to apply), and the
+  `clean` check above already covers "this site actually serves it".
+  Processed in batches internally so a large diff (hundreds/thousands of
+  paths on the first sync) doesn't become one giant query. Response:
+  `{"success": true, "applied": [...only the newly-inserted paths...],
+  "already_trap": 3, "skipped_safe": 1, "skipped_clean": 2}`, or
+  `{"success": false, "message": "No paths provided"}` /
+  `"No valid paths provided"` (422) if `paths` is missing/empty or every
+  entry was invalid.
 
 - **`unflagPath`** (same auth as `flagScraperPath`): reverts it —
   `POST /monitor/handler?action=unflagPath` with
@@ -2232,6 +2271,59 @@ separate from `getPages`' so this change doesn't touch its already
 released cache. `updateBlockedIps`, `unblockIp`, `flagScraperPath`, and
 `unflagPath` all bump it, since every one of them changes blocked-state
 data these three actions read.
+
+**Important (`0.79.0` and earlier, fixed in `0.80.0`)**: every cached
+value above used to carry the Eloquent models (or an
+`Illuminate\Support\Collection` wrapping them) straight from
+`$paginator->items()` into the cache payload itself. With
+`config('cache.serializable_classes')` set to `false` — the new Laravel
+13 default — a cache **hit** ran the stored payload through
+`unserialize($value, ['allowed_classes' => false])`, which turns *any*
+object (not just Eloquent models) into `__PHP_Incomplete_Class`, losing
+its protected attributes; the response on a hit then came back missing
+fields like `path`/`ip` that were present on the miss. `0.80.0` makes
+every `Cache::remember` in this package (`getBlockedIps`,
+`getBlockedPaths`, `getBlockResults`, `getApiBlockEvents`,
+`getMonitorVisits`, `getVisitorsByIp`, `getUsers`) store only
+scalars/plain arrays — no shape/field change, just what's actually
+inside the cached value. If you never set `cache.serializable_classes`
+to `false` this never affected you; if you did (or do in the future),
+upgrade to pick up the fix. See CHANGELOG `[0.80.0]`.
+
+## Trap paths diff sync (`getAllTrapPaths`, `addTrapPaths`)
+
+Since `0.80.0`: a pair of actions aimed at a consumer that syncs trap
+paths across *several* sites (e.g. home-page's `ApplyTrapPathsJob`,
+unioning the set from every site it watches and pushing the missing
+ones back to each) without paying for a full paginated walk
+(`getBlockedPaths`) of every site on every run.
+
+- **`getAllTrapPaths`** (same auth as `getData`/`getPages` — permanent
+  `local_token` **or** the ephemeral read token): `GET`/`POST
+  /monitor/handler?action=getAllTrapPaths`, no params. Returns **every**
+  `monitor_paths` row with `status: 'trap'` in one response — just the
+  `path` strings, ordered by `id` ascending, no pagination at all.
+  Response: `{"success": true, "data": ["wp-admin/install.php", ...],
+  "truncated": false}`. Capped at
+  `config('monitor.trap_paths_export_limit')` (default `20000`) rows —
+  past that, `data` is cut to the first `limit` rows (ordered by `id`,
+  so the cut always drops the **newest** rows, never the oldest) and
+  `truncated` comes back `true`; the request never fails because of the
+  cap. A consumer that sees `truncated: true` should treat the response
+  as an incomplete set, not the real one. Deliberately **not** cached
+  (unlike the paginated listings above) — the whole point is a
+  consumer that calls this rarely (once per sync run across several
+  sites), not on every dashboard page load, so there's no hit rate to
+  justify holding a payload this size in the cache store.
+- **`addTrapPaths`**: see the write-actions section above (same section
+  as `flagScraperPath`/`flagScraperPaths`) for the full add-only
+  semantics (`already_trap`/`skipped_safe`/`skipped_clean`/`applied`).
+
+Together, a sync run looks like: call `getAllTrapPaths` once per site to
+learn what each already has, compute the global union, diff it against
+each site's own set, and call `addTrapPaths` with just that site's
+missing paths — one read + one write call per site, instead of paging
+through the full listing and re-flagging everything every time.
 
 ## Table stats (`getTableStats`)
 

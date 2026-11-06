@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.80.0] - 2026-11-06
+### Fixed
+- **`getBlockedIps`/`getBlockedPaths`/`getBlockResults`/`getApiBlockEvents`/
+  `getMonitorVisits`/`getVisitorsByIp`/`getUsers`: cache HIT could lose
+  fields (e.g. `path`/`ip` missing) with `cache.serializable_classes`
+  set to `false`.** Diagnosed in production: `amb`, `360gradi.net-2.0`
+  and `amariaastrologa` (newer Laravel 13 apps) have
+  `'serializable_classes' => false` in `config/cache.php` (the new
+  Laravel 13 default); `cantagalo.it`/`ed.eco.br` don't and were
+  unaffected. The first group of actions stored `$paginator->items()`
+  (Eloquent models) directly inside the cached payload; the second group
+  (`getVisitorsByIp`/`getUsers`) already mapped each row to a plain
+  array but still wrapped the whole list in an `Illuminate\Support\
+  Collection` object before storing it. Either way, a cache **hit** runs
+  the stored payload through `unserialize($value, ['allowed_classes' =>
+  false])`, which turns *any* object — not only Eloquent models,
+  `Collection`/`stdClass` too — into `__PHP_Incomplete_Class`, silently
+  dropping protected properties (`Model::$attributes`,
+  `Collection`'s internal items). Consequence: home-page's
+  `ApplyTrapPathsJob` saw 0 trap paths on every sync against those 3
+  sites and reapplied the entire set each run (reported as "Sync trap
+  paths reapplies everything on every run" even after the `0.79.0`
+  pagination tie-break fix — the real cause was this, not ordering).
+  Fixed by never returning a `Model`/`Collection` from inside a
+  `Cache::remember` closure — only scalars/plain arrays
+  (`collect(...)->map->toArray()->all()` for the first group, `->all()`
+  on the already-mapped collection for the second) — same JSON shape as
+  before. `cache.serializable_classes` itself is never touched by this
+  package; if you don't set it to `false`, this never affected you.
+
+### Added
+- **`getAllTrapPaths`** (read, same auth as `getData`): non-paginated
+  export of every `monitor_paths` row with `status: 'trap'` — just
+  `path`, ordered by `id`. Capped at
+  `config('monitor.trap_paths_export_limit')` (default `20000`),
+  `truncated: true` past that instead of failing. Not cached. Exists so
+  a multi-site diff sync doesn't have to page through
+  `getBlockedPaths` (up to ~40 HTTP requests per site) just to learn
+  what a site already has.
+- **`addTrapPaths`** (write, `local_token` only): add-only batch
+  counterpart to `getAllTrapPaths` — `{"paths": [...]}` inserts only the
+  paths that are genuinely new, counting (never overwriting) the ones
+  already `trap` (`already_trap`), already `safe` (`skipped_safe`, the
+  key difference from `flagScraperPaths`'s `updateOrCreate`), or already
+  served clean/2xx by this site per its own `monitor_page_hits`
+  (`skipped_clean`, same criterion as `getPages`'s `clean` filter).
+  Response: `{"success": true, "applied": [...], "already_trap": N,
+  "skipped_safe": N, "skipped_clean": N}`. Together with
+  `getAllTrapPaths`, replaces a paginated full-listing sync with a diff:
+  read each site's current set once, compute the global union, push
+  back only the missing paths per site. See README "Trap paths diff
+  sync".
+
+---
+
 ## [0.79.0] - 2026-11-05
 ### Fixed
 - **`getBlockedPaths`/`getBlockedIps`: stable pagination.** Both ordered

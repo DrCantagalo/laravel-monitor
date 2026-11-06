@@ -54,6 +54,8 @@ class MonitorController extends Controller
         'getTableStats', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline', 'getPageTimeline',
         // laravel-monitor 400:
         'getApiBlockEvents',
+        // laravel-monitor 455:
+        'getAllTrapPaths',
     ];
 
     /**
@@ -116,11 +118,12 @@ class MonitorController extends Controller
         // getAccessLog desde a 249/v0.51.0, getMonitorQueue/
         // getMonitorQueueCounts desde a 258/v0.53.0, getConfig desde a
         // 262/v0.54.0, getTimeline desde a 280/v0.58.0, getPageTimeline
-        // desde a 286/v0.60.0 — nunca pra
-        // clearData/updateBlockedIps/updateRules/issueReadToken/
+        // desde a 286/v0.60.0, getAllTrapPaths desde a 455/v0.80.0 — nunca
+        // pra clearData/updateBlockedIps/updateRules/issueReadToken/
         // setMonitorKind/setMonitorTags (desde a 258/v0.53.0, substituindo
-        // `spreadIpLabel` removida nesta mesma versão), que exigem o
-        // local_token permanente (são escrita).
+        // `spreadIpLabel` removida nesta mesma versão)/addTrapPaths
+        // (laravel-monitor 455, mesmo esquema de flagScraperPaths), que
+        // exigem o local_token permanente (são escrita).
         //
         // laravel-monitor 295 (v0.61.0, breaking): `setIpKind`/`setIpLabels`/
         // `setIpTags` foram REMOVIDAS — kind/tags/note eram gravados por IP
@@ -139,6 +142,9 @@ class MonitorController extends Controller
             'getUsers', 'getUserMonitors', 'getBlockResults', 'getIpMonitors', 'getMonitorVisits', 'getIpTags',
             'getTableStats', 'getAccessLog', 'getMonitorQueue', 'getMonitorQueueCounts', 'getConfig', 'getTimeline',
             'getPageTimeline', 'getApiBlockEvents',
+            // laravel-monitor 455: export não paginado de trap paths —
+            // mesma classe de action só-leitura de getBlockedPaths.
+            'getAllTrapPaths',
         ], true)
             && $token
             && Cache::has("monitor:read-token:{$token}");
@@ -190,6 +196,9 @@ class MonitorController extends Controller
 
             case 'getBlockedPaths':
                 return $this->getBlockedPaths($request);
+
+            case 'getAllTrapPaths':
+                return $this->getAllTrapPaths($request);
 
             case 'getUsers':
                 return $this->getUsers($request);
@@ -262,6 +271,9 @@ class MonitorController extends Controller
 
             case 'flagScraperPaths':
                 return $this->flagScraperPaths($request);
+
+            case 'addTrapPaths':
+                return $this->addTrapPaths($request);
 
             case 'unflagPath':
                 return $this->unflagPath($request);
@@ -849,7 +861,9 @@ class MonitorController extends Controller
                     ->paginate($perPage, ['ip', 'counter'], 'page', $page);
 
                 return [
-                    'data' => $paginator->items(),
+                    // laravel-monitor 454: nunca guardar models Eloquent no
+                    // cache — ver docblock de `getBlockedPaths`.
+                    'data' => collect($paginator->items())->map->toArray()->all(),
                     'meta' => [
                         'page' => $paginator->currentPage(),
                         'per_page' => $paginator->perPage(),
@@ -903,7 +917,9 @@ class MonitorController extends Controller
                     ->paginate($perPage, ['id', 'ip', 'token_id', 'token_name', 'user_id', 'message', 'created_at'], 'page', $page);
 
                 return [
-                    'data' => $paginator->items(),
+                    // laravel-monitor 454: nunca guardar models Eloquent no
+                    // cache — ver docblock de `getBlockedPaths`.
+                    'data' => collect($paginator->items())->map->toArray()->all(),
                     'meta' => [
                         'page' => $paginator->currentPage(),
                         'per_page' => $paginator->perPage(),
@@ -1676,9 +1692,12 @@ class MonitorController extends Controller
                 'flagged_signals' => $stat->flagged_signals,
                 'blocked' => $blockedIps->contains($stat->ip),
             ] + $this->derivedLabelFields($labels->get($stat->ip));
-        })->values();
+        })->values()->all();
 
         return [
+            // laravel-monitor 454: ->all() — devolver a Collection inteira
+            // (sem converter pra array puro) sofre o mesmo problema de
+            // cache que um Model cru, ver docblock de `getBlockedPaths`.
             'data' => $items,
             'meta' => [
                 'page' => $paginator->currentPage(),
@@ -1788,9 +1807,10 @@ class MonitorController extends Controller
                 'last_offense_at' => optional($blocked->last_offense_at)->toIso8601String(),
                 'source' => $blocked->source,
             ] + $this->derivedLabelFields($labels->get($blocked->ip));
-        })->values();
+        })->values()->all();
 
         return [
+            // laravel-monitor 454: ->all() — ver docblock de `getBlockedPaths`.
             'data' => $items,
             'meta' => [
                 'page' => $paginator->currentPage(),
@@ -2393,7 +2413,9 @@ class MonitorController extends Controller
                 ->paginate($perPage, ['id', 'ip', 'paths', 'scraper', 'created_at', 'updated_at'], 'page', $page);
 
             return [
-                'data' => $paginator->items(),
+                // laravel-monitor 454: nunca guardar models Eloquent no
+                // cache — ver docblock de `getBlockedPaths`.
+                'data' => collect($paginator->items())->map->toArray()->all(),
                 'meta' => [
                     'page' => $paginator->currentPage(),
                     'per_page' => $paginator->perPage(),
@@ -3746,7 +3768,9 @@ class MonitorController extends Controller
                 ->paginate($perPage, ['ip', 'source', 'created_at'], 'page', $page);
 
             return [
-                'data' => $paginator->items(),
+                // laravel-monitor 454: nunca guardar models Eloquent no
+                // cache — ver docblock de `getBlockedPaths`.
+                'data' => collect($paginator->items())->map->toArray()->all(),
                 'meta' => [
                     'page' => $paginator->currentPage(),
                     'per_page' => $paginator->perPage(),
@@ -3774,6 +3798,27 @@ class MonitorController extends Controller
      * ponto de nunca coincidir com o set esperado — bug de produção
      * reportado como "Sync trap paths reaplica tudo a cada execução"
      * (home-page 443).
+     *
+     * laravel-monitor 454: até a v0.79.0, `'data'` guardava
+     * `$paginator->items()` CRU (objetos `MonitorPath`) dentro do valor
+     * cacheado. Com `config('cache.serializable_classes') === false`
+     * (default novo do Laravel 13, presente em amb/360gradi.net-2.0/
+     * amariaastrologa), `Cache::remember` faz `unserialize($payload,
+     * ['allowed_classes' => false])` no HIT — e isso desmonta QUALQUER
+     * objeto (não só Eloquent; `stdClass`/`Illuminate\Support\Collection`
+     * também) em `__PHP_Incomplete_Class`, perdendo os atributos
+     * protegidos (`Model::$attributes`) e quebrando o JSON devolvido no
+     * HIT (consumidor via 0 paths, ex. `ApplyTrapPathsJob` no home-page).
+     * No MISS funcionava normal porque não passa por serialize/
+     * unserialize. Fix: nunca devolver um `Model`/`Collection` de dentro
+     * de um `Cache::remember` — só escalares/arrays puros (aqui,
+     * `collect(...)->map->toArray()->all()`), mesmo shape JSON de antes.
+     * Mesmo fix aplicado a getBlockedIps, getBlockResults,
+     * getApiBlockEvents, getMonitorVisits (cru) e a
+     * buildVisitorsResult/buildBlockedVisitorsResult/buildUsersResult
+     * (que já mapeavam pra array por linha, mas devolviam a
+     * `Collection` inteira sem `->all()`/`->toArray()` final — o mesmo
+     * problema, só que no wrapper, não na linha).
      */
     protected function getBlockedPaths(Request $request)
     {
@@ -3790,7 +3835,7 @@ class MonitorController extends Controller
                 ->paginate($perPage, ['path', 'created_at'], 'page', $page);
 
             return [
-                'data' => $paginator->items(),
+                'data' => collect($paginator->items())->map->toArray()->all(),
                 'meta' => [
                     'page' => $paginator->currentPage(),
                     'per_page' => $paginator->perPage(),
@@ -3801,6 +3846,51 @@ class MonitorController extends Controller
         });
 
         return response()->json(['success' => true] + $result);
+    }
+
+    /**
+     * laravel-monitor 455: export NÃO paginado de todo path com
+     * `status = 'trap'` (só `path`, ordenado por `id`) — pro sync por
+     * diff do consumidor (`CollectTrapPathsJob`/home-page 456), que até
+     * aqui precisava paginar `getBlockedPaths` inteira (até ~40 requests
+     * HTTP por site, 3-4min pro total de 5 sites) só pra montar o set
+     * completo já conhecido. Sem paginação: o cliente lê tudo numa
+     * chamada só e faz o diff localmente.
+     *
+     * Teto configurável (`monitor.trap_paths_export_limit`, default
+     * 20000) — nunca falha a request, só corta e marca `truncated: true`
+     * (ordenado por `id` asc, então o corte sempre tira as entradas MAIS
+     * RECENTES, nunca as mais antigas; um consumidor que veja
+     * `truncated` sabe que o set devolvido não é completo e não deve
+     * tratá-lo como o set verdadeiro, ver README).
+     *
+     * Deliberadamente SEM `Cache::remember`: dataset pode chegar a
+     * `trap_paths_export_limit` linhas, e cachear um array desse
+     * tamanho (ainda que já escalar/array puro, ver laravel-monitor 454)
+     * não paga o custo de memória do cache store pra uma action cujo
+     * cliente (sync por diff) já espera chamar raramente, não a cada
+     * carga de dashboard.
+     */
+    protected function getAllTrapPaths(Request $request)
+    {
+        $limit = max(1, (int) config('monitor.trap_paths_export_limit', 20000));
+
+        $paths = MonitorPath::where('status', 'trap')
+            ->orderBy('id')
+            ->limit($limit + 1)
+            ->pluck('path');
+
+        $truncated = $paths->count() > $limit;
+
+        if ($truncated) {
+            $paths = $paths->take($limit);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $paths->values()->all(),
+            'truncated' => $truncated,
+        ]);
     }
 
     /**
@@ -3885,9 +3975,10 @@ class MonitorController extends Controller
                 'name' => $contact['name'],
                 'email' => $contact['email'],
             ];
-        })->values();
+        })->values()->all();
 
         return [
+            // laravel-monitor 454: ->all() — ver docblock de `getBlockedPaths`.
             'data' => $items,
             'meta' => [
                 'page' => $paginator->currentPage(),
@@ -4580,6 +4671,172 @@ class MonitorController extends Controller
             'paths' => $flagged,
             'rejected' => $rejected,
             'blocked_ips' => array_keys($blockedIps),
+        ]);
+    }
+
+    /**
+     * Tamanho de lote usado pelas queries `whereIn`/inserts de
+     * `addTrapPaths` — protege contra um lote gigante (ex: diff inicial
+     * de um site com muitos paths pendentes) virar uma única query com
+     * milhares de placeholders.
+     */
+    protected const ADD_TRAP_PATHS_CHUNK = 500;
+
+    /**
+     * laravel-monitor 455: metade "escrita" do sync por diff de trap
+     * paths — par de `getAllTrapPaths` (home-page `ApplyTrapPathsJob`,
+     * task 456). Ao contrário de `flagScraperPaths`, que faz
+     * `updateOrCreate` (SOBRESCREVE um path `safe` existente), esta
+     * action é ADD-ONLY: decidir se um path é seguro/limpo é
+     * responsabilidade do SITE (não do set global calculado pelo
+     * home-page), então um path já revisado como `safe` aqui nunca é
+     * sobrescrito.
+     *
+     * Para cada path recebido, nesta ordem de prioridade:
+     * 1. já `status = 'trap'` → `already_trap` (idempotente, nada muda).
+     * 2. já `status = 'safe'` → `skipped_safe` (NUNCA sobrescrito).
+     * 3. o site tem pelo menos um hit registrado (`monitor_page_hits`)
+     *    para esse path EXATO sem nenhum 404 — mesmo critério do filtro
+     *    `clean` de `getPages`/`buildPagesResult()` (`not_found` nunca
+     *    true), só que consultado aqui apenas para os paths recebidos,
+     *    nunca a tabela inteira → `skipped_clean` (o path resolve de
+     *    verdade neste site; marcá-lo trap bloquearia uma página real).
+     *    Path sem nenhum `monitor_page_hits` (nunca visitado aqui) não
+     *    cai neste caso — sem essa evidência, vira trap como qualquer
+     *    outro novo.
+     * 4. resto → inserido como `trap` novo (`applied`).
+     *
+     * Mesma normalização de `flagScraperPaths` (`normalizePathInput`,
+     * dedup) e mesma invalidação de cache (`monitor:blocked-path:{path}`
+     * por path aplicado + versão de `getBlockedPaths`/getPages via
+     * `invalidatePagesCache`/`invalidateListingsCache`). Processado em
+     * lotes de `ADD_TRAP_PATHS_CHUNK` (queries `whereIn`/`insert`), pra
+     * aguentar um diff inicial grande sem uma query gigante.
+     *
+     * Deliberadamente NÃO chama `resolveScraperPathTargets()`/checa rota
+     * viva como `flagScraperPath(s)` faz — aquele check existe pra
+     * proteger quem está flagando AGORA, no site de origem, de acertar
+     * uma rota própria; aqui os paths já vieram pré-filtrados pelo set
+     * global (união de vários sites) e o critério `clean` acima (baseado
+     * em tráfego REAL já observado, não em rotas registradas) já cobre
+     * "este site serve isto de verdade" sem precisar resolver rotas.
+     */
+    protected function addTrapPaths(Request $request)
+    {
+        $paths = $request->input('paths', []);
+
+        if (! is_array($paths) || empty($paths)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No paths provided',
+            ], 422);
+        }
+
+        $normalized = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path)) {
+                continue;
+            }
+
+            $path = $this->normalizePathInput($path);
+
+            if ($path === '') {
+                continue;
+            }
+
+            $normalized[] = $path;
+        }
+
+        $normalized = array_values(array_unique($normalized));
+
+        if (empty($normalized)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No valid paths provided',
+            ], 422);
+        }
+
+        $existingStatuses = [];
+        $cleanPaths = [];
+
+        foreach (array_chunk($normalized, self::ADD_TRAP_PATHS_CHUNK) as $chunk) {
+            MonitorPath::whereIn('path', $chunk)
+                ->pluck('status', 'path')
+                ->each(function ($status, $path) use (&$existingStatuses) {
+                    $existingStatuses[$path] = $status;
+                });
+
+            DB::table('monitor_page_hits')
+                ->whereIn('path', $chunk)
+                ->select('path')
+                ->groupBy('path')
+                ->havingRaw('MAX(not_found) = 0')
+                ->pluck('path')
+                ->each(function ($path) use (&$cleanPaths) {
+                    $cleanPaths[$path] = true;
+                });
+        }
+
+        $toInsert = [];
+        $alreadyTrap = 0;
+        $skippedSafe = 0;
+        $skippedClean = 0;
+
+        foreach ($normalized as $path) {
+            $status = $existingStatuses[$path] ?? null;
+
+            if ($status === 'trap') {
+                $alreadyTrap++;
+
+                continue;
+            }
+
+            if ($status === 'safe') {
+                $skippedSafe++;
+
+                continue;
+            }
+
+            if (isset($cleanPaths[$path])) {
+                $skippedClean++;
+
+                continue;
+            }
+
+            $toInsert[] = $path;
+        }
+
+        $applied = [];
+
+        foreach (array_chunk($toInsert, self::ADD_TRAP_PATHS_CHUNK) as $chunk) {
+            $now = now();
+
+            MonitorPath::query()->insertOrIgnore(array_map(fn (string $path) => [
+                'path' => $path,
+                'status' => 'trap',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ], $chunk));
+
+            foreach ($chunk as $path) {
+                Cache::forget("monitor:blocked-path:{$path}");
+            }
+
+            $applied = array_merge($applied, $chunk);
+        }
+
+        if (! empty($applied)) {
+            $this->invalidatePagesCache();
+            $this->invalidateListingsCache();
+        }
+
+        return response()->json([
+            'success' => true,
+            'applied' => $applied,
+            'already_trap' => $alreadyTrap,
+            'skipped_safe' => $skippedSafe,
+            'skipped_clean' => $skippedClean,
         ]);
     }
 

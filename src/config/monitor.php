@@ -2,7 +2,7 @@
 
 return [
 
-    'version' => '0.79.0',
+    'version' => '0.80.0',
 
     // Interface/dashboard SaaS hospedado (monitor.cantagalo.it): quando
     // `true`, registra a rota pública do pacote (`/monitor/handler`,
@@ -246,6 +246,15 @@ return [
     // (contador próprio, monitor:listings:version), incrementado em
     // updateBlockedIps/unblockIp/flagScraperPath/unflagPath.
     'listings_cache_ttl_minutes' => 5,
+
+    // laravel-monitor 455: teto de linhas devolvidas por getAllTrapPaths
+    // (export NÃO paginado de todo path com status='trap', pro sync por
+    // diff do consumidor — ver README "Trap paths diff sync"). Acima
+    // deste teto a resposta vem cortada (ordenada por `id`, as mais
+    // antigas primeiro) com `truncated: true`, nunca falha a request.
+    // getAllTrapPaths não é cacheado (dataset pode ser grande — ver
+    // docblock do método).
+    'trap_paths_export_limit' => 20000,
 
     // Formato usado por monitor:export-denylist e pela action
     // `exportDenylist` da API quando --format/format não é passado.
