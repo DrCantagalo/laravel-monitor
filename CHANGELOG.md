@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.81.0] - 2026-11-17
+### Fixed
+- **`addTrapPaths` (trap sync from home-page) could turn a real route into
+  a trap.** Its only guard against real pages was traffic evidence
+  (`monitor_page_hits` with no 404), so a registered route with no
+  recorded hits went in as a new trap. Seen in production: `admin` was
+  (correctly) a trap on 360gradi/amariaastrologa, the sync pushed it to
+  ed.eco.br, where `admin` is the admin dashboard, and the admin's own IP
+  was blocked on the next visit. `addTrapPaths` now also checks this
+  site's route table (`PathsAuditor::liveRouteMatches`, same compiled
+  regex + catch-all exclusion as `monitor:audit-paths`) and reports those
+  paths as the new `skipped_route` count.
+- **`flagScraperPath`/`flagScraperPaths`: the "live route" refusal was
+  traffic-only too.** Same blind spot; `resolveScraperPathTargets()` now
+  checks the route table first.
+
+---
+
 ## [0.80.0] - 2026-11-06
 ### Fixed
 - **`getBlockedIps`/`getBlockedPaths`/`getBlockResults`/`getApiBlockEvents`/

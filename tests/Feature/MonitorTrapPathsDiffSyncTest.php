@@ -6,6 +6,7 @@ use Drcantagalo\LaravelMonitor\Models\Monitor;
 use Drcantagalo\LaravelMonitor\Models\MonitorPath;
 use Drcantagalo\LaravelMonitor\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
 
 /**
  * laravel-monitor 455: `getAllTrapPaths` (export não paginado) +
@@ -118,6 +119,39 @@ class MonitorTrapPathsDiffSyncTest extends TestCase
         $this->assertSame([], $response->json('applied'));
         $this->assertSame(1, $response->json('skipped_clean'));
         $this->assertDatabaseMissing('monitor_paths', ['path' => 'example.com/real-page']);
+    }
+
+    public function test_add_trap_paths_skips_a_registered_route_with_no_recorded_traffic(): void
+    {
+        // 0.81.0: bug real 2026-11-17 - `admin` (trap em outros sites)
+        // chegou via sync no ed.eco.br, onde é o painel mas sem nenhum hit
+        // em monitor_page_hits; o critério `clean` não via e virou trap.
+        Route::get('admin', fn () => 'dashboard');
+        Route::get('admin/coupons/{coupon}', fn () => 'coupon');
+        // catch-all nunca conta como "rota real" (mesma regra do audit).
+        Route::any('{any?}', fn () => 'ok')->where('any', '.*');
+
+        $response = $this->callHandler([
+            'action' => 'addTrapPaths',
+            'paths' => ['admin', '/admin/coupons/7', 'wp-login.php'],
+        ]);
+
+        $response->assertOk();
+        $this->assertSame(['wp-login.php'], $response->json('applied'));
+        $this->assertSame(2, $response->json('skipped_route'));
+        $this->assertDatabaseMissing('monitor_paths', ['path' => 'admin']);
+        $this->assertDatabaseMissing('monitor_paths', ['path' => 'admin/coupons/7']);
+        $this->assertDatabaseHas('monitor_paths', ['path' => 'wp-login.php', 'status' => 'trap']);
+    }
+
+    public function test_flag_scraper_path_refuses_a_registered_route_with_no_recorded_traffic(): void
+    {
+        Route::get('admin', fn () => 'dashboard');
+
+        $response = $this->callHandler(['action' => 'flagScraperPath', 'path' => 'admin']);
+
+        $response->assertStatus(422);
+        $this->assertDatabaseMissing('monitor_paths', ['path' => 'admin']);
     }
 
     public function test_add_trap_paths_applies_a_path_that_was_only_ever_seen_as_404(): void

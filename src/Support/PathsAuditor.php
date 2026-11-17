@@ -76,6 +76,48 @@ class PathsAuditor
         return $findings;
     }
 
+    /**
+     * laravel-monitor 0.81.0: guard de rota REAL (route table) pra quem
+     * grava `trap` - `addTrapPaths` (sync global vindo do home-page) e
+     * `flagScraperPath(s)`. Até aqui esses caminhos só tinham o guard de
+     * TRÁFEGO (`monitor_page_hits` sem 404), que não vê rota real sem
+     * hit registrado: bug real 2026-11-17, `admin` virou trap em
+     * 360gradi/amariaastrologa (lá é 404 de scanner, correto), o sync
+     * espalhou pro ed.eco.br - onde `admin` é o painel (`admin.dashboard`)
+     * mas não tinha nenhum hit em `monitor_page_hits` - e o próprio admin
+     * do site foi bloqueado no primeiro acesso.
+     *
+     * Mesmo regex compilado/exclusão de catch-all do `audit()`. Recebe
+     * paths já normalizados (sem `/` inicial) e devolve `$path => $uri`
+     * só dos que batem em alguma rota registrada.
+     *
+     * @param  array<int, string>  $paths
+     * @return array<string, string>
+     */
+    public static function liveRouteMatches(array $paths): array
+    {
+        if (empty($paths)) {
+            return [];
+        }
+
+        $routes = self::compiledRoutes();
+        $matches = [];
+
+        foreach ($paths as $path) {
+            $subject = '/'.ltrim($path, '/');
+
+            $routeMatch = $routes->first(
+                fn ($route) => @preg_match($route['regex'], $subject) === 1
+            );
+
+            if ($routeMatch !== null) {
+                $matches[$path] = $routeMatch['uri'];
+            }
+        }
+
+        return $matches;
+    }
+
     private static function finding(MonitorPath $row, string $matchedUri, string $source): array
     {
         return [

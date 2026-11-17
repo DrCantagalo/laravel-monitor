@@ -1354,11 +1354,20 @@ class MonitorController extends Controller
     {
         $liveIndex = $this->pageHitsSuffixIndex(false);
         $notFoundIndex = $this->pageHitsSuffixIndexAll(true);
+        // laravel-monitor 0.81.0: além do tráfego, a route table - rota
+        // real sem nenhum hit registrado não deixa rastro no índice acima.
+        $routeMatches = PathsAuditor::liveRouteMatches($paths);
 
         $liveRouteMatches = [];
         $matchedKeysByPath = [];
 
         foreach ($paths as $path) {
+            if (isset($routeMatches[$path])) {
+                $liveRouteMatches[$path] = $routeMatches[$path];
+
+                continue;
+            }
+
             if (isset($liveIndex[$path])) {
                 $liveRouteMatches[$path] = $liveIndex[$path];
 
@@ -4713,13 +4722,13 @@ class MonitorController extends Controller
      * lotes de `ADD_TRAP_PATHS_CHUNK` (queries `whereIn`/`insert`), pra
      * aguentar um diff inicial grande sem uma query gigante.
      *
-     * Deliberadamente NÃO chama `resolveScraperPathTargets()`/checa rota
-     * viva como `flagScraperPath(s)` faz — aquele check existe pra
-     * proteger quem está flagando AGORA, no site de origem, de acertar
-     * uma rota própria; aqui os paths já vieram pré-filtrados pelo set
-     * global (união de vários sites) e o critério `clean` acima (baseado
-     * em tráfego REAL já observado, não em rotas registradas) já cobre
-     * "este site serve isto de verdade" sem precisar resolver rotas.
+     * Não chama `resolveScraperPathTargets()` (não bloqueia IP nenhum -
+     * é só sync de lista), mas desde 0.81.0 checa a ROUTE TABLE deste site
+     * (`PathsAuditor::liveRouteMatches`) → `skipped_route`, entre os
+     * casos 2 e 3 acima. Antes só o critério `clean` (tráfego) protegia
+     * rota real, e rota sem hit registrado passava: `admin` (trap correto
+     * em 360gradi/amariaastrologa) virou trap no ed.eco.br, onde é o
+     * painel, e bloqueou o próprio admin no 1º acesso (2026-11-17).
      */
     protected function addTrapPaths(Request $request)
     {
@@ -4782,6 +4791,8 @@ class MonitorController extends Controller
         $alreadyTrap = 0;
         $skippedSafe = 0;
         $skippedClean = 0;
+        $skippedRoute = 0;
+        $routeMatches = PathsAuditor::liveRouteMatches($normalized);
 
         foreach ($normalized as $path) {
             $status = $existingStatuses[$path] ?? null;
@@ -4794,6 +4805,12 @@ class MonitorController extends Controller
 
             if ($status === 'safe') {
                 $skippedSafe++;
+
+                continue;
+            }
+
+            if (isset($routeMatches[$path])) {
+                $skippedRoute++;
 
                 continue;
             }
@@ -4837,6 +4854,7 @@ class MonitorController extends Controller
             'already_trap' => $alreadyTrap,
             'skipped_safe' => $skippedSafe,
             'skipped_clean' => $skippedClean,
+            'skipped_route' => $skippedRoute,
         ]);
     }
 
