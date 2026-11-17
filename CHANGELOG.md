@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [0.81.0] - 2026-11-17
+## [0.82.0] - 2026-11-17
+Note: `v0.81.0` is a stray tag on the `v0.80.0` commit (same code); skip it.
+
 ### Fixed
 - **`addTrapPaths` (trap sync from home-page) could turn a real route into
   a trap.** Its only guard against real pages was traffic evidence

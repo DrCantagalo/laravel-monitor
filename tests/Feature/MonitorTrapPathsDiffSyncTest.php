@@ -123,7 +123,7 @@ class MonitorTrapPathsDiffSyncTest extends TestCase
 
     public function test_add_trap_paths_skips_a_registered_route_with_no_recorded_traffic(): void
     {
-        // 0.81.0: bug real 2026-11-17 - `admin` (trap em outros sites)
+        // 0.82.0: bug real 2026-11-17 - `admin` (trap em outros sites)
         // chegou via sync no ed.eco.br, onde é o painel mas sem nenhum hit
         // em monitor_page_hits; o critério `clean` não via e virou trap.
         Route::get('admin', fn () => 'dashboard');

@@ -1354,7 +1354,7 @@ class MonitorController extends Controller
     {
         $liveIndex = $this->pageHitsSuffixIndex(false);
         $notFoundIndex = $this->pageHitsSuffixIndexAll(true);
-        // laravel-monitor 0.81.0: além do tráfego, a route table - rota
+        // laravel-monitor 0.82.0: além do tráfego, a route table - rota
         // real sem nenhum hit registrado não deixa rastro no índice acima.
         $routeMatches = PathsAuditor::liveRouteMatches($paths);
 
@@ -4723,7 +4723,7 @@ class MonitorController extends Controller
      * aguentar um diff inicial grande sem uma query gigante.
      *
      * Não chama `resolveScraperPathTargets()` (não bloqueia IP nenhum -
-     * é só sync de lista), mas desde 0.81.0 checa a ROUTE TABLE deste site
+     * é só sync de lista), mas desde 0.82.0 checa a ROUTE TABLE deste site
      * (`PathsAuditor::liveRouteMatches`) → `skipped_route`, entre os
      * casos 2 e 3 acima. Antes só o critério `clean` (tráfego) protegia
      * rota real, e rota sem hit registrado passava: `admin` (trap correto

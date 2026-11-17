@@ -77,7 +77,7 @@ class PathsAuditor
     }
 
     /**
-     * laravel-monitor 0.81.0: guard de rota REAL (route table) pra quem
+     * laravel-monitor 0.82.0: guard de rota REAL (route table) pra quem
      * grava `trap` - `addTrapPaths` (sync global vindo do home-page) e
      * `flagScraperPath(s)`. Até aqui esses caminhos só tinham o guard de
      * TRÁFEGO (`monitor_page_hits` sem 404), que não vê rota real sem
